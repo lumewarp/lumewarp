@@ -11,7 +11,7 @@ from __future__ import annotations
 from sqlalchemy import select
 
 from lumewarp_control_plane.auth import sessions
-from lumewarp_control_plane.compiler import compile_scope
+from lumewarp_control_plane.compiler import compile_zone
 from lumewarp_control_plane.models import CatalogName
 from tests.api.helpers import ADMIN_AUTH as H
 from tests.api.helpers import auth, suffix, user_with_token
@@ -292,7 +292,7 @@ async def test_compiled_snapshot_carries_the_level_and_capability(
     plain = _ok(_router(client, [model], name=f"r-{suffix()}"))
 
     committed.expire_all()
-    compiled = await compile_scope(committed, api_settings.scope, require_local_membership=True)
+    compiled = await compile_zone(committed, api_settings.zone, require_local_membership=True)
     routers = {router.name: router for router in compiled.snapshot.routers}
     assert routers[named["name"]].reasoning_default_level == "medium"
     assert routers[plain["name"]].reasoning_default_level == ""

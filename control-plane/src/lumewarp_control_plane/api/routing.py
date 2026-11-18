@@ -2,7 +2,7 @@
 
 Router validation mirrors the gateway (snapshot.rs::validate / validate_split and
 router.rs::RoutingTable::compile) so a write the API accepts never makes the gateway NACK.
-Every catalog write holds the scope lock, so the name and reference checks are exact.
+Every catalog write holds the hierarchy lock, so the name and reference checks are exact.
 """
 
 from __future__ import annotations
@@ -24,8 +24,9 @@ from lumewarp_control_plane.api.common import (
     SessionDep,
     SettingsDep,
     conflict,
+    default_zone,
     enqueue_recompile,
-    lock_scope,
+    lock_hierarchy,
     mutation,
     uuid_page,
     validation_error,
@@ -191,7 +192,7 @@ async def _validate_upstream_auth(
             auth.plugin,
             auth.params,
             force=force,
-            scope=settings.scope,
+            zone=default_zone(settings),
         )
     except PluginRejected as exc:
         raise validation_error(f"auth.{exc.field}", exc.message) from exc
@@ -230,7 +231,8 @@ async def _reports(session: AsyncSession, settings: Settings, column) -> list[di
         (
             await session.scalars(
                 select(column).where(
-                    GatewaySession.scope == settings.scope, GatewaySession.connected.is_(True)
+                    GatewaySession.zone == default_zone(settings),
+                    GatewaySession.connected.is_(True),
                 )
             )
         ).all()
@@ -315,7 +317,7 @@ async def _gateway_probe(
         )
     try:
         result = await registry.probe(
-            settings.scope,
+            default_zone(settings),
             upstream.auth_plugin,
             upstream.name,
             model,
@@ -552,8 +554,8 @@ async def _revalidate_referencing_routers(session: AsyncSession, model_id: uuid.
         )
 
 
-async def _load_spec(session: AsyncSession, scope: str, row: Router) -> RouterSpec:
-    out = await _router_out(session, scope, row)
+async def _load_spec(session: AsyncSession, zone: str, row: Router) -> RouterSpec:
+    out = await _router_out(session, zone, row)
     return RouterSpec(
         name=row.name,
         strategy=out.strategy,
@@ -650,7 +652,7 @@ async def _validate_strategy(
             spec.params,
             members=member_settings(spec.members, spec.traffic_split),
             force=force,
-            scope=settings.scope,
+            zone=default_zone(settings),
         )
     except PluginRejected as exc:
         raise validation_error(exc.field, exc.message) from exc
@@ -732,9 +734,9 @@ def _router_out_problems(
     return registry.router_problems(row.strategy, row.params, member_settings(members, splits))
 
 
-async def _routers_out(session: AsyncSession, scope: str, rows: list[Router]) -> list[RouterOut]:
+async def _routers_out(session: AsyncSession, zone: str, rows: list[Router]) -> list[RouterOut]:
     ids = [row.id for row in rows]
-    registry = await load_plugins(session, scope)
+    registry = await load_plugins(session, zone)
     members: dict[uuid.UUID, list[RouterMemberOut]] = {i: [] for i in ids}
     fallbacks: dict[uuid.UUID, list[uuid.UUID]] = {i: [] for i in ids}
     splits: dict[uuid.UUID, list[TrafficSplitOut]] = {i: [] for i in ids}
@@ -834,8 +836,8 @@ async def _routers_out(session: AsyncSession, scope: str, rows: list[Router]) ->
     ]
 
 
-async def _router_out(session: AsyncSession, scope: str, row: Router) -> RouterOut:
-    return (await _routers_out(session, scope, [row]))[0]
+async def _router_out(session: AsyncSession, zone: str, row: Router) -> RouterOut:
+    return (await _routers_out(session, zone, [row]))[0]
 
 
 # --------------------------------------------------------------------------- upstreams
@@ -876,7 +878,7 @@ async def create_upstream(
     """
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         forced: list[str] = []
         if body.auth is not None:
             forced = await _validate_upstream_auth(session, settings, body.auth, force=body.force)
@@ -1072,7 +1074,7 @@ async def update_upstream(
     await authz.require(Action.ROUTING_MANAGE)
     _non_null(body, "name", "kind", "base_url", "timeout_ms", "stream_usage_mode")
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         row = await session.get(Upstream, upstream_id)
         if row is None:
             raise not_found("upstream not found")
@@ -1153,7 +1155,7 @@ async def delete_upstream(
     """Requires an installation admin. Answers 409 while the upstream still has models."""
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         row = await session.get(Upstream, upstream_id)
         if row is None:
             raise not_found("upstream not found")
@@ -1238,7 +1240,7 @@ async def create_model(
     """
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         upstream = await session.get(Upstream, body.upstream_id)
         if upstream is None:
             raise validation_error("upstream_id", "unknown upstream")
@@ -1418,7 +1420,7 @@ async def update_model(
     await authz.require(Action.ROUTING_MANAGE)
     _non_null(body, "name", "upstream_id", "upstream_model", "model_type")
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         row = await session.get(Model, model_id)
         if row is None:
             raise not_found("model not found")
@@ -1534,7 +1536,7 @@ async def delete_model(
     """
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         row = await session.get(Model, model_id)
         if row is None:
             raise not_found("model not found")
@@ -1603,7 +1605,7 @@ async def create_alias(
     """
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         kind = await _alias_target(session, body.target)
         name = await _claim(session, body.name, CatalogKind.ALIAS)
         row = Alias(name_id=name.id, target_name_id=body.target, target_kind=kind.value)
@@ -1644,7 +1646,7 @@ async def update_alias(
     await authz.require(Action.ROUTING_MANAGE)
     _non_null(body, "name", "target")
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         row = await session.get(Alias, alias_id)
         if row is None:
             raise not_found("alias not found")
@@ -1692,7 +1694,7 @@ async def delete_alias(
     """Requires an installation admin. Grants of the alias are removed with it."""
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         row = await session.get(Alias, alias_id)
         if row is None:
             raise not_found("alias not found")
@@ -1725,7 +1727,7 @@ async def list_routers(
     stmt = select(Router).order_by(Router.name_id)
     rows, next_cursor = await uuid_page(session, stmt, Router.name_id, limit, cursor)
     return Page[RouterOut](
-        items=await _routers_out(session, settings.scope, rows), next_cursor=next_cursor
+        items=await _routers_out(session, default_zone(settings), rows), next_cursor=next_cursor
     )
 
 
@@ -1761,7 +1763,7 @@ async def create_router(
         reasoning_default_level=body.reasoning_default_level,
     )
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         await _validate_spec(session, spec)
         forced = await _validate_strategy(session, settings, spec, force=body.force)
         name = await _claim(session, body.name, CatalogKind.ROUTER)
@@ -1798,7 +1800,7 @@ async def create_router(
         )
         _audit_forced(session, authz, row, spec.strategy, forced)
         await enqueue_recompile(session, settings, "api.router.create")
-    return await _router_out(session, settings.scope, row)
+    return await _router_out(session, default_zone(settings), row)
 
 
 @router.get("/routers/{router_id}", response_model=RouterOut, operation_id="getRouter")
@@ -1810,7 +1812,7 @@ async def get_router(
     row = await session.get(Router, router_id)
     if row is None:
         raise not_found("router not found")
-    return await _router_out(session, settings.scope, row)
+    return await _router_out(session, default_zone(settings), row)
 
 
 @router.patch("/routers/{router_id}", response_model=RouterOut, operation_id="updateRouter")
@@ -1838,11 +1840,11 @@ async def update_router(
     )
     fields = body.model_fields_set
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         row = await session.get(Router, router_id)
         if row is None:
             raise not_found("router not found")
-        spec = await _load_spec(session, settings.scope, row)
+        spec = await _load_spec(session, default_zone(settings), row)
         for name in fields - {"name", "force"}:
             setattr(spec, name, getattr(body, name))
         # Params belong to one strategy: changing it drops them unless the body sends new ones.
@@ -1901,7 +1903,7 @@ async def update_router(
         )
         _audit_forced(session, authz, row, spec.strategy, forced)
         await enqueue_recompile(session, settings, "api.router.update")
-    return await _router_out(session, settings.scope, row)
+    return await _router_out(session, default_zone(settings), row)
 
 
 @router.delete(
@@ -1921,7 +1923,7 @@ async def delete_router(
     """
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         row = await session.get(Router, router_id)
         if row is None:
             raise not_found("router not found")

@@ -17,7 +17,7 @@ def test_generated_protos_import() -> None:
     )
     from lumewarp_control_plane._proto.lumewarp.usage.v1 import usage_pb2, usage_pb2_grpc
 
-    snap = snapshot_pb2.Snapshot(version=3, scope="default")
+    snap = snapshot_pb2.Snapshot(version=3, zone="default")
     assert snapshot_pb2.Snapshot.FromString(snap.SerializeToString()) == snap
     assert config_service_pb2.Delta(base_version=1, version=2).version == 2
     assert usage_pb2.UsageEvent(request_id="x").request_id == "x"

@@ -5,7 +5,7 @@ owner's effective set and compiled as org ∩ team ∩ owner ∩ key.
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumewarp_control_plane.compiler import compile_scope
+from lumewarp_control_plane.compiler import compile_zone
 from lumewarp_control_plane.models import AuditLog, ModelAccess, TeamRole
 from tests.api.helpers import ADMIN_AUTH, auth, suffix, user_with_token
 from tests.factories import (
@@ -20,7 +20,7 @@ from tests.factories import (
 
 async def compiled_key(api_engine, key_id: str):
     async with AsyncSession(api_engine, expire_on_commit=False) as session:
-        compiled = await compile_scope(session, "api-test", require_local_membership=True)
+        compiled = await compile_zone(session, "api-test", require_local_membership=True)
     return next(k for k in compiled.snapshot.api_keys if k.key_id == key_id)
 
 

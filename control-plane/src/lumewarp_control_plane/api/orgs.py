@@ -32,7 +32,7 @@ from lumewarp_control_plane.api.common import (
     ensure_grants_managed,
     ensure_not_null,
     ensure_range,
-    lock_scope,
+    lock_hierarchy,
     mutation,
     parse_uuid_cursor,
     require_signed_in,
@@ -193,7 +193,7 @@ async def update_org(
     await authz.require(Action.ORG_MANAGE)
     ensure_not_null(body, "name")
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         row = await session.get(Org, org_id, with_for_update=True)
         if row is None:
             raise not_found("org not found")
@@ -249,7 +249,7 @@ async def delete_org(
     """Archive an org. Irreversible; refused while it has a live team."""
     await authz.require(Action.ORG_MANAGE)
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         row = await session.get(Org, org_id, with_for_update=True)
         if row is None:
             raise not_found("org not found")
@@ -409,7 +409,7 @@ async def delete_org_admin(
     """
     await authz.require(Action.ORG_MANAGE)
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         org = await _org_or_404(session, org_id)
         if org.deleted_at is not None:
             raise conflict("the org is archived")

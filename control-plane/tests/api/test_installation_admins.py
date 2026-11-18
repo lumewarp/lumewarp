@@ -26,10 +26,10 @@ from lumewarp_control_plane.models import (
     InstallationAdmin,
     InstallationRole,
     PersonalAccessToken,
-    Scope,
     User,
     UserIdentity,
     UserSession,
+    Zone,
 )
 from lumewarp_control_plane.security import (
     Principal,
@@ -74,7 +74,7 @@ async def roles_engine(roles_url: str) -> AsyncIterator[AsyncEngine]:
 @pytest.fixture(scope="module")
 async def roles_scope(roles_engine: AsyncEngine) -> None:
     async with AsyncSession(roles_engine) as session, session.begin():
-        session.add(Scope(name=SCOPE))
+        session.add(Zone(name=SCOPE))
 
 
 @pytest.fixture(scope="module")
@@ -85,7 +85,7 @@ def roles_settings(roles_url: str, roles_scope: None) -> Settings:
         break_glass_password=BREAK_GLASS_PASSWORD,
         dev_mode=True,
         session_cookie_secure=False,
-        scope=SCOPE,
+        zone=SCOPE,
     )
 
 

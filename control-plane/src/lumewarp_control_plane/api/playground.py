@@ -42,6 +42,7 @@ from lumewarp_control_plane.models import (
     RouterSplitMember,
     ServiceAccount,
     Team,
+    Zone,
 )
 from lumewarp_control_plane.quota import key_models
 from lumewarp_control_plane.security import PrincipalKind
@@ -289,8 +290,9 @@ async def get_playground(authz: Authz, session: SessionDep, settings: SettingsDe
         for name, levels in (await _reasoning(session)).items()
         if name in callable_names
     }
+    zone = await session.get(Zone, settings.zone)
     return PlaygroundOut(
-        enabled=bool(settings.playground_gateway_url and settings.encryption_key),
+        enabled=bool(zone is not None and zone.playground_gateway_url and settings.encryption_key),
         keys=keys,
         reasoning=reasoning,
     )
@@ -346,7 +348,9 @@ async def chat_completions(
             raise HTTPException(404, "key not found")
     else:
         raise HTTPException(404, "key not found")
-    if not settings.playground_gateway_url or not settings.encryption_key:
+    zone = await session.get(Zone, settings.zone)
+    playground_gateway_url = zone.playground_gateway_url if zone is not None else None
+    if not playground_gateway_url or not settings.encryption_key:
         raise ApiError(503, "playground_disabled", "Playground is not configured")
     body = bytearray()
     async for chunk in request.stream():
@@ -382,7 +386,7 @@ async def chat_completions(
         upstream = await client.send(
             client.build_request(
                 "POST",
-                settings.playground_gateway_url.rstrip("/") + "/v1/chat/completions",
+                playground_gateway_url.rstrip("/") + "/v1/chat/completions",
                 content=bytes(body),
                 headers={
                     "Authorization": f"Bearer {token}",

@@ -11,7 +11,7 @@ import pytest
 from sqlalchemy import select
 
 from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as pb
-from lumewarp_control_plane.compiler.compile import compile_scope
+from lumewarp_control_plane.compiler.compile import compile_zone
 from lumewarp_control_plane.models import AuditLog
 from tests.api.helpers import ADMIN_AUTH as H
 from tests.api.helpers import suffix
@@ -53,7 +53,7 @@ def _create(client, **settings):
 
 async def _wire(committed, api_settings, name: str):
     committed.expire_all()
-    compiled = await compile_scope(committed, api_settings.scope, require_local_membership=True)
+    compiled = await compile_zone(committed, api_settings.zone, require_local_membership=True)
     (model,) = [m for m in compiled.snapshot.models if m.name == name]
     return compiled.snapshot, model
 

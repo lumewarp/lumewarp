@@ -16,7 +16,7 @@ from lumewarp_control_plane.api.common import (
     SettingsDep,
     conflict,
     enqueue_recompile,
-    lock_scope,
+    lock_hierarchy,
     mutation,
     suspend_user_keys,
     uuid_page,
@@ -654,7 +654,7 @@ async def update_user(
     await authz.require(Action.USER_MANAGE)
     _check_not_null(body, "email", "display_name", "is_active")
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         row = await session.get(User, user_id)
         if row is None:
             raise not_found("user not found")
@@ -708,7 +708,7 @@ async def delete_user(
     """
     await authz.require(Action.USER_MANAGE)
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         row = await session.get(User, user_id)
         if row is None:
             raise not_found("user not found")

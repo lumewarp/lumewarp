@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane._proto.lumewarp.usage.v1 import usage_pb2
-from lumewarp_control_plane.compiler import compile_scope
+from lumewarp_control_plane.compiler import compile_zone
 from lumewarp_control_plane.models import ApiKey, KeyLifecycle, Team, TeamMember, TeamRole
 from lumewarp_control_plane.usage import ingest
 from tests.api.helpers import ADMIN_AUTH, auth, create_org, suffix, user_with_token
@@ -124,7 +124,7 @@ async def test_archive_revokes_keys_and_deactivates_service_accounts(
 
     # The compiler leaves the team and its keys out (all keys are revoked).
     async with AsyncSession(committed.bind) as session:
-        compiled = await compile_scope(session, api_scope, require_local_membership=True)
+        compiled = await compile_zone(session, api_scope, require_local_membership=True)
     assert str(team_id) not in {row.id for row in compiled.snapshot.teams}
     assert {str(key_id), str(account_key_id)} & {
         row.key_id for row in compiled.snapshot.api_keys
@@ -164,7 +164,7 @@ async def test_archive_keeps_members_and_late_usage_ingests(client, committed, a
         outcome=usage_pb2.REQUEST_OUTCOME_COMPLETED,
     )
     async with AsyncSession(committed.bind) as session, session.begin():
-        assert await ingest(session, "gw-test", [event], scope_name=api_scope) == 1
+        assert await ingest(session, "gw-test", [event], zone_name=api_scope) == 1
     from lumewarp_control_plane.models import UsageTotal
 
     async with AsyncSession(committed.bind) as session:

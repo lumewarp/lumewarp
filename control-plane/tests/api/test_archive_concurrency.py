@@ -35,13 +35,13 @@ async def test_archive_leaves_no_live_key_after_an_in_flight_write(
     key_scope_locked = asyncio.Event()
     key_row_ready = asyncio.Event()
     archive_scope_attempted = asyncio.Event()
-    original_key_lock = keys.lock_scope
-    original_team_lock = teams.lock_scope
+    original_key_lock = keys.lock_hierarchy
+    original_team_lock = teams.lock_hierarchy
     original_get_team = keys.get_team_or_404
     original_get_key = keys._get_key
 
-    async def key_lock(session, settings):
-        await original_key_lock(session, settings)
+    async def key_lock(session):
+        await original_key_lock(session)
         key_scope_locked.set()
 
     async def get_team(session, authz, team_id):
@@ -58,17 +58,17 @@ async def test_archive_leaves_no_live_key_after_an_in_flight_write(
         await archive_scope_attempted.wait()
         return row
 
-    async def team_lock(session, settings):
+    async def team_lock(session):
         await key_row_ready.wait()
         archive_scope_attempted.set()
         # Blocks on the scope row until the key transaction commits, then archives the key
         # that write just left behind.
-        await original_team_lock(session, settings)
+        await original_team_lock(session)
 
-    monkeypatch.setattr(keys, "lock_scope", key_lock)
+    monkeypatch.setattr(keys, "lock_hierarchy", key_lock)
     monkeypatch.setattr(keys, "get_team_or_404", get_team)
     monkeypatch.setattr(keys, "_get_key", get_key)
-    monkeypatch.setattr(teams, "lock_scope", team_lock)
+    monkeypatch.setattr(teams, "lock_hierarchy", team_lock)
 
     request = SimpleNamespace(app=client.app)
 

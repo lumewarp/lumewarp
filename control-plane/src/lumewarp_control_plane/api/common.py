@@ -23,7 +23,6 @@ from lumewarp_control_plane.models import (
     ApiKey,
     KeyLifecycle,
     KeyOwnerKind,
-    Scope,
     Team,
     UserIdentity,
 )
@@ -42,6 +41,16 @@ def app_settings(request: Request) -> Settings:
 
 
 SettingsDep = Annotated[Settings, Depends(app_settings)]
+
+
+def default_zone(settings: Settings) -> str:
+    """The config zone a read or validation uses when no record's zone is known.
+
+    Health reports, plugin validation and Test now are not zone-aware yet (upstreams and
+    deployments get their zone next); keeping the fallback here means that change touches
+    one place. Explicitly zone-scoped endpoints take a `zone` parameter instead.
+    """
+    return settings.zone
 
 
 def app_metrics(request: Request) -> Metrics:
@@ -77,25 +86,24 @@ async def mutation(session: AsyncSession) -> AsyncIterator[None]:
         raise conflict("database constraint violated") from exc
 
 
-async def enqueue_recompile(session: AsyncSession, settings: Settings, reason: str) -> int:
+async def enqueue_recompile(
+    session: AsyncSession, settings: Settings, reason: str, zone: str | None = None
+) -> int:
     try:
-        return await outbox.enqueue_recompile(session, settings.scope, reason)
+        return await outbox.enqueue_recompile(session, reason, zone)
     except LookupError as exc:
-        raise conflict(f"config scope {settings.scope!r} is not initialized") from exc
+        raise conflict("no config zone is initialized") from exc
 
 
-async def lock_scope(session: AsyncSession, settings: Settings) -> None:
-    """Take the scope row lock first thing in a hierarchy mutation.
+async def lock_hierarchy(session: AsyncSession) -> None:
+    """Take the hierarchy lock first thing in a hierarchy mutation.
 
     Narrowing validation reads ancestors and descendants; without the lock a parent
     narrowing and a child widening can both validate against the old state and both commit.
-    Holding it from the start makes the later reads see the latest committed state.
+    One transaction-level advisory lock serializes every hierarchy write without pinning a
+    zone row, so a write that fans out to every zone cannot deadlock against another.
     """
-    locked = await session.scalar(
-        select(Scope.name).where(Scope.name == settings.scope).with_for_update()
-    )
-    if locked is None:
-        raise conflict(f"config scope {settings.scope!r} is not initialized")
+    await outbox.lock_hierarchy(session)
 
 
 def ensure_range(start: datetime, end: datetime) -> None:

@@ -1474,10 +1474,12 @@ export interface paths {
         };
         /**
          * List Gateways
-         * @description One row per gateway process, connected ones first and then by gateway id.
+         * @description One row per gateway process of one zone, connected ones first and then by gateway
+         *     id.
          *
          *     Requires an installation admin. A disconnected gateway stays visible for 24 h after its
-         *     stream ended. Each row names the token its latest Hello authenticated with.
+         *     stream ended. Each row names the token its latest Hello authenticated with. Omit `zone`
+         *     for the default zone.
          */
         get: operations["listGateways"];
         put?: never;
@@ -1497,17 +1499,18 @@ export interface paths {
         };
         /**
          * List Gateway Tokens
-         * @description Gateway tokens of the config scope, newest first, with their connected gateway count.
+         * @description Gateway tokens of one zone, newest first, with their connected gateway count.
          *
-         *     Requires an installation admin. A revoked token stays listed.
+         *     Requires an installation admin. A revoked token stays listed. Omit `zone` for the default
+         *     zone.
          */
         get: operations["listGatewayTokens"];
         put?: never;
         /**
          * Create Gateway Token
-         * @description Create a gateway token (`lwg-…`) with a label. It is not bound to a gateway id, so any
-         *     number of gateways may use it. The secret is in this response only. Requires an
-         *     installation admin.
+         * @description Create a gateway token (`lwg-…`) with a label in a zone (default: the default zone).
+         *     It is not bound to a gateway id, so any number of gateways may use it. The secret is in
+         *     this response only. Requires an installation admin.
          */
         post: operations["createGatewayToken"];
         delete?: never;
@@ -1546,9 +1549,10 @@ export interface paths {
         };
         /**
          * List Config Versions
-         * @description Compiled config versions, newest first. Requires an installation admin.
+         * @description Compiled config versions of one zone, newest first. Requires an installation admin.
          *
-         *     `quarantined` marks the version a gateway rejected; no gateway of the scope is sent it.
+         *     `quarantined` marks the version a gateway rejected; no gateway of the zone is sent it.
+         *     Omit `zone` for the default zone.
          */
         get: operations["listConfigVersions"];
         put?: never;
@@ -1571,15 +1575,70 @@ export interface paths {
         /**
          * Rollback Config
          * @description Restore the routing catalog (upstreams, models, aliases, routers, MCP servers, A2A
-         *     agents) of an earlier version, by id, and publish it as a new version. Requires an
-         *     installation admin. Teams, keys, policies and key states stay as they are now. Answers
-         *     422 when a plugin connected now rejects the restored settings, unless `force` is set.
+         *     agents) of an earlier version, by id, installation-wide: every live zone is recompiled and
+         *     gets the restored catalog as a new version. Requires an installation admin. Teams, keys,
+         *     policies and key states stay as they are now. Answers 422 when a plugin connected now
+         *     rejects the restored settings, unless `force` is set.
          */
         post: operations["rollbackConfig"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/api/v1/zones": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Zones
+         * @description The config zones. Any signed-in caller sees the live ones; an installation admin may
+         *     ask for archived zones too. Archived zones are read-only history.
+         */
+        get: operations["listZones"];
+        put?: never;
+        /**
+         * Create Zone
+         * @description Create a config zone. It starts empty: no gateway serves it and no upstream,
+         *     key or snapshot belongs to it yet. Requires an installation admin.
+         */
+        post: operations["createZone"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/zones/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Archive Zone
+         * @description Archive a zone: revoke its gateway tokens and stop compiling it. Requires an
+         *     installation admin. Refused (409) for the default zone (`LUMEWARP_ZONE`) and while a
+         *     gateway session is still connected; a zone with a live key is refused too once keys
+         *     carry a zone.
+         */
+        delete: operations["archiveZone"];
+        options?: never;
+        head?: never;
+        /**
+         * Update Zone
+         * @description Change a zone's display name, colour, Playground URL or key rules. The zone's `name`
+         *     is immutable. Requires an installation admin.
+         */
+        patch: operations["updateZone"];
         trace?: never;
     };
     "/api/v1/session": {
@@ -2037,8 +2096,8 @@ export interface components {
         };
         /** ConfigVersionOut */
         ConfigVersionOut: {
-            /** Scope */
-            scope: string;
+            /** Zone */
+            zone: string;
             /** Version */
             version: number;
             /** Digest */
@@ -2062,7 +2121,7 @@ export interface components {
             compacted_at: string | null;
             /**
              * Quarantined
-             * @description A gateway rejected this version, so it is withheld from the whole scope.
+             * @description A gateway rejected this version, so it is withheld from the whole zone.
              */
             quarantined: boolean;
         };
@@ -2091,6 +2150,11 @@ export interface components {
          * @description One gateway process: its config stream, version and status.
          */
         GatewayOut: {
+            /**
+             * Zone
+             * @description Config zone this gateway's token serves (`Hello.zone`).
+             */
+            zone: string;
             /**
              * Gateway Id
              * @description `Hello.gateway_id`: the process, stable for its lifetime.
@@ -2177,6 +2241,11 @@ export interface components {
              * @default
              */
             name: string;
+            /**
+             * Zone
+             * @description Config zone the record belongs to; omitted = the default zone.
+             */
+            zone?: string | null;
         };
         /** GatewayTokenCreated */
         GatewayTokenCreated: {
@@ -2191,6 +2260,8 @@ export interface components {
              * Format: uuid
              */
             id: string;
+            /** Zone */
+            zone: string;
             /** Name */
             name: string;
             /** Display Prefix */
@@ -2380,6 +2451,14 @@ export interface components {
          * @enum {string}
          */
         KeyLifecycle: "active" | "suspended" | "revoked";
+        /**
+         * KeyMinCreatorRole
+         * @description The lowest team role that may create a key in a zone (a zone's key rule).
+         *
+         *     Installation admins and org admins count as team admins; a member is the lowest.
+         * @enum {string}
+         */
+        KeyMinCreatorRole: "member" | "team_admin" | "org_admin";
         /** KeyOut */
         KeyOut: {
             /**
@@ -3306,7 +3385,7 @@ export interface components {
          *     LIST: exactly the `policy_grants` of this level, intersected with the parent; an empty
          *     list is deny-all.
          *     Resolve INHERIT first; a key whose effective set is still universal gets
-         *     allow_all_models (see compiler.compile_scope).
+         *     allow_all_models (see compiler.compile_zone).
          * @enum {string}
          */
         ModelAccess: "inherit" | "all" | "list";
@@ -4064,6 +4143,13 @@ export interface components {
             /** Next Cursor */
             next_cursor?: string | null;
         };
+        /** Page[ZoneOut] */
+        Page_ZoneOut_: {
+            /** Items */
+            items: components["schemas"]["ZoneOut"][];
+            /** Next Cursor */
+            next_cursor?: string | null;
+        };
         /** PlaygroundKey */
         PlaygroundKey: {
             /**
@@ -4151,10 +4237,12 @@ export interface components {
          * PluginOut
          * @description A gateway plugin of any kind (docs/plugins.md).
          *
-         *     Everything but `kind`, `name` and `builtin` is data from a gateway: render it as plain
-         *     text. `uses_weight`, `needs` and `member_schema` are for router strategies only.
+         *     Everything but `zone`, `kind`, `name` and `builtin` is data from a gateway: render it as
+         *     plain text. `uses_weight`, `needs` and `member_schema` are for router strategies only.
          */
         PluginOut: {
+            /** Zone */
+            zone: string;
             kind: components["schemas"]["PluginKind"];
             /** Name */
             name: string;
@@ -4457,6 +4545,11 @@ export interface components {
              * @description The config version to restore.
              */
             version: number;
+            /**
+             * Zone
+             * @description Config zone the record belongs to; omitted = the default zone.
+             */
+            zone?: string | null;
             /**
              * Force
              * @description Save although connected gateways lack the plugin; they will NACK.
@@ -5826,6 +5919,142 @@ export interface components {
              * @description false deactivates the user: they cannot sign in and their keys are suspended.
              */
             is_active?: boolean | null;
+        };
+        /** ZoneCreate */
+        ZoneCreate: {
+            /**
+             * @description The lowest team role that may create a key in this zone: member, team_admin or org_admin (installation admins always may).
+             * @default member
+             */
+            key_min_creator_role: components["schemas"]["KeyMinCreatorRole"];
+            /**
+             * Key Max Lifetime Seconds
+             * @description Longest lifetime of a key created in this zone; null = only the team's own limit.
+             */
+            key_max_lifetime_seconds?: number | null;
+            /**
+             * Key Expiry Required
+             * @description Refuse a key created in this zone without an expiry.
+             * @default false
+             */
+            key_expiry_required: boolean;
+            /**
+             * Key Max Per Member
+             * @description How many keys one member may own in this zone; null = unlimited. Service-account keys do not count.
+             */
+            key_max_per_member?: number | null;
+            /**
+             * Service Account Keys Allowed
+             * @description Allow creating service-account keys in this zone.
+             * @default true
+             */
+            service_account_keys_allowed: boolean;
+            /**
+             * Playground Allowed
+             * @description Allow this zone's keys in the Playground.
+             * @default true
+             */
+            playground_allowed: boolean;
+            /**
+             * Name
+             * @description Display name, 1 to 200 characters.
+             */
+            name: string;
+            /**
+             * Display Name
+             * @description Shown in the Admin UI.
+             * @default
+             */
+            display_name: string;
+            /**
+             * Color
+             * @description One of the fixed palette names: gray, blue, green, amber, red, violet.
+             * @default gray
+             * @enum {string}
+             */
+            color: "gray" | "blue" | "green" | "amber" | "red" | "violet";
+            /**
+             * Playground Gateway Url
+             * @description Gateway base URL the Playground forwards to for keys of this zone; null = Playground unavailable there.
+             */
+            playground_gateway_url?: string | null;
+        };
+        /** ZoneOut */
+        ZoneOut: {
+            /** Name */
+            name: string;
+            /** Display Name */
+            display_name: string;
+            /** Color */
+            color: string;
+            /** Archived At */
+            archived_at: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Playground Gateway Url */
+            playground_gateway_url: string | null;
+            key_min_creator_role: components["schemas"]["KeyMinCreatorRole"];
+            /** Key Max Lifetime Seconds */
+            key_max_lifetime_seconds: number | null;
+            /** Key Expiry Required */
+            key_expiry_required: boolean;
+            /** Key Max Per Member */
+            key_max_per_member: number | null;
+            /** Service Account Keys Allowed */
+            service_account_keys_allowed: boolean;
+            /** Playground Allowed */
+            playground_allowed: boolean;
+        };
+        /**
+         * ZoneUpdate
+         * @description Only the supplied fields change. `name` is immutable.
+         */
+        ZoneUpdate: {
+            /**
+             * Display Name
+             * @description Shown in the Admin UI.
+             */
+            display_name?: string | null;
+            /**
+             * Color
+             * @description One of the fixed palette names: gray, blue, green, amber, red, violet.
+             */
+            color?: ("gray" | "blue" | "green" | "amber" | "red" | "violet") | null;
+            /**
+             * Playground Gateway Url
+             * @description Gateway base URL the Playground forwards to for keys of this zone; null = Playground unavailable there.
+             */
+            playground_gateway_url?: string | null;
+            /** @description The lowest team role that may create a key in this zone: member, team_admin or org_admin (installation admins always may). */
+            key_min_creator_role?: components["schemas"]["KeyMinCreatorRole"] | null;
+            /**
+             * Key Max Lifetime Seconds
+             * @description Longest lifetime of a key created in this zone; null = only the team's own limit.
+             */
+            key_max_lifetime_seconds?: number | null;
+            /**
+             * Key Expiry Required
+             * @description Refuse a key created in this zone without an expiry.
+             */
+            key_expiry_required?: boolean | null;
+            /**
+             * Key Max Per Member
+             * @description How many keys one member may own in this zone; null = unlimited. Service-account keys do not count.
+             */
+            key_max_per_member?: number | null;
+            /**
+             * Service Account Keys Allowed
+             * @description Allow creating service-account keys in this zone.
+             */
+            service_account_keys_allowed?: boolean | null;
+            /**
+             * Playground Allowed
+             * @description Allow this zone's keys in the Playground.
+             */
+            playground_allowed?: boolean | null;
         };
     };
     responses: never;
@@ -11212,6 +11441,8 @@ export interface operations {
             query?: {
                 /** @description Only this kind; omitted lists all three. */
                 kind?: components["schemas"]["PluginKind"] | null;
+                /** @description Config zone to inspect. */
+                zone?: string | null;
             };
             header?: never;
             path?: never;
@@ -12577,6 +12808,7 @@ export interface operations {
             query?: {
                 limit?: number;
                 cursor?: string | null;
+                zone?: string | null;
             };
             header?: never;
             path?: never;
@@ -12645,6 +12877,7 @@ export interface operations {
             query?: {
                 limit?: number;
                 cursor?: string | null;
+                zone?: string | null;
             };
             header?: never;
             path?: never;
@@ -12849,6 +13082,7 @@ export interface operations {
             query?: {
                 limit?: number;
                 cursor?: string | null;
+                zone?: string | null;
             };
             header?: never;
             path?: never;
@@ -12932,6 +13166,281 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RollbackOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    listZones: {
+        parameters: {
+            query?: {
+                /** @description Installation admins also get archived zones. */
+                include_archived?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Page_ZoneOut_"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    createZone: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ZoneCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ZoneOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    archiveZone: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ZoneOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    updateZone: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ZoneUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ZoneOut"];
                 };
             };
             /** @description Missing or invalid credentials */

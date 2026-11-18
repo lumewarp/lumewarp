@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from sqlalchemy import delete
 
 from lumewarp_control_plane.models import ModelAccess, TeamMember
+from tests.api.helpers import set_playground_url
 from tests.api.test_playground import setup_keys
 from tests.factories import make_key, make_member, make_model, make_team
 
@@ -81,7 +82,7 @@ async def test_only_llm_and_typed_effective_models(client, committed):
     typed = {m["name"]: m["model_type"] for m in team["typed_models"]}
     assert typed["chat-router"] == "llm" and typed["embed-alias"] == "embedding"
     assert set(team["models"]) == set(typed)
-    client.app.state.settings.playground_gateway_url = "http://gateway:4000"
+    await set_playground_url(client, committed, "http://gateway:4000")
     client.app.state.settings.encryption_key = SecretStr("x" * 32)
     for model in ("embed", "embed-alias", "embed-router"):
         response = client.post(
@@ -95,7 +96,7 @@ async def test_only_llm_and_typed_effective_models(client, committed):
 
 async def test_missing_encryption_key_disables(client, committed):
     own, _, headers, _ = await setup_keys(committed)
-    client.app.state.settings.playground_gateway_url = "http://gateway:4000"
+    await set_playground_url(client, committed, "http://gateway:4000")
     client.app.state.settings.encryption_key = None
     assert client.get("/api/v1/playground", headers=headers).json()["enabled"] is False
     response = client.post(

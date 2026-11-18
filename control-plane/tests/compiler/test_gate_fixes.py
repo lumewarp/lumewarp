@@ -9,7 +9,7 @@ from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as pb
 from lumewarp_control_plane.compiler import (
     CompileError,
     compact_versions,
-    compile_scope,
+    compile_zone,
     publish_pending,
     store_version,
 )
@@ -47,14 +47,14 @@ async def _add_gateway(session, gateway_id: str, **values) -> None:
     """A gateway row with the token its Hello authenticated with."""
     secret = generate_secret(SecretKind.GATEWAY_TOKEN)
     token = GatewayToken(
-        scope=SCOPE,
+        zone=SCOPE,
         name=gateway_id,
         token_hash=secret.hash,
         display_prefix=secret.display_prefix,
     )
     session.add(token)
     await session.flush()
-    session.add(GatewaySession(scope=SCOPE, gateway_id=gateway_id, token_id=token.id, **values))
+    session.add(GatewaySession(zone=SCOPE, gateway_id=gateway_id, token_id=token.id, **values))
 
 
 async def _outbox(factory) -> list[str]:
@@ -94,7 +94,7 @@ async def test_source_zero_weight_weighted_router_is_left_out(factory) -> None:
     assert [r.name for r in snap.routers] == ["fine", "lif"]
     assert list(snap.api_keys) == []
     async with factory() as s:
-        c = await compile_scope(s, SCOPE, now=OCT, require_local_membership=True)
+        c = await compile_zone(s, SCOPE, now=OCT, require_local_membership=True)
     assert any("zero total weight" in w for w in c.warnings)
 
 
@@ -129,7 +129,7 @@ async def test_invalid_upstream_url_left_out_with_its_routers(factory) -> None:
         await s.execute(update(Model).where(Model.name == "good-d").values(upstream_model=""))
         await add_router(s, "good", [("fine-d", None)])
     async with factory() as s:
-        c = await compile_scope(s, SCOPE, now=OCT, require_local_membership=True)
+        c = await compile_zone(s, SCOPE, now=OCT, require_local_membership=True)
     snap = c.snapshot
     assert [u.name for u in snap.upstreams] == ["vllm"]
     assert [d.name for d in snap.models] == ["fine-d"]
@@ -139,7 +139,7 @@ async def test_invalid_upstream_url_left_out_with_its_routers(factory) -> None:
 
 def _valid_snapshot() -> pb.Snapshot:
     return pb.Snapshot(
-        scope="s",
+        zone="s",
         upstreams=[pb.Upstream(name="u", kind=pb.UPSTREAM_KIND_VLLM, base_url="http://u/v1")],
         models=[pb.Model(name="d", upstream="u", upstream_model="m", type=pb.MODEL_TYPE_LLM)],
         routers=[
@@ -233,7 +233,7 @@ def test_validate_mirrors_gateway(name: str) -> None:
 async def test_store_version_refuses_invalid_snapshot(factory) -> None:
     await seed_scope(factory)
     snap = _valid_snapshot()
-    snap.scope = SCOPE
+    snap.zone = SCOPE
     snap.routers[0].members[0].weight = 0
     async with factory() as s, s.begin():
         with pytest.raises(CompileError, match="zero total weight"):
@@ -266,7 +266,7 @@ async def test_epoch_expiry_is_not_never(factory) -> None:
         epoch = await add_key(s, t, u, name="epoch", expires_at=datetime(1970, 1, 1, tzinfo=UTC))
         old = await add_key(s, t, u, name="old", expires_at=datetime(1900, 1, 1, tzinfo=UTC))
     async with factory() as s:
-        c = await compile_scope(s, SCOPE, now=OCT, require_local_membership=True)
+        c = await compile_zone(s, SCOPE, now=OCT, require_local_membership=True)
     wire = {k.key_id: k.expires_at_unix_ms for k in c.snapshot.api_keys}
     assert wire == {str(epoch.id): 1, str(old.id): 1}
 
@@ -282,7 +282,7 @@ async def test_compaction_reads_pins_and_updates_in_one_statement(factory) -> No
     await seed_scope(factory)
     async with factory() as s, s.begin():
         for v in range(1, 5):
-            await store_version(s, SCOPE, pb.Snapshot(scope=SCOPE), version=v, source_revision=v)
+            await store_version(s, SCOPE, pb.Snapshot(zone=SCOPE), version=v, source_revision=v)
         await _add_gateway(s, "a", connected=True, acked_version=3)
     async with factory() as s, s.begin():
         real_execute, statements = s.execute, []
@@ -308,7 +308,7 @@ async def test_compaction_sees_sessions_committed_before_the_statement(factory) 
     await seed_scope(factory)
     async with factory() as s, s.begin():
         for v in range(1, 5):
-            await store_version(s, SCOPE, pb.Snapshot(scope=SCOPE), version=v, source_revision=v)
+            await store_version(s, SCOPE, pb.Snapshot(zone=SCOPE), version=v, source_revision=v)
     async with factory() as s, s.begin():
         await s.execute(select(1))  # transaction already running
         async with factory() as other, other.begin():

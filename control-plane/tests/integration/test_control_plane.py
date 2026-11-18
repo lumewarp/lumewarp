@@ -18,7 +18,7 @@ from lumewarp_control_plane._proto.lumewarp.config.v1 import config_service_pb2_
 from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as pb
 from lumewarp_control_plane._proto.lumewarp.usage.v1 import usage_pb2, usage_pb2_grpc
 from lumewarp_control_plane.app import create_app
-from lumewarp_control_plane.models import ConfigVersion, Scope, ScopeType, UsageTotal
+from lumewarp_control_plane.models import ConfigVersion, ScopeType, UsageTotal, Zone
 from lumewarp_control_plane.settings import Settings
 from tests.compiler.helpers import apply_delta
 from tests.conftest import migrated_database
@@ -51,13 +51,13 @@ async def cp() -> AsyncIterator[ControlPlane]:
             dev_mode=True,
             break_glass_password="itest-admin",
             session_cookie_secure=False,
-            scope=SCOPE,
+            zone=SCOPE,
             background_enabled=True,
         )
         fatal: list[str] = []
         app = create_app(settings, fatal_handler=fatal.append)
         async with app.state.session_factory() as s, s.begin():
-            s.add(Scope(name=SCOPE))  # what `bootstrap` does
+            s.add(Zone(name=SCOPE))  # what `bootstrap` does
         async with app.router.lifespan_context(app):
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(transport=transport, base_url="http://cp") as http:
@@ -100,7 +100,7 @@ class Gateway:
                     gateway_id=self.gateway_id,
                     have_version=self.snapshot.version,
                     have_digest=self.digest,
-                    scope=self.snapshot.scope,
+                    zone=self.snapshot.zone,
                     gateway_version="itest",
                 )
             )
@@ -261,9 +261,11 @@ async def test_end_to_end(cp: ControlPlane) -> None:
         # The metrics listener (its own port, not the admin API) reflects all of the above.
         # The probe's stream is torn down asynchronously on the server: wait for it.
         async with asyncio.timeout(5):
-            while (samples := await _scrape(cp))[("lumewarp_cp_gateway_sessions", ())] != 2:
+            while (samples := await _scrape(cp))[
+                ("lumewarp_cp_gateway_sessions", (("zone", SCOPE),))
+            ] != 2:
                 await asyncio.sleep(0.02)
-        assert samples[("lumewarp_cp_config_version", ())] == a.snapshot.version
+        assert samples[("lumewarp_cp_config_version", (("zone", SCOPE),))] == a.snapshot.version
         assert samples[("lumewarp_cp_compile_duration_seconds_count", ())] >= 3
         assert samples[("lumewarp_cp_compile_failures_total", ())] == 0
         assert samples[("lumewarp_cp_gateway_acks_total", (("result", "ack"),))] >= 4

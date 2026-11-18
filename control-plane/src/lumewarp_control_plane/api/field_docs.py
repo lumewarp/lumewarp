@@ -69,6 +69,27 @@ BY_NAME: dict[str, str] = {
         "Concurrent requests for each member who has no limit of their own; capped by the"
         " team's limit. null = none."
     ),
+    # Zones
+    "zone": "Config zone the record belongs to; omitted = the default zone.",
+    "color": "One of the fixed palette names: gray, blue, green, amber, red, violet.",
+    "playground_gateway_url": (
+        "Gateway base URL the Playground forwards to for keys of this zone; null = Playground"
+        " unavailable there."
+    ),
+    "key_min_creator_role": (
+        "The lowest team role that may create a key in this zone: member, team_admin or"
+        " org_admin (installation admins always may)."
+    ),
+    "key_max_lifetime_seconds": (
+        "Longest lifetime of a key created in this zone; null = only the team's own limit."
+    ),
+    "key_expiry_required": "Refuse a key created in this zone without an expiry.",
+    "key_max_per_member": (
+        "How many keys one member may own in this zone; null = unlimited. Service-account"
+        " keys do not count."
+    ),
+    "service_account_keys_allowed": "Allow creating service-account keys in this zone.",
+    "playground_allowed": "Allow this zone's keys in the Playground.",
     # Tenancy
     "name": "Display name, 1 to 200 characters.",
     "display_name": "Shown in the Admin UI.",

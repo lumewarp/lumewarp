@@ -40,6 +40,7 @@ from lumewarp_control_plane.models import (
     InheritedFrom,
     InstallationRole,
     KeyLifecycle,
+    KeyMinCreatorRole,
     KeyOwnerKind,
     McpDefinitionKind,
     McpDefinitionState,
@@ -1434,10 +1435,11 @@ class PluginGatewayOut(ReadModel):
 class PluginOut(ReadModel):
     """A gateway plugin of any kind (docs/plugins.md).
 
-    Everything but `kind`, `name` and `builtin` is data from a gateway: render it as plain
-    text. `uses_weight`, `needs` and `member_schema` are for router strategies only.
+    Everything but `zone`, `kind`, `name` and `builtin` is data from a gateway: render it as
+    plain text. `uses_weight`, `needs` and `member_schema` are for router strategies only.
     """
 
+    zone: str
     kind: PluginKind
     name: str
     title: str
@@ -1846,11 +1848,76 @@ class AuditOut(ReadModel):
     details: dict[str, Any]
 
 
+# --------------------------------------------------------------------------- zones
+
+
+# The fixed palette a zone may pick its colour from; the UI maps each to a CSS token.
+ZoneColor = Literal["gray", "blue", "green", "amber", "red", "violet"]
+
+
+def _zone_name(value: str) -> str:
+    """A zone name: a URL and CLI-safe slug, the gateway's on-disk snapshot key."""
+    if not re.fullmatch(r"[a-z][a-z0-9-]{0,62}", value):
+        raise ValueError("must match ^[a-z][a-z0-9-]{0,62}$")
+    return value
+
+
+ZoneName = Annotated[str, AfterValidator(_zone_name)]
+
+
+class ZoneKeyRules(ApiModel):
+    """The key rules a zone applies to keys created in it."""
+
+    key_min_creator_role: KeyMinCreatorRole = Field(default=KeyMinCreatorRole.MEMBER)
+    key_max_lifetime_seconds: int | None = Field(default=None, gt=0)
+    key_expiry_required: bool = False
+    key_max_per_member: int | None = Field(default=None, gt=0)
+    service_account_keys_allowed: bool = True
+    playground_allowed: bool = True
+
+
+class ZoneCreate(ZoneKeyRules):
+    name: ZoneName
+    display_name: str = Field(default="", max_length=200)
+    color: ZoneColor = "gray"
+    playground_gateway_url: str | None = None
+
+
+class ZoneUpdate(ApiModel):
+    """Only the supplied fields change. `name` is immutable."""
+
+    display_name: str | None = Field(default=None, max_length=200)
+    color: ZoneColor | None = None
+    playground_gateway_url: str | None = None
+    key_min_creator_role: KeyMinCreatorRole | None = None
+    key_max_lifetime_seconds: int | None = Field(default=None, gt=0)
+    key_expiry_required: bool | None = None
+    key_max_per_member: int | None = Field(default=None, gt=0)
+    service_account_keys_allowed: bool | None = None
+    playground_allowed: bool | None = None
+
+
+class ZoneOut(ReadModel):
+    name: str
+    display_name: str
+    color: str
+    archived_at: datetime | None
+    created_at: datetime
+    playground_gateway_url: str | None
+    key_min_creator_role: KeyMinCreatorRole
+    key_max_lifetime_seconds: int | None
+    key_expiry_required: bool
+    key_max_per_member: int | None
+    service_account_keys_allowed: bool
+    playground_allowed: bool
+
+
 # --------------------------------------------------------------------------- gateways/config
 
 
 class GatewayTokenCreate(ApiModel):
     name: str = Field(default="", max_length=200)
+    zone: ZoneName | None = None
 
 
 class GatewayTokenRef(ReadModel):
@@ -1863,6 +1930,7 @@ class GatewayTokenRef(ReadModel):
 
 class GatewayTokenOut(ReadModel):
     id: uuid.UUID
+    zone: str
     name: str
     display_prefix: str
     created_at: datetime
@@ -1879,6 +1947,7 @@ class GatewayTokenCreated(ApiModel):
 class GatewayOut(ApiModel):
     """One gateway process: its config stream, version and status."""
 
+    zone: str = Field(description="Config zone this gateway's token serves (`Hello.zone`).")
     gateway_id: str = Field(description="`Hello.gateway_id`: the process, stable for its lifetime.")
     connected: bool = Field(description="Its config stream is open.")
     peer: str | None = Field(description="gRPC peer of the stream, as the control plane sees it.")
@@ -1913,7 +1982,7 @@ class GatewayOut(ApiModel):
 
 
 class ConfigVersionOut(ApiModel):
-    scope: str
+    zone: str
     version: int
     digest: str
     size_bytes: int
@@ -1924,12 +1993,13 @@ class ConfigVersionOut(ApiModel):
     created_at: datetime
     compacted_at: datetime | None
     quarantined: bool = Field(
-        description="A gateway rejected this version, so it is withheld from the whole scope."
+        description="A gateway rejected this version, so it is withheld from the whole zone."
     )
 
 
 class RollbackCreate(ApiModel):
     version: int = Field(gt=0)
+    zone: ZoneName | None = None
     force: bool = _force_field()
 
 

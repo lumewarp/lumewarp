@@ -50,6 +50,8 @@ EXPECTED_OPERATION_IDS = {
     "createUpstream",
     "createUser",
     "createUserToken",
+    "createZone",
+    "archiveZone",
     "deleteModel",
     "deleteMember",
     "deleteOrg",
@@ -90,6 +92,7 @@ EXPECTED_OPERATION_IDS = {
     "listTeams",
     "listUpstreams",
     "listUpstreamModels",
+    "listZones",
     "testUpstream",
     "testModel",
     "testSavedUpstream",
@@ -118,6 +121,7 @@ EXPECTED_OPERATION_IDS = {
     "updateTeam",
     "updateUpstream",
     "updateUser",
+    "updateZone",
 }
 
 

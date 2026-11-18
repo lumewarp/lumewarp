@@ -3,7 +3,7 @@
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumewarp_control_plane.compiler import compile_scope
+from lumewarp_control_plane.compiler import compile_zone
 from lumewarp_control_plane.models import TeamRole
 from tests.api.helpers import ADMIN_AUTH, auth, user_with_token
 from tests.factories import make_key, make_member, make_service_account, make_team
@@ -106,7 +106,7 @@ async def test_a_team_admin_deactivates_an_account_and_its_keys_leave_the_snapsh
     )
 
     async with AsyncSession(committed.bind) as session:
-        compiled = await compile_scope(session, api_scope, require_local_membership=True)
+        compiled = await compile_zone(session, api_scope, require_local_membership=True)
     assert str(key.id) not in {row.key_id for row in compiled.snapshot.api_keys}
 
     reactivated = client.patch(
@@ -114,5 +114,5 @@ async def test_a_team_admin_deactivates_an_account_and_its_keys_leave_the_snapsh
     )
     assert reactivated.status_code == 200 and reactivated.json()["is_active"] is True
     async with AsyncSession(committed.bind) as session:
-        compiled = await compile_scope(session, api_scope, require_local_membership=True)
+        compiled = await compile_zone(session, api_scope, require_local_membership=True)
     assert str(key.id) in {row.key_id for row in compiled.snapshot.api_keys}

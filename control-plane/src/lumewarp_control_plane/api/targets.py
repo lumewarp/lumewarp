@@ -30,8 +30,9 @@ from lumewarp_control_plane.api.common import (
     SessionDep,
     SettingsDep,
     conflict,
+    default_zone,
     enqueue_recompile,
-    lock_scope,
+    lock_hierarchy,
     mutation,
     parse_uuid_cursor,
     uuid_page,
@@ -109,7 +110,7 @@ async def _validate_auth(
             auth.plugin,
             auth.params,
             force=force,
-            scope=settings.scope,
+            zone=default_zone(settings),
         )
     except PluginRejected as exc:
         raise validation_error(f"auth.{exc.field}", exc.message) from exc
@@ -131,7 +132,7 @@ async def _validate_middleware(
             middleware.plugin,
             middleware.params,
             force=force,
-            scope=settings.scope,
+            zone=default_zone(settings),
         )
     except PluginRejected as exc:
         raise validation_error(f"middleware.{exc.field}", exc.message) from exc
@@ -225,7 +226,7 @@ def _definition_page_cursor(cursor: str | None) -> uuid.UUID | None:
 async def _mcp_servers_out(
     session: AsyncSession, settings: Settings, rows: Sequence[McpServer]
 ) -> list[McpServerOut]:
-    registry = await load_plugins(session, settings.scope)
+    registry = await load_plugins(session, default_zone(settings))
     counts = await _definition_counts(session, [row.id for row in rows])
     problems = {
         row.id: _target_problems(
@@ -294,7 +295,7 @@ async def create_mcp_server(
     """Register an upstream MCP server that keys can be granted. Requires an installation admin."""
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         await _ensure_mcp_name_free(session, body.name)
         missing = await _validate_auth(session, settings, body.auth, force=body.force)
         row = McpServer(
@@ -364,7 +365,7 @@ async def update_mcp_server(
     """
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         row = await _live_server(session, server_id)
         if "name" in body.model_fields_set:
             await _ensure_mcp_name_free(session, body.name, exclude=row.id)
@@ -418,7 +419,7 @@ async def delete_mcp_server(
     and the compiler leaves it out of the snapshot."""
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         row = await session.get(McpServer, server_id)
         if row is None or row.deleted_at is not None:
             raise not_found("MCP server not found")
@@ -487,7 +488,7 @@ async def _review(
 ) -> McpDefinition:
     state = REVIEW_ACTIONS[action]
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         server = await _live_server(session, server_id)
         row = await session.get(McpDefinition, definition_id, populate_existing=True)
         if row is None or row.server_id != server.id:
@@ -683,7 +684,7 @@ async def discover_mcp_server(
     recorded = captured is not None
     if recorded:
         async with mutation(session):
-            await lock_scope(session, settings)
+            await lock_hierarchy(session)
             server = await session.get(
                 McpServer, server_id, populate_existing=True, with_for_update=True
             )
@@ -769,7 +770,7 @@ async def discover_mcp_server(
 async def _agents_out(
     session: AsyncSession, settings: Settings, rows: Sequence[A2aAgent]
 ) -> list[A2aAgentOut]:
-    registry = await load_plugins(session, settings.scope)
+    registry = await load_plugins(session, default_zone(settings))
     out: list[A2aAgentOut] = []
     for row in rows:
         problems = _target_problems(
@@ -847,7 +848,7 @@ async def create_a2a_agent(
     """Register an upstream A2A agent that keys can be granted. Requires an installation admin."""
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         await _ensure_agent_name_free(session, body.name)
         missing = await _validate_auth(session, settings, body.auth, force=body.force)
         missing += await _validate_middleware(session, settings, body.middleware, force=body.force)
@@ -915,7 +916,7 @@ async def update_a2a_agent(
     """Requires an installation admin."""
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         row = await _live_agent(session, agent_id)
         if "name" in body.model_fields_set:
             await _ensure_agent_name_free(session, body.name, exclude=row.id)
@@ -980,7 +981,7 @@ async def delete_a2a_agent(
     """Archive the agent: the name is free again and the compiler leaves it out."""
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         row = await session.get(A2aAgent, agent_id)
         if row is None or row.deleted_at is not None:
             raise not_found("A2A agent not found")

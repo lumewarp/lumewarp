@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from typing import Annotated
+
+from fastapi import APIRouter, Query
 from sqlalchemy import select
 
 from lumewarp_control_plane import audit
@@ -31,7 +33,7 @@ router = APIRouter(tags=["config"])
 
 def _out(row: ConfigVersion, quarantined_version: int | None) -> ConfigVersionOut:
     return ConfigVersionOut(
-        scope=row.scope,
+        zone=row.zone,
         version=row.version,
         digest=row.digest.hex(),
         size_bytes=row.size_bytes,
@@ -56,20 +58,21 @@ async def list_config_versions(
     settings: SettingsDep,
     limit: LimitDep = 50,
     cursor: str | None = None,
+    zone: Annotated[str, Query(description="Config zone to list.")] | None = None,
 ) -> Page[ConfigVersionOut]:
-    """Compiled config versions, newest first. Requires an installation admin.
+    """Compiled config versions of one zone, newest first. Requires an installation admin.
 
-    `quarantined` marks the version a gateway rejected; no gateway of the scope is sent it.
+    `quarantined` marks the version a gateway rejected; no gateway of the zone is sent it.
+    Omit `zone` for the default zone.
     """
     await authz.require(Action.CONFIG_READ)
+    zone = zone or settings.zone
     quarantined_version = await session.scalar(
-        select(GatewayQuarantine.quarantined_version).where(
-            GatewayQuarantine.scope == settings.scope
-        )
+        select(GatewayQuarantine.quarantined_version).where(GatewayQuarantine.zone == zone)
     )
     stmt = (
         select(ConfigVersion)
-        .where(ConfigVersion.scope == settings.scope)
+        .where(ConfigVersion.zone == zone)
         .order_by(ConfigVersion.version.desc())
     )
     if cursor is not None:
@@ -89,18 +92,20 @@ async def rollback_config(
     settings: SettingsDep,
 ) -> RollbackOut:
     """Restore the routing catalog (upstreams, models, aliases, routers, MCP servers, A2A
-    agents) of an earlier version, by id, and publish it as a new version. Requires an
-    installation admin. Teams, keys, policies and key states stay as they are now. Answers
-    422 when a plugin connected now rejects the restored settings, unless `force` is set.
+    agents) of an earlier version, by id, installation-wide: every live zone is recompiled and
+    gets the restored catalog as a new version. Requires an installation admin. Teams, keys,
+    policies and key states stay as they are now. Answers 422 when a plugin connected now
+    rejects the restored settings, unless `force` is set.
     """
     await authz.require(Action.CONFIG_ROLLBACK)
     from lumewarp_control_plane import compiler
 
+    zone = body.zone or settings.zone
     async with mutation(session):
         try:
             version = await compiler.rollback_routing(
                 session,
-                settings.scope,
+                zone,
                 body.version,
                 require_local_membership=authz.authorizer.manages_grants,
                 force=body.force,
@@ -118,6 +123,10 @@ async def rollback_config(
             resource_type="config_version",
             resource_id=version,
             principal=authz.principal,
-            details={"to_version": body.version, **({"force": True} if body.force else {})},
+            details={
+                "to_version": body.version,
+                "zone": zone,
+                **({"force": True} if body.force else {}),
+            },
         )
     return RollbackOut(version=version)

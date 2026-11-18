@@ -412,34 +412,34 @@ def test_weighted_splits_need_positive_weight(client) -> None:
 async def test_concurrent_delete_and_reference_are_serialized(
     client, api_engine, api_settings, monkeypatch
 ) -> None:
-    """Scope lock first: a router may not pick up a model being deleted, or be missed by it."""
+    """Hierarchy lock first: a router may not pick up a model being deleted, or miss it."""
     model = _model(client)
     model_id = uuid.UUID(model["id"])
     first_locked = asyncio.Event()
     second_attempted = asyncio.Event()
-    original_lock = routing.lock_scope
+    original_lock = routing.lock_hierarchy
     authz = RequestAuthz(Principal(kind=PrincipalKind.BREAK_GLASS), client.app.state.authorizer)
     async with (
         AsyncSession(api_engine, expire_on_commit=False) as first,
         AsyncSession(api_engine, expire_on_commit=False) as second,
     ):
 
-        async def lock(session, settings):
+        async def lock(session):
             if session is second:
                 await first_locked.wait()
                 second_attempted.set()
-            await original_lock(session, settings)
-            session.info["scope_locked"] = True
+            await original_lock(session)
+            session.info["hierarchy_locked"] = True
             if session is first:
                 first_locked.set()
                 await second_attempted.wait()
 
-        monkeypatch.setattr(routing, "lock_scope", lock)
+        monkeypatch.setattr(routing, "lock_hierarchy", lock)
         # Assert the ordering directly, so losing the early lock fails without a wait.
         original_get = first.get
 
         async def guarded_get(name, ident, **kw):
-            assert first.info.get("scope_locked"), "scope must be locked before row read"
+            assert first.info.get("hierarchy_locked"), "the hierarchy must be locked first"
             return await original_get(name, ident, **kw)
 
         monkeypatch.setattr(first, "get", guarded_get)

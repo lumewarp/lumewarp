@@ -185,7 +185,7 @@ async def set_target_revision(session: AsyncSession, revision: int) -> None:
     but the rollback version is also a new configuration: leaving the old watermark would
     re-accept a report from the configuration this rollback just replaced (a gateway still
     on the previous version could auto-approve an old upstream's definitions). The caller
-    holds the scope lock and has already restored the rows.
+    holds the hierarchy lock and has already restored the rows.
     """
     for table in TARGET_TABLES:
         await session.execute(
@@ -199,7 +199,7 @@ async def restore_catalog_state(session: AsyncSession, state: dict[str, Any]) ->
     Existing entity rows are updated, not deleted/reinserted, so grants on them survive.
     Names absent from the state are deleted and their grants (cascade) are audited; grants
     of recreated names do not come back. Names the restore changes get a history row. The
-    caller holds the scope/advisory locks and owns the transaction.
+    caller holds the hierarchy/advisory locks and owns the transaction.
     """
     rows = _decode_state(state)
     await session.flush()

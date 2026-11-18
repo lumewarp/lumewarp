@@ -8,8 +8,9 @@ Conventions:
   (32 bytes) plus a short non-secret display prefix. See security.py for why sha256. The OIDC
   login nonce and PKCE verifier live only in the AES-GCM sealed login cookie
   (auth/oidc.py).
-- The installation serves one config scope (`scopes` row); source tables (teams, routing,
-  users, ...) are installation-wide and compile into that scope's snapshots.
+- The installation serves one or more zones (`zones` rows); source tables (teams, users,
+  grants, ...) are installation-wide, while upstreams, keys, gateways and snapshots belong
+  to a zone and compile into that zone's snapshots.
 - Hierarchy: org -> teams -> members (users) and service accounts -> keys. Every key
   belongs to one team and is owned by a member of it or by one of its service accounts.
   Org administration is inherited by the org's teams in `authz.RequestAuthz`; the backend
@@ -114,7 +115,7 @@ class ModelAccess(enum.StrEnum):
     LIST: exactly the `policy_grants` of this level, intersected with the parent; an empty
     list is deny-all.
     Resolve INHERIT first; a key whose effective set is still universal gets
-    allow_all_models (see compiler.compile_scope).
+    allow_all_models (see compiler.compile_zone).
     """
 
     INHERIT = "inherit"
@@ -158,6 +159,17 @@ class InstallationRole(enum.StrEnum):
 class KeyOwnerKind(enum.StrEnum):
     USER = "user"
     SERVICE_ACCOUNT = "service_account"
+
+
+class KeyMinCreatorRole(enum.StrEnum):
+    """The lowest team role that may create a key in a zone (a zone's key rule).
+
+    Installation admins and org admins count as team admins; a member is the lowest.
+    """
+
+    MEMBER = "member"
+    TEAM_ADMIN = "team_admin"
+    ORG_ADMIN = "org_admin"
 
 
 class ScopeType(enum.StrEnum):
@@ -379,17 +391,51 @@ class PolicyMixin:
 # --------------------------------------------------------------------------- installation
 
 
-class Scope(Base):
-    """A config scope (one per installation).
+class Zone(Base):
+    """One config zone (prod, dev, ...). The default zone's name is `LUMEWARP_ZONE`.
 
     `source_revision` is bumped by `outbox.enqueue_recompile` in every mutating transaction;
     the row lock it takes also serializes writers. Compiles record the revision they saw.
+    `name` is immutable: every zone column references it. The key rules are stored and
+    returned here; the key API enforces them.
     """
 
-    __tablename__ = "scopes"
+    __tablename__ = "zones"
+    __table_args__ = (
+        CheckConstraint("name ~ '^[a-z][a-z0-9-]{0,62}$'", name="name_slug"),
+        CheckConstraint(
+            "key_max_lifetime_seconds IS NULL OR key_max_lifetime_seconds > 0",
+            name="key_lifetime_positive",
+        ),
+        CheckConstraint(
+            "key_max_per_member IS NULL OR key_max_per_member > 0", name="key_max_positive"
+        ),
+    )
 
-    name: Mapped[str] = mapped_column(String(128), primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    display_name: Mapped[str] = mapped_column(String(200), nullable=False, server_default="")
+    # A palette name, validated by the API (models has no dependency on the API's list).
+    color: Mapped[str] = mapped_column(String(16), nullable=False, server_default="gray")
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     source_revision: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
+    # The gateway URL the Playground forwards to for keys of this zone.
+    playground_gateway_url: Mapped[str | None] = mapped_column(Text)
+    key_min_creator_role: Mapped[KeyMinCreatorRole] = mapped_column(
+        _enum(KeyMinCreatorRole, "key_min_creator_role"),
+        nullable=False,
+        default=KeyMinCreatorRole.MEMBER,
+        server_default=KeyMinCreatorRole.MEMBER.value,
+    )
+    # NULL = no zone-wide cap; the team's own cap still applies.
+    key_max_lifetime_seconds: Mapped[int | None] = mapped_column(Integer)
+    key_expiry_required: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+    key_max_per_member: Mapped[int | None] = mapped_column(Integer)
+    service_account_keys_allowed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="true"
+    )
+    playground_allowed: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
     created_at: Mapped[datetime] = _now()
 
 
@@ -1003,7 +1049,7 @@ class McpServer(TimestampMixin, Base):
     )
     # Per upstream request; 0 = the gateway default.
     timeout_ms: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
-    # The scope's config revision (`scopes.source_revision`) of the last write to this row.
+    # The zone's config revision (`zones.source_revision`) of the last write to this row.
     # Provenance for a CatalogReport: the gateway reports the config version it served, and
     # that version is trusted only when it was compiled from a revision at least this new
     # (otherwise the report may describe a different upstream, L3). Observed definition and
@@ -1119,7 +1165,7 @@ class A2aAgent(TimestampMixin, Base):
         Integer, nullable=False, default=0, server_default="0"
     )
     timeout_ms: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
-    # The scope's config revision of the last write to this row; a fetched card never moves
+    # The zone's config revision of the last write to this row; a fetched card never moves
     # it (see McpServer.config_revision).
     config_revision: Mapped[int] = mapped_column(
         BigInteger, nullable=False, default=0, server_default="0"
@@ -1949,7 +1995,7 @@ class ConfigVersion(Base):
 
     __tablename__ = "config_versions"
     __table_args__ = (
-        PrimaryKeyConstraint("scope", "version"),
+        PrimaryKeyConstraint("zone", "version"),
         _hash32("digest"),
         CheckConstraint("version > 0", name="version_positive"),
         CheckConstraint("(payload IS NULL) = (compacted_at IS NOT NULL)", name="compaction"),
@@ -1959,12 +2005,10 @@ class ConfigVersion(Base):
         CheckConstraint(
             "(kind = 'rollback') = (rollback_of_version IS NOT NULL)", name="rollback_ref"
         ),
-        Index(None, "scope", "source_revision"),
+        Index(None, "zone", "source_revision"),
     )
 
-    scope: Mapped[str] = mapped_column(
-        ForeignKey("scopes.name", ondelete="RESTRICT"), nullable=False
-    )
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.name", ondelete="RESTRICT"), nullable=False)
     version: Mapped[int] = mapped_column(BigInteger, nullable=False)
     # Serialized lumewarp.config.v1.Snapshot.
     payload: Mapped[bytes | None] = mapped_column(LargeBinary)
@@ -1985,7 +2029,7 @@ class ConfigVersion(Base):
 
 
 class ConfigOutbox(Base):
-    """ "Recompile scope" requests, written in the same transaction as the source mutation
+    """ "Recompile zone" requests, written in the same transaction as the source mutation
     (`outbox.enqueue_recompile`). The compiler loop drains rows with
     source_revision <= the revision it compiled.
     """
@@ -1995,16 +2039,14 @@ class ConfigOutbox(Base):
         CheckConstraint("attempts >= 0", name="attempts_nonneg"),
         Index(
             "ix_config_outbox_pending",
-            "scope",
+            "zone",
             "id",
             postgresql_where=text("status = 'pending'"),
         ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
-    scope: Mapped[str] = mapped_column(
-        ForeignKey("scopes.name", ondelete="RESTRICT"), nullable=False
-    )
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.name", ondelete="RESTRICT"), nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     source_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
     status: Mapped[OutboxStatus] = mapped_column(
@@ -2022,17 +2064,15 @@ class ConfigOutbox(Base):
 
 
 class GatewayToken(Base):
-    """Gateway credential (`lwg-...`): a scope credential with a label, not bound to a
+    """Gateway credential (`lwg-...`): a zone credential with a label, not bound to a
     gateway id. Any number of gateways may authenticate with one token. Hash only.
     """
 
     __tablename__ = "gateway_tokens"
-    __table_args__ = (_hash32("token_hash"), Index(None, "scope"))
+    __table_args__ = (_hash32("token_hash"), Index(None, "zone"))
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
-    scope: Mapped[str] = mapped_column(
-        ForeignKey("scopes.name", ondelete="RESTRICT"), nullable=False
-    )
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.name", ondelete="RESTRICT"), nullable=False)
     name: Mapped[str] = mapped_column(String(200), nullable=False, server_default="")
     token_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False, unique=True)
     display_prefix: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -2049,11 +2089,9 @@ class GatewaySession(Base):
     """
 
     __tablename__ = "gateway_sessions"
-    __table_args__ = (PrimaryKeyConstraint("scope", "gateway_id"),)
+    __table_args__ = (PrimaryKeyConstraint("zone", "gateway_id"),)
 
-    scope: Mapped[str] = mapped_column(
-        ForeignKey("scopes.name", ondelete="RESTRICT"), nullable=False
-    )
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.name", ondelete="RESTRICT"), nullable=False)
     # Hello.gateway_id: this process. `[A-Za-z0-9._-]`, at most 100 characters.
     gateway_id: Mapped[str] = mapped_column(String(100), nullable=False)
     session_id: Mapped[uuid.UUID | None] = mapped_column()
@@ -2073,7 +2111,7 @@ class GatewaySession(Base):
     last_nack_version: Mapped[int | None] = mapped_column(BigInteger)
     last_nack_code: Mapped[str | None] = mapped_column(String(64))
     last_nack_reason: Mapped[str | None] = mapped_column(Text)
-    # Hello.shared_limits: display only. Quarantine is scope-wide, in GatewayQuarantine.
+    # Hello.shared_limits: display only. Quarantine is zone-wide, in GatewayQuarantine.
     shared_limits_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="false"
     )
@@ -2093,18 +2131,16 @@ class GatewaySession(Base):
 
 
 class GatewayQuarantine(Base):
-    """A config version a gateway rejected as INVALID_CONFIG: no gateway in the scope is
+    """A config version a gateway rejected as INVALID_CONFIG: no gateway in the zone is
     sent it (docs/config-protocol.md). Every gateway gets the same snapshot, so the version is
-    withheld scope-wide; the row outlives sessions, and a newer published version is tried
+    withheld zone-wide; the row outlives sessions, and a newer published version is tried
     again from scratch.
     """
 
     __tablename__ = "gateway_quarantines"
-    __table_args__ = (PrimaryKeyConstraint("scope"),)
+    __table_args__ = (PrimaryKeyConstraint("zone"),)
 
-    scope: Mapped[str] = mapped_column(
-        ForeignKey("scopes.name", ondelete="RESTRICT"), nullable=False
-    )
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.name", ondelete="RESTRICT"), nullable=False)
     quarantined_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
     updated_at: Mapped[datetime] = _now()
 
@@ -2117,15 +2153,15 @@ class GatewayPlugin(Base):
 
     __tablename__ = "gateway_plugins"
     __table_args__ = (
-        PrimaryKeyConstraint("scope", "gateway_id", "kind", "name"),
+        PrimaryKeyConstraint("zone", "gateway_id", "kind", "name"),
         ForeignKeyConstraint(
-            ["scope", "gateway_id"],
-            ["gateway_sessions.scope", "gateway_sessions.gateway_id"],
+            ["zone", "gateway_id"],
+            ["gateway_sessions.zone", "gateway_sessions.gateway_id"],
             ondelete="CASCADE",
         ),
     )
 
-    scope: Mapped[str] = mapped_column(String(128), nullable=False)
+    zone: Mapped[str] = mapped_column(String(64), nullable=False)
     gateway_id: Mapped[str] = mapped_column(String(100), nullable=False)
     kind: Mapped[PluginKind] = mapped_column(_enum(PluginKind, "plugin_kind"), nullable=False)
     name: Mapped[str] = mapped_column(String(63), nullable=False)

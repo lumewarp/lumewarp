@@ -19,7 +19,7 @@ from lumewarp_control_plane.api.common import (
     enqueue_recompile,
     ensure_grants_managed,
     get_team_or_404,
-    lock_scope,
+    lock_hierarchy,
     mutation,
     parse_uuid_cursor,
     suspend_ineligible_user_keys,
@@ -282,7 +282,7 @@ async def _save_member(
     create_only: bool = False,
 ) -> MemberOut:
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         team = await get_team_or_404(session, authz, team_id)
         await authz.require(Action.TEAM_MEMBERS_MANAGE, team.id)
         ensure_grants_managed(request)
@@ -363,7 +363,7 @@ async def update_member(
     `managed_externally` when the authorization backend owns memberships.
     """
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         team = await get_team_or_404(session, authz, team_id)
         row = await _member_or_404(session, team.id, user_id)
         user = await session.get(User, user_id)
@@ -429,7 +429,7 @@ async def delete_member(
     installation role still lets them own keys here.
     """
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         team: Team = await get_team_or_404(session, authz, team_id)
         row = await _member_or_404(session, team.id, user_id)
         await authz.require(Action.TEAM_MEMBERS_MANAGE, team.id)

@@ -32,7 +32,7 @@ from lumewarp_control_plane.api.common import (
     ensure_key_read,
     ensure_not_null,
     get_team_or_404,
-    lock_scope,
+    lock_hierarchy,
     mutation,
     parse_uuid_cursor,
     validation_error,
@@ -631,7 +631,7 @@ async def create_key(
     """
     await _rate_limit(request, authz, "create", KEY_CREATE_LIMIT, metrics)
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         team = await get_team_or_404(session, authz, team_id)
         if body.service_account_id is None:
             await authz.require(Action.KEY_CREATE_OWN, team.id)
@@ -733,7 +733,7 @@ async def update_key(
     """
     await _rate_limit(request, authz, "update", KEY_UPDATE_LIMIT, metrics)
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         ensure_not_null(body, "name")
         row = await _get_key(session, authz, key_id)
         await _require_manage(authz, row)
@@ -830,7 +830,7 @@ async def revoke_key(
     Allowed for the owner and for a team admin. Revoking an already revoked key succeeds.
     """
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         row = await _get_key(session, authz, key_id)
         await _require_manage(authz, row)
         if row.lifecycle is not KeyLifecycle.REVOKED:
@@ -878,7 +878,7 @@ async def rotate_key(
     grace = (body or KeyRotate()).grace_seconds
     await _rate_limit(request, authz, "rotate", KEY_ROTATE_LIMIT, metrics)
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         row = await _get_key(session, authz, key_id)
         await _require_manage(authz, row)
         if row.lifecycle is KeyLifecycle.REVOKED:

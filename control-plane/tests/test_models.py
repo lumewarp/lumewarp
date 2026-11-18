@@ -21,7 +21,6 @@ from lumewarp_control_plane.models import (
     Model,
     ModelAccess,
     RequestOutcome,
-    Scope,
     ScopeType,
     Team,
     TeamMember,
@@ -31,6 +30,7 @@ from lumewarp_control_plane.models import (
     UsageEvent,
     UsageState,
     UsageTotal,
+    Zone,
 )
 from tests import factories
 
@@ -248,7 +248,7 @@ async def test_routing_checks(session: AsyncSession) -> None:
 async def _version(session: AsyncSession, version: int = 1) -> ConfigVersion:
     payload = b"snapshot"
     row = ConfigVersion(
-        scope="default",
+        zone="default",
         version=version,
         payload=payload,
         digest=hashlib.sha256(payload).digest(),
@@ -263,9 +263,9 @@ async def _version(session: AsyncSession, version: int = 1) -> ConfigVersion:
 
 
 async def test_config_versions_immutable(session: AsyncSession) -> None:
-    await factories.scope(session)
+    await factories.zone(session)
     await _version(session)
-    where = (ConfigVersion.scope == "default") & (ConfigVersion.version == 1)
+    where = (ConfigVersion.zone == "default") & (ConfigVersion.version == 1)
     for values in ({"payload": b"other"}, {"source_revision": 9}, {"digest": b"\x01" * 32}):
         with pytest.raises(DBAPIError, match="immutable"):
             async with session.begin_nested():
@@ -281,24 +281,24 @@ async def test_config_versions_immutable(session: AsyncSession) -> None:
         async with session.begin_nested():
             await session.execute(
                 update(ConfigVersion)
-                .where((ConfigVersion.scope == "default") & (ConfigVersion.version == 2))
+                .where((ConfigVersion.zone == "default") & (ConfigVersion.version == 2))
                 .values(payload=None)
             )
 
 
 async def test_enqueue_recompile(session: AsyncSession) -> None:
-    await factories.scope(session)
-    r1 = await outbox.enqueue_recompile(session, "default", "team.create")
-    r2 = await outbox.enqueue_recompile(session, "default", "key.revoke")
+    await factories.zone(session)
+    r1 = await outbox.enqueue_recompile(session, "team.create", "default")
+    r2 = await outbox.enqueue_recompile(session, "key.revoke", "default")
     assert r2 == r1 + 1
     rows = (await session.execute(select(ConfigOutbox).order_by(ConfigOutbox.id))).scalars().all()
     assert [(r.reason, r.source_revision, r.status.value) for r in rows] == [
         ("team.create", r1, "pending"),
         ("key.revoke", r2, "pending"),
     ]
-    assert (await session.get(Scope, "default")).source_revision == r2
+    assert (await session.get(Zone, "default")).source_revision == r2
     with pytest.raises(LookupError):
-        await outbox.enqueue_recompile(session, "nope", "x")
+        await outbox.enqueue_recompile(session, "x", "nope")
 
 
 async def test_audit_records_only_allowlisted_details(session: AsyncSession) -> None:

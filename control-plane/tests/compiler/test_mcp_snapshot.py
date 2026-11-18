@@ -9,7 +9,7 @@ from sqlalchemy import select
 
 from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as pb
 from lumewarp_control_plane.compiler import publish_pending, rollback_routing
-from lumewarp_control_plane.compiler.compile import CompileError, compile_scope
+from lumewarp_control_plane.compiler.compile import CompileError, compile_zone
 from lumewarp_control_plane.compiler.delta import diff
 from lumewarp_control_plane.compiler.plugins import PluginRejected
 from lumewarp_control_plane.db import SessionFactory
@@ -49,7 +49,7 @@ def definition(name: str, state: McpDefinitionState) -> McpDefinition:
 
 async def compile_(factory: SessionFactory, **kwargs):
     async with factory() as s:
-        return await compile_scope(s, SCOPE, require_local_membership=True, **kwargs)
+        return await compile_zone(s, SCOPE, require_local_membership=True, **kwargs)
 
 
 async def seed_key(factory: SessionFactory, **policy) -> tuple[Team, ApiKey]:

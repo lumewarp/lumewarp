@@ -21,9 +21,18 @@ from lumewarp_control_plane.models import (
     UsageState,
     UsageTotal,
     User,
+    Zone,
 )
 from lumewarp_control_plane.security import SecretKind, generate_secret
 from tests.factories import make_user
+
+
+async def set_playground_url(client, session, url: str = "http://gateway:4000") -> None:
+    """Point the default zone's Playground at a gateway, as an administrator would."""
+    zone = await session.get(Zone, client.app.state.settings.zone)
+    assert zone is not None
+    zone.playground_gateway_url = url
+    await session.commit()
 
 
 def auth(secret: str) -> dict[str, str]:
@@ -207,7 +216,7 @@ async def report_plugins(
         capabilities += [f"{CAPABILITY_PREFIX[kind]}:{name}" for kind, name in named]
     secret = generate_secret(SecretKind.GATEWAY_TOKEN)
     token = GatewayToken(
-        scope=scope,
+        zone=scope,
         name=gateway_id,
         token_hash=secret.hash,
         display_prefix=secret.display_prefix,
@@ -224,8 +233,8 @@ async def report_plugins(
     }
     await session.execute(
         insert(GatewaySession)
-        .values(scope=scope, gateway_id=gateway_id, **values)
-        .on_conflict_do_update(index_elements=["scope", "gateway_id"], set_=values)
+        .values(zone=scope, gateway_id=gateway_id, **values)
+        .on_conflict_do_update(index_elements=["zone", "gateway_id"], set_=values)
     )
     text = lambda schema: schema if isinstance(schema, str) else json.dumps(schema)  # noqa: E731
     reported = []

@@ -18,7 +18,7 @@ from lumewarp_control_plane.api.common import (
     enqueue_recompile,
     ensure_not_null,
     get_team_or_404,
-    lock_scope,
+    lock_hierarchy,
     mutation,
     uuid_page,
 )
@@ -115,7 +115,7 @@ async def create_team(
     archived org answers 409.
     """
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         org = await session.get(Org, body.org_id)
         # A caller who does not administer the org sees the same 404 as an unknown org.
         if org is None or not await authz.is_org_admin(org.id):
@@ -183,7 +183,7 @@ async def update_team(
     effective limit.
     """
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         ensure_not_null(body, "name")
         row = await get_team_or_404(session, authz, team_id)
         base = policy_of(row)
@@ -273,7 +273,7 @@ async def delete_team(
     name becomes free for a new live team. History (usage, audit) keeps resolving.
     """
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         # Read without the live-team guard: an already archived team answers 409 to a
         # reader, while anyone who cannot read it gets 404.
         row = await session.get(Team, team_id, with_for_update=True)

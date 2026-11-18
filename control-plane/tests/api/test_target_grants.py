@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumewarp_control_plane.compiler.compile import compile_scope
+from lumewarp_control_plane.compiler.compile import compile_zone
 from lumewarp_control_plane.mcp import hashing
 from lumewarp_control_plane.models import McpDefinitionKind, MemberPolicy
 from tests.api.helpers import ADMIN_AUTH, auth, suffix, user_with_token
@@ -43,7 +43,7 @@ async def server_with_tools(session, name: str, *tools: str):
 
 async def compiled(api_engine, api_scope: str):
     async with AsyncSession(api_engine) as session:
-        return await compile_scope(session, api_scope, require_local_membership=False)
+        return await compile_zone(session, api_scope, require_local_membership=False)
 
 
 def key_policy(compiled_snapshot, key) -> object:

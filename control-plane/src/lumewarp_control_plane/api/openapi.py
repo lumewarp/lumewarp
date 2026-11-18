@@ -95,6 +95,7 @@ TAGS = [
     {"name": "playground", "description": "Backs the Admin UI Playground. Session only."},
     {"name": "usage", "description": "Aggregated usage and cost."},
     {"name": "audit", "description": "The audit log of administrative changes."},
+    {"name": "zones", "description": "Config zones: independent catalogs and gateways."},
     {"name": "gateways", "description": "Connected gateways and their tokens (`lwg-…`)."},
     {"name": "config", "description": "Compiled config versions and rollback."},
     {"name": "health", "description": "Liveness and readiness. No authentication."},

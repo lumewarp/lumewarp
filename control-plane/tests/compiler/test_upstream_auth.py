@@ -7,7 +7,7 @@ import json
 import pytest
 
 from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as pb
-from lumewarp_control_plane.compiler.compile import compile_scope
+from lumewarp_control_plane.compiler.compile import compile_zone
 from lumewarp_control_plane.compiler.validate import SnapshotInvalid, validate_snapshot
 from lumewarp_control_plane.db import SessionFactory
 from tests import factories
@@ -16,7 +16,7 @@ from tests.compiler.helpers import SCOPE, seed_scope
 
 async def compile_(factory: SessionFactory):
     async with factory() as s:
-        return await compile_scope(s, SCOPE, require_local_membership=True)
+        return await compile_zone(s, SCOPE, require_local_membership=True)
 
 
 async def test_a_wasm_auth_plugin_is_emitted_with_its_capability(factory) -> None:

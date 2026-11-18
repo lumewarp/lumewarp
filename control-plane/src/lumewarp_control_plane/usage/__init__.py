@@ -456,7 +456,7 @@ async def _persist_events(
     by_id: dict[uuid.UUID, _PreparedEvent],
     keys: dict[uuid.UUID, ApiKey],
     accepted: int,
-    scope_name: str | None,
+    zone_name: str | None,
     rejected: Counter[str],
 ) -> int:
     # Insert in request_id order so overlapping batches take event row locks in one order.
@@ -519,7 +519,7 @@ async def _persist_events(
         )
     if hard_flipped or org_flipped:
         await outbox.enqueue_recompile(
-            session, scope_name or get_settings().scope, "usage budget exceeded"
+            session, "usage budget exceeded", zone_name or get_settings().zone
         )
     return accepted
 
@@ -529,7 +529,7 @@ async def ingest(
     gateway_id: str,
     events: Sequence[usage_pb2.UsageEvent],
     *,
-    scope_name: str | None = None,
+    zone_name: str | None = None,
     max_batch_events: int | None = None,
     skipped: Counter[str] | None = None,
 ) -> int:
@@ -593,7 +593,7 @@ async def ingest(
                 by_id,
                 keys,
                 len(events) - rejected.total(),
-                scope_name,
+                zone_name,
                 rejected,
             )
     finally:
@@ -612,14 +612,14 @@ async def ingest(
 
 async def _rollover_once(settings: Settings, session_factory: SessionFactory) -> None:
     async with session_factory() as session, session.begin():
-        await outbox.enqueue_recompile(session, settings.scope, "monthly budget rollover")
+        await outbox.enqueue_recompile(session, "monthly budget rollover")
         audit.record(
             session,
             actor_type=ActorType.SYSTEM,
             actor_id="budget-rollover",
             action="budget.monthly_rollover",
-            resource_type="scope",
-            resource_id=settings.scope,
+            resource_type="zone",
+            resource_id="all",
             details={"window_start": month_window(datetime.now(UTC))[0].isoformat()},
         )
 

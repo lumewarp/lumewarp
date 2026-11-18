@@ -80,9 +80,7 @@ def test_bad_chat_check_is_rejected(client, check) -> None:
 @pytest.fixture
 async def clean_sessions(committed, api_settings):
     yield
-    await committed.execute(
-        delete(GatewaySession).where(GatewaySession.scope == api_settings.scope)
-    )
+    await committed.execute(delete(GatewaySession).where(GatewaySession.zone == api_settings.zone))
     await committed.commit()
 
 
@@ -90,7 +88,7 @@ async def _report(committed, scope, gateway_id, health, *, connected=True) -> No
     now = datetime.now(UTC)
     secret = generate_secret(SecretKind.GATEWAY_TOKEN)
     token = GatewayToken(
-        scope=scope,
+        zone=scope,
         name=gateway_id,
         token_hash=secret.hash,
         display_prefix=secret.display_prefix,
@@ -99,7 +97,7 @@ async def _report(committed, scope, gateway_id, health, *, connected=True) -> No
     await committed.flush()
     committed.add(
         GatewaySession(
-            scope=scope,
+            zone=scope,
             gateway_id=gateway_id,
             token_id=token.id,
             session_id=uuid.uuid4(),
@@ -119,7 +117,7 @@ async def test_model_health_aggregates_connected_gateways(
     checked = _model(client, up, chat_check=CHECK)
     other = _model(client, up, chat_check=CHECK)
     plain = _model(client, up)
-    scope = api_settings.scope
+    scope = api_settings.zone
     await _report(committed, scope, "gw-a", {checked["name"]: True, other["name"]: True})
     await _report(committed, scope, "gw-b", {checked["name"]: False})
     await _report(committed, scope, "gw-c", {other["name"]: False}, connected=False)

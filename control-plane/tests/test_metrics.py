@@ -23,10 +23,10 @@ CONTRACT = {
     "lumewarp_cp_break_glass_logins": ("counter", {"result"}),
     "lumewarp_cp_compile_duration_seconds": ("histogram", set()),
     "lumewarp_cp_compile_failures": ("counter", set()),
-    "lumewarp_cp_config_version": ("gauge", set()),
+    "lumewarp_cp_config_version": ("gauge", {"zone"}),
     "lumewarp_cp_gateway_plugins_ignored": ("counter", {"kind"}),
-    "lumewarp_cp_outbox_pending": ("gauge", set()),
-    "lumewarp_cp_gateway_sessions": ("gauge", set()),
+    "lumewarp_cp_outbox_pending": ("gauge", {"zone"}),
+    "lumewarp_cp_gateway_sessions": ("gauge", {"zone"}),
     "lumewarp_cp_gateway_acks": ("counter", {"result"}),
     "lumewarp_cp_usage_events_ingested": ("counter", set()),
     "lumewarp_cp_usage_events_skipped": ("counter", {"reason"}),
@@ -123,10 +123,19 @@ def stub_background(monkeypatch):
     monkeypatch.setattr(app_module.usage, "rollover_scheduler", idle)
 
 
-async def test_serve_starts_and_stops_metrics_listener(settings: Settings, stub_background):
+async def test_serve_starts_and_stops_metrics_listener(settings: Settings, engine, stub_background):
     """`serve` exposes the app's registry on LUMEWARP_METRICS_BIND, not the admin port."""
+    import uuid
+
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from lumewarp_control_plane.models import Zone
+
+    settings = settings.model_copy(update={"zone": f"metrics-{uuid.uuid4().hex[:8]}"})
+    async with AsyncSession(engine) as session, session.begin():
+        session.add(Zone(name=settings.zone))
     app = create_app(settings.model_copy(update={"metrics_bind": "127.0.0.1:0"}))
-    app.state.metrics.outbox_pending.set(-1)
+    app.state.metrics.outbox_pending.labels(zone=settings.zone).set(-1)
     runtime = await start_background(app)
     try:
         assert runtime.metrics_server is not None
@@ -134,11 +143,13 @@ async def test_serve_starts_and_stops_metrics_listener(settings: Settings, stub_
         async with httpx.AsyncClient() as http:
             for _ in range(100):
                 families = _families((await http.get(f"http://127.0.0.1:{port}/metrics")).text)
-                if families["lumewarp_cp_outbox_pending"].samples[0].value == 0:
+                if all(
+                    sample.value == 0 for sample in families["lumewarp_cp_outbox_pending"].samples
+                ):
                     break
                 await asyncio.sleep(0.05)
         # The DB gauge refresher ran against the test database (no pending outbox rows).
-        assert families["lumewarp_cp_outbox_pending"].samples[0].value == 0
+        assert all(sample.value == 0 for sample in families["lumewarp_cp_outbox_pending"].samples)
         assert runtime.tasks["metrics"].done() is False
         backends = {s.labels["backend"] for s in families["lumewarp_cp_authz_checks"].samples}
         assert backends == {"builtin"}

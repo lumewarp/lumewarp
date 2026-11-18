@@ -1,4 +1,4 @@
-"""compile_scope: source state -> one resolved Snapshot (not yet versioned)."""
+"""compile_zone: source state -> one resolved Snapshot (not yet versioned)."""
 
 import logging
 import uuid
@@ -53,7 +53,6 @@ from lumewarp_control_plane.models import (
     RouterMember,
     RouterSplit,
     RouterSplitMember,
-    Scope,
     ScopeType,
     ServiceAccount,
     StickyBy,
@@ -64,6 +63,7 @@ from lumewarp_control_plane.models import (
     UpstreamKind,
     UsageTotal,
     User,
+    Zone,
 )
 from lumewarp_control_plane.quota import (
     key_effective,
@@ -117,7 +117,7 @@ class CompileError(Exception):
 
 @dataclass(frozen=True)
 class CompiledSnapshot:
-    """Result of `compile_scope`, not yet published.
+    """Result of `compile_zone`, not yet published.
 
     `snapshot.version` and `created_at_unix_ms` are 0 here; publishing assigns them.
     `warnings` lists source entities left out of the snapshot (e.g. an empty router).
@@ -271,21 +271,21 @@ def expiry_ms(expires_at: datetime | None) -> int:
     return max(_ms(expires_at), 1)
 
 
-async def compile_scope(
+async def compile_zone(
     session: AsyncSession,
-    scope: str,
+    zone: str,
     *,
     now: datetime | None = None,
     max_snapshot_bytes: int | None = None,
     max_snapshot_keys: int | None = None,
     require_local_membership: bool,
 ) -> CompiledSnapshot:
-    """Compile the current source state of `scope` into a snapshot.
+    """Compile the current source state of `zone` into a snapshot.
 
     Pure over source state read in `session` (plus `now` for the budget window);
     the caller runs it in one REPEATABLE READ transaction, or holds the
-    scope row lock, so every table is read at one consistent point and `source_revision`
-    is `scopes.source_revision` as seen there.
+    hierarchy lock, so every table is read at one consistent point and `source_revision`
+    is `zones.source_revision` as seen there.
 
     Contract:
     - Expands org -> team -> owner (member or service account) -> key policy into each
@@ -340,9 +340,9 @@ async def compile_scope(
     max_keys = max_snapshot_keys or settings.max_snapshot_keys
     warnings: list[str] = []
 
-    revision = await session.scalar(select(Scope.source_revision).where(Scope.name == scope))
+    revision = await session.scalar(select(Zone.source_revision).where(Zone.name == zone))
     if revision is None:
-        raise CompileError(f"unknown config scope {scope!r}")
+        raise CompileError(f"unknown config zone {zone!r}")
 
     # Routing. Rename and rollback may have run in this session, hence populate_existing.
     upstreams = (await session.scalars(select(Upstream).order_by(Upstream.name))).all()
@@ -360,7 +360,7 @@ async def compile_scope(
         set(caps)
         for caps in await session.scalars(
             select(GatewaySession.capabilities).where(
-                GatewaySession.scope == scope, GatewaySession.connected.is_(True)
+                GatewaySession.zone == zone, GatewaySession.connected.is_(True)
             )
         )
     ]
@@ -393,7 +393,7 @@ async def compile_scope(
     for sr in split_rows:
         splits.setdefault(sr.router_id, []).append(sr)
 
-    snap = pb.Snapshot(scope=scope)
+    snap = pb.Snapshot(zone=zone)
     # Source entities the gateway would reject are left out (with a warning) instead of
     # failing the compile, so one bad routing row never blocks revocations or budget
     # blocks for the whole fleet. The API should already refuse them (422).
@@ -920,7 +920,7 @@ async def compile_scope(
     except SnapshotInvalid as exc:
         raise CompileError(str(exc)) from exc
     for w in warnings:
-        log.warning("compile %s: %s", scope, w)
+        log.warning("compile %s: %s", zone, w)
     return CompiledSnapshot(
         snapshot=snap,
         source_revision=revision,

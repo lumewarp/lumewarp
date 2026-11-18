@@ -26,12 +26,12 @@ async def test_key_mutation_and_member_removal_do_not_deadlock(
     key_scope_locked = asyncio.Event()
     key_locked = asyncio.Event()
     removal_scope_attempted = asyncio.Event()
-    original_key_scope = keys.lock_scope
+    original_key_scope = keys.lock_hierarchy
     original_get_key = keys._get_key
-    original_member_scope = members.lock_scope
+    original_member_scope = members.lock_hierarchy
 
-    async def key_scope(session, settings):
-        await original_key_scope(session, settings)
+    async def key_scope(session):
+        await original_key_scope(session)
         key_scope_locked.set()
 
     async def get_key(session, authz, key_id):
@@ -41,14 +41,14 @@ async def test_key_mutation_and_member_removal_do_not_deadlock(
         await removal_scope_attempted.wait()
         return row
 
-    async def member_scope(session, settings):
+    async def member_scope(session):
         await key_locked.wait()
         removal_scope_attempted.set()
-        await original_member_scope(session, settings)
+        await original_member_scope(session)
 
-    monkeypatch.setattr(keys, "lock_scope", key_scope)
+    monkeypatch.setattr(keys, "lock_hierarchy", key_scope)
     monkeypatch.setattr(keys, "_get_key", get_key)
-    monkeypatch.setattr(members, "lock_scope", member_scope)
+    monkeypatch.setattr(members, "lock_hierarchy", member_scope)
     authz = RequestAuthz(Principal(kind=PrincipalKind.BREAK_GLASS), client.app.state.authorizer)
     request = SimpleNamespace(app=client.app)
     async with (

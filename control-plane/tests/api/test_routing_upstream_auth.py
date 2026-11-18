@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane import upstream_client
 from lumewarp_control_plane._proto.lumewarp.config.v1 import config_service_pb2 as cpb
-from lumewarp_control_plane.compiler.compile import compile_scope
+from lumewarp_control_plane.compiler.compile import compile_zone
 from lumewarp_control_plane.grpc import ProbeGatewayGone, ProbeTimeout, ProbeUnavailable
 from lumewarp_control_plane.models import (
     AuditLog,
@@ -242,7 +242,7 @@ async def test_compile_emits_auth_and_its_capability(client, committed, api_sett
     await gateway()
     body = _create(client, auth=AUTH).json()
     committed.expire_all()
-    compiled = await compile_scope(committed, api_settings.scope, require_local_membership=True)
+    compiled = await compile_zone(committed, api_settings.zone, require_local_membership=True)
     upstream = next(u for u in compiled.snapshot.upstreams if u.name == body["name"])
     assert upstream.auth.plugin.plugin == PLUGIN
     assert upstream.auth.plugin.params_json == '{"ttl_ms":1000}'

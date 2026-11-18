@@ -6,7 +6,7 @@ fetched (`AgentCardReport`) on the config stream, next to `HealthReport`. Each r
 to what was reported before; unlike a health report it never replaces it.
 
 The report is untrusted. Nothing here trusts it (L3): the target id must be present and
-still match the name, the config version must be one this scope published and must have
+still match the name, the config version must be one this zone published and must have
 been compiled after the target's last write (see `McpServer.config_revision`; a card write
 never moves it, so a fetch cannot make the report it came in stale), the hash is
 recomputed from `definition_json` and a mismatch discards the entry, and the plan's
@@ -24,7 +24,7 @@ The decisions:
   a review.
 - A hash that was rejected stays rejected: the row for that (server, kind, name, hash) is
   never rewritten, only its `last_seen_at` moves.
-- Ingestion takes the scope row lock, then the target rows, in the same order as every API
+- Ingestion takes the hierarchy lock, then the target rows, in the same order as every API
   write, so two gateways reporting the same name at once still produce one row and one
   decision. A new config version is published only when a set of states actually changed;
   the config outbox coalesces such changes into one compile.
@@ -55,7 +55,6 @@ from lumewarp_control_plane.models import (
     McpDefinitionState,
     McpReviewMode,
     McpServer,
-    Scope,
 )
 from lumewarp_control_plane.settings import get_settings
 
@@ -126,23 +125,13 @@ class IngestResult:
         self.discarded.update(other.discarded)
 
 
-async def lock_scope(session: AsyncSession, scope: str) -> bool:
-    """Take the scope row lock (the lock order every writer shares: scope, then target rows).
-
-    Serializing with API edits means a report and an edit cannot deadlock, and two
-    gateways reporting at the same moment make one decision between them.
-    """
-    locked = await session.scalar(select(Scope.name).where(Scope.name == scope).with_for_update())
-    return locked is not None
-
-
 async def _version_revisions(
-    session: AsyncSession, scope: str, versions: Iterable[int]
+    session: AsyncSession, zone: str, versions: Iterable[int]
 ) -> dict[int, int]:
     """The source revision each named config version was compiled from.
 
     Compaction keeps the metadata, so a retained older version can still be checked. A
-    version 0, one this scope never published, or one a bigint cannot hold has no entry: it
+    version 0, one this zone never published, or one a bigint cannot hold has no entry: it
     cannot be proven and the item that claims it is discarded.
     """
     wanted = sorted({version for version in versions if 1 <= version <= MAX_CONFIG_VERSION})
@@ -150,7 +139,7 @@ async def _version_revisions(
         return {}
     rows = await session.execute(
         select(ConfigVersion.version, ConfigVersion.source_revision).where(
-            ConfigVersion.scope == scope, ConfigVersion.version.in_(wanted)
+            ConfigVersion.zone == zone, ConfigVersion.version.in_(wanted)
         )
     )
     return {version: revision for version, revision in rows}
@@ -250,7 +239,7 @@ async def record_observations(
 ) -> IngestResult:
     """Store observations of one server under the first-writer rule.
 
-    The caller holds the scope row lock and has locked `server`, so the read-decide-insert
+    The caller holds the hierarchy lock and has locked `server`, so the read-decide-insert
     sequence cannot interleave with another writer. `auto_approved` only applies to a name
     nobody has seen, and never under MANUAL: a report's flag cannot overrule the review mode.
     """
@@ -329,25 +318,24 @@ async def ingest_report(
     gateway_id: str,
     report: cpb.CatalogReport,
     *,
-    scope: str | None = None,
+    zone: str | None = None,
     now: datetime | None = None,
 ) -> IngestResult:
     """Record one `CatalogReport` from `gateway_id` in the caller's transaction.
 
     Every item names the target id and the config version the gateway served (L3). Both are
-    required: a missing or mismatched id is `stale_id`, and a version this scope never
+    required: a missing or mismatched id is `stale_id`, and a version this zone never
     published, or one compiled before the target's last write, is `stale_version`. The
     alternative (trusting whatever a report says) would let an old upstream's definitions
     be recorded against the current one. Bounded before this point (`grpc._MAX_CATALOG_*`)
     and again here; `gateway_id` is unused for the decision (any gateway's observation
     counts the same) and is never stored on a definition.
     """
-    del gateway_id  # observations count the same from any gateway of the scope
-    scope = scope or get_settings().scope
+    del gateway_id  # observations count the same from any gateway of the zone
+    zone = zone or get_settings().zone
     now = now or datetime.now(UTC)
     result = IngestResult()
-    if not await lock_scope(session, scope):
-        return result
+    await outbox.lock_hierarchy(session)
     # Apply the per-report caps before anything reaches SQL: an excess item (and a version a
     # bigint cannot hold) is dropped by itself, instead of widening the batch queries and
     # failing the transaction of every other item in the report (N2).
@@ -358,7 +346,7 @@ async def ingest_report(
         result.discarded["report_limit"] += excess
     revisions = await _version_revisions(
         session,
-        scope,
+        zone,
         (
             *(item.config_version for item in definitions),
             *(card.config_version for card in cards),
@@ -456,7 +444,7 @@ async def ingest_report(
     await session.flush()
 
     if result.changed:
-        await outbox.enqueue_recompile(session, scope, "catalog.report")
+        await outbox.enqueue_recompile(session, "catalog.report", zone)
     return result
 
 

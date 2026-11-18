@@ -1,5 +1,6 @@
 """Process settings, read from `LUMEWARP_*` environment variables."""
 
+import re
 from functools import lru_cache
 from ipaddress import ip_network
 from typing import Annotated
@@ -92,7 +93,8 @@ class Settings(BaseSettings):
     # same value to open them; changing it makes stored keys unreadable until re-entered.
     # Separate from `secret_key`, which never leaves the control plane.
     encryption_key: SecretStr | None = Field(default=None, min_length=32)
-    # Gateway client listener for the session-authenticated Playground proxy; unset disables it.
+    # Gateway client listener for the session-authenticated Playground proxy, used as the
+    # default zone's Playground URL; unset disables it there.
     playground_gateway_url: str | None = None
     oidc_issuer: str | None = None
     oidc_client_id: str | None = None
@@ -111,8 +113,9 @@ class Settings(BaseSettings):
     session_ttl_seconds: int = Field(default=12 * 3600, ge=60)
     # `Secure` on the session cookie. Turn off only for plain-http dev on a non-localhost.
     session_cookie_secure: bool = True
-    # Config scope this control plane publishes (Snapshot.scope).
-    scope: str = "default"
+    # Default config zone this control plane publishes (Snapshot.zone) and creates at
+    # startup. Other zones are managed through the zones API.
+    zone: str = "default"
 
     # Limits shared with the gateway, see docs/config-protocol.md.
     max_snapshot_bytes: int = 64 * MIB
@@ -138,6 +141,13 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             value = [item.strip() for item in value.split(",") if item.strip()]
         return [ip_network(item) for item in value]
+
+    @field_validator("zone")
+    @classmethod
+    def _check_zone(cls, v: str) -> str:
+        if not re.fullmatch(r"[a-z][a-z0-9-]{0,62}", v):
+            raise ValueError("must match ^[a-z][a-z0-9-]{0,62}$")
+        return v
 
     @field_validator("http_bind", "grpc_bind")
     @classmethod

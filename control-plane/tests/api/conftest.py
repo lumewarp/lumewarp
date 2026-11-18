@@ -21,14 +21,17 @@ from lumewarp_control_plane.auth.sessions import csrf_token
 from lumewarp_control_plane.models import (
     A2aAgent,
     A2aAgentGrant,
+    ConfigOutbox,
+    ConfigVersion,
     GatewayPlugin,
+    GatewayQuarantine,
     GatewaySession,
     GatewayToken,
     McpDefinition,
     McpServer,
     McpServerGrant,
-    Scope,
     UserSession,
+    Zone,
 )
 from lumewarp_control_plane.security import PrincipalKind, hash_secret
 from lumewarp_control_plane.settings import Settings
@@ -55,8 +58,8 @@ async def api_engine(api_database_url: str) -> AsyncIterator[AsyncEngine]:
 @pytest.fixture(scope="session")
 async def api_scope(api_engine: AsyncEngine) -> str:
     async with AsyncSession(api_engine, expire_on_commit=False) as session:
-        if await session.get(Scope, API_SCOPE) is None:
-            session.add(Scope(name=API_SCOPE))
+        if await session.get(Zone, API_SCOPE) is None:
+            session.add(Zone(name=API_SCOPE))
             await session.commit()
         credential = await session.scalar(
             select(UserSession).where(UserSession.token_hash == hash_secret("test-admin-session"))
@@ -92,19 +95,36 @@ async def api_settings(api_database_url: str, api_scope: str, api_engine: AsyncE
         break_glass_password=ADMIN_PASSWORD,
         dev_mode=True,
         session_cookie_secure=False,
-        scope=api_scope,
+        zone=api_scope,
         encryption_key=TEST_ENCRYPTION_KEY,
     )
 
 
 @pytest.fixture(autouse=True)
 async def clean_gateways(api_engine: AsyncEngine) -> AsyncIterator[None]:
-    """No gateway of one test may count as connected in the next one."""
+    """No gateway, config version or extra zone of one test may count in the next one.
+
+    A hierarchy write fans out to every live zone, so a zone another test created would
+    double the outbox rows this file's tests count. Config versions are per zone too, and a
+    rollback published in one test's zone must not become the newest version of `API_SCOPE`.
+    """
     yield
     async with AsyncSession(api_engine) as session, session.begin():
-        await session.execute(delete(GatewayPlugin).where(GatewayPlugin.scope == API_SCOPE))
-        await session.execute(delete(GatewaySession).where(GatewaySession.scope == API_SCOPE))
-        await session.execute(delete(GatewayToken).where(GatewayToken.scope == API_SCOPE))
+        extra = (await session.scalars(select(Zone.name).where(Zone.name != API_SCOPE))).all()
+        for zone in extra:
+            await session.execute(delete(GatewayPlugin).where(GatewayPlugin.zone == zone))
+            await session.execute(delete(GatewaySession).where(GatewaySession.zone == zone))
+            await session.execute(delete(GatewayToken).where(GatewayToken.zone == zone))
+            await session.execute(delete(GatewayQuarantine).where(GatewayQuarantine.zone == zone))
+            await session.execute(delete(ConfigOutbox).where(ConfigOutbox.zone == zone))
+            await session.execute(delete(ConfigVersion).where(ConfigVersion.zone == zone))
+            await session.execute(delete(Zone).where(Zone.name == zone))
+        await session.execute(delete(GatewayPlugin).where(GatewayPlugin.zone == API_SCOPE))
+        await session.execute(delete(GatewaySession).where(GatewaySession.zone == API_SCOPE))
+        await session.execute(delete(GatewayToken).where(GatewayToken.zone == API_SCOPE))
+        await session.execute(delete(GatewayQuarantine).where(GatewayQuarantine.zone == API_SCOPE))
+        await session.execute(delete(ConfigOutbox).where(ConfigOutbox.zone == API_SCOPE))
+        await session.execute(delete(ConfigVersion).where(ConfigVersion.zone == API_SCOPE))
 
 
 @pytest.fixture

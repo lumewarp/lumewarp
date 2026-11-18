@@ -32,7 +32,6 @@ from lumewarp_control_plane.models import (
     Router,
     RouterFallback,
     RouterMember,
-    Scope,
     ServiceAccount,
     Team,
     TeamMember,
@@ -40,6 +39,7 @@ from lumewarp_control_plane.models import (
     Upstream,
     UpstreamKind,
     User,
+    Zone,
 )
 from lumewarp_control_plane.security import SecretKind, generate_secret
 
@@ -50,8 +50,8 @@ def _unique(prefix: str) -> str:
     return f"{prefix}-{next(_seq)}-{uuid7().hex[-6:]}"
 
 
-async def scope(session: AsyncSession, name: str = "default") -> Scope:
-    row = Scope(name=name)
+async def zone(session: AsyncSession, name: str = "default") -> Zone:
+    row = Zone(name=name)
     session.add(row)
     await session.flush()
     return row

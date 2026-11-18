@@ -7,7 +7,7 @@ import uuid
 import pytest
 from sqlalchemy import select
 
-from lumewarp_control_plane.compiler import compile_scope
+from lumewarp_control_plane.compiler import compile_zone
 from lumewarp_control_plane.models import (
     AuditLog,
     CatalogKind,
@@ -479,7 +479,7 @@ async def test_snapshot_expands_grants_to_current_names(client, committed, api_s
     )["key"]
     new = _name("renamed-alias")
     _ok(client.patch(f"{API}/aliases/{alias['id']}", json={"name": new}, headers=H), 200)
-    compiled = await compile_scope(committed, api_settings.scope, require_local_membership=True)
+    compiled = await compile_zone(committed, api_settings.zone, require_local_membership=True)
     wire = next(k for k in compiled.snapshot.api_keys if k.key_id == key["id"])
     # Permission is by called name: only the alias was granted to the owner.
     assert list(wire.policy.allowed_models) == [new]

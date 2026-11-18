@@ -99,10 +99,10 @@ async def test_parent_decrease_succeeds_and_effective_values_clamp(
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from lumewarp_control_plane.compiler import compile_scope
+    from lumewarp_control_plane.compiler import compile_zone
 
     async with AsyncSession(api_engine, expire_on_commit=False) as session:
-        compiled = await compile_scope(session, "api-test", require_local_membership=True)
+        compiled = await compile_zone(session, "api-test", require_local_membership=True)
     wire = next(k for k in compiled.snapshot.api_keys if k.key_id == str(key.id))
     scopes = {s.id: s.limit.requests_per_minute for s in wire.policy.rate_limit_scopes}
     team_scope = scopes[f"team:{team.id}"]
@@ -173,12 +173,12 @@ async def test_team_locks_scope_before_validation(client, committed, monkeypatch
 
     team = await make_team(committed, rpm_limit=100)
     await committed.commit()
-    original_lock = teams.lock_scope
+    original_lock = teams.lock_hierarchy
     original_validate = teams.validate_team_policy
     calls = []
 
-    async def lock(session, settings):
-        await original_lock(session, settings)
+    async def lock(session):
+        await original_lock(session)
         calls.append("locked")
 
     async def validate(session, row, proposed, base):
@@ -186,7 +186,7 @@ async def test_team_locks_scope_before_validation(client, committed, monkeypatch
         calls.append("validate")
         await original_validate(session, row, proposed, base)
 
-    monkeypatch.setattr(teams, "lock_scope", lock)
+    monkeypatch.setattr(teams, "lock_hierarchy", lock)
     monkeypatch.setattr(teams, "validate_team_policy", validate)
     response = client.patch(f"/api/v1/teams/{team.id}", json={"rpm_limit": 10}, headers=ADMIN_AUTH)
     assert response.status_code == 200, response.text

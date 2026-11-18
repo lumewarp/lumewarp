@@ -324,7 +324,7 @@ async def test_revoking_the_reporting_token_ends_the_report_whatever_other_token
     other = generate_secret(SecretKind.GATEWAY_TOKEN)
     committed.add(
         GatewayToken(
-            scope=api_scope,
+            zone=api_scope,
             name="unused",
             token_hash=other.hash,
             display_prefix=other.display_prefix,
@@ -349,7 +349,7 @@ async def test_a_report_of_another_token_is_ignored_when_that_token_is_revoked(
     # A second token's Hello whose reports could not be stored: the old rows stay behind.
     second = generate_secret(SecretKind.GATEWAY_TOKEN)
     token = GatewayToken(
-        scope=api_scope,
+        zone=api_scope,
         name="second",
         token_hash=second.hash,
         display_prefix=second.display_prefix,
@@ -551,7 +551,7 @@ async def test_validate_plugin_params_applies_a_reported_auth_schema(
 
     async def check(value: dict, *, plugin: str = name, force: bool = False) -> list[str]:
         return await validate_plugin_params(
-            committed, PluginKind.UPSTREAM_AUTH, plugin, value, force=force, scope=api_scope
+            committed, PluginKind.UPSTREAM_AUTH, plugin, value, force=force, zone=api_scope
         )
 
     assert await check(params) == []
@@ -577,19 +577,19 @@ async def test_validate_plugin_params_needs_force_for_a_gateway_lacking_it(
     await report("lacks-it", {}, connected=True)
     with pytest.raises(PluginRejected) as error:
         await validate_plugin_params(
-            committed, PluginKind.UPSTREAM_AUTH, name, {"ttl_ms": 1}, force=False, scope=api_scope
+            committed, PluginKind.UPSTREAM_AUTH, name, {"ttl_ms": 1}, force=False, zone=api_scope
         )
     assert error.value.field == "plugin"
     assert f"{PREFIX}lacks-it" in error.value.message
     assert f"{PREFIX}has-it" not in error.value.message
     missing = await validate_plugin_params(
-        committed, PluginKind.UPSTREAM_AUTH, name, {"ttl_ms": 1}, force=True, scope=api_scope
+        committed, PluginKind.UPSTREAM_AUTH, name, {"ttl_ms": 1}, force=True, zone=api_scope
     )
     assert missing == [f"{PREFIX}lacks-it"]
     # force never excuses settings that fail a schema.
     with pytest.raises(PluginRejected, match="params.ttl_ms"):
         await validate_plugin_params(
-            committed, PluginKind.UPSTREAM_AUTH, name, {"ttl_ms": 0}, force=True, scope=api_scope
+            committed, PluginKind.UPSTREAM_AUTH, name, {"ttl_ms": 0}, force=True, zone=api_scope
         )
 
 

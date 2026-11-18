@@ -256,8 +256,8 @@ gateway 原生輸出 Prometheus `/metrics` 與（選用）OTLP traces；control 
 | `lumewarp_shared_limits_fallback`、`lumewarp_shared_limits_last_sync_age_seconds`、`lumewarp_shared_limits_scopes` | — | 是否退回本機計數、距上次成功同步的秒數、上次同步的 scope 數 |
 | `lumewarp_config_version`、`lumewarp_config_apply_failures_total` | gateway | 設定同步 |
 | `lumewarp_cp_compile_duration_seconds`、`lumewarp_cp_compile_failures_total` | — | 設定編譯（CP） |
-| `lumewarp_cp_config_version`、`lumewarp_cp_outbox_pending` | — | 最新發布版本與 outbox 積壓（CP） |
-| `lumewarp_cp_gateway_sessions`、`lumewarp_cp_gateway_acks_total` | result（ack／nack） | config stream 連線與回覆（CP） |
+| `lumewarp_cp_config_version`、`lumewarp_cp_outbox_pending` | zone | 每個 zone 的最新發布版本與 outbox 積壓（CP） |
+| `lumewarp_cp_gateway_sessions`、`lumewarp_cp_gateway_acks_total` | zone；result（ack／nack） | config stream 連線與回覆（CP） |
 | `lumewarp_cp_gateway_plugins_ignored_total` | kind | `Hello` 中超出上限或名稱不合法而被忽略的 plugin（CP） |
 | `lumewarp_cp_mcp_catalog_definitions_total` | result（approved／pending／known） | 從回報與 Discover 存入的 MCP 定義（CP） |
 | `lumewarp_cp_mcp_catalog_discarded_total` | reason | 被丟棄的 MCP 定義回報（id／版本過舊、hash 不符、超出上限等；CP） |

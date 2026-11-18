@@ -161,10 +161,10 @@ async def test_external_backend_without_member_rows_gets_defaults_and_owner_scop
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from lumewarp_control_plane.compiler import compile_scope
+    from lumewarp_control_plane.compiler import compile_zone
 
     async with AsyncSession(api_engine, expire_on_commit=False) as session:
-        compiled = await compile_scope(session, "api-test", require_local_membership=False)
+        compiled = await compile_zone(session, "api-test", require_local_membership=False)
     wire = next(k for k in compiled.snapshot.api_keys if k.key_id == created.json()["key"]["id"])
     ids = [(scope.id, scope.limit.requests_per_minute) for scope in wire.policy.rate_limit_scopes]
     assert ids == [

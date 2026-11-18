@@ -4,14 +4,14 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 
 from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as pb
-from lumewarp_control_plane.compiler.compile import CompileError, compile_scope
+from lumewarp_control_plane.compiler.compile import CompileError, compile_zone
 from tests import factories
 from tests.compiler.helpers import OCT, SCOPE, seed_scope
 
 
 async def compile_(factory):
     async with factory() as session:
-        return await compile_scope(session, SCOPE, now=OCT, require_local_membership=True)
+        return await compile_zone(session, SCOPE, now=OCT, require_local_membership=True)
 
 
 @pytest.mark.parametrize(

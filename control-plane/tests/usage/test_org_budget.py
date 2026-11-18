@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from lumewarp_control_plane._proto.lumewarp.usage.v1 import usage_pb2
-from lumewarp_control_plane.compiler import compile_scope
+from lumewarp_control_plane.compiler import compile_zone
 from lumewarp_control_plane.db import SessionFactory, create_session_factory
 from lumewarp_control_plane.ids import uuid7
 from lumewarp_control_plane.models import (
@@ -18,9 +18,9 @@ from lumewarp_control_plane.models import (
     AuditLog,
     Org,
     OrgBudgetWindow,
-    Scope,
     ScopeType,
     UsageTotal,
+    Zone,
 )
 from lumewarp_control_plane.usage import ingest
 from tests import factories
@@ -52,7 +52,7 @@ async def _seed(
 ) -> tuple[str, Org, list[ApiKey]]:
     scope_name = f"org-budget-{uuid7().hex}"
     async with factory() as session, session.begin():
-        session.add(Scope(name=scope_name))
+        session.add(Zone(name=scope_name))
         org = await factories.make_org(session, f"org-{uuid7().hex[-10:]}", budget_nano_usd=budget)
         keys: list[ApiKey] = []
         for index in range(teams):
@@ -81,7 +81,7 @@ async def session_factory(engine: AsyncEngine) -> SessionFactory:
 
 async def _report(session_factory: SessionFactory, scope: str, key: ApiKey, cost: int) -> int:
     async with session_factory() as session, session.begin():
-        return await ingest(session, "gateway-a", [_event(key, cost=cost)], scope_name=scope)
+        return await ingest(session, "gateway-a", [_event(key, cost=cost)], zone_name=scope)
 
 
 @pytest.mark.asyncio
@@ -133,7 +133,7 @@ async def test_concurrent_teams_cross_the_org_budget_exactly_once(
             )
             == 0
         )
-        compiled = await compile_scope(session, scope_name, require_local_membership=True)
+        compiled = await compile_zone(session, scope_name, require_local_membership=True)
     by_id = {wire.key_id: wire for wire in compiled.snapshot.api_keys}
     for key in keys:
         # KEY_STATUS_BUDGET_EXCEEDED arrives with the next compile after ingest.
@@ -165,7 +165,7 @@ async def test_an_org_without_a_budget_is_not_checked(session_factory: SessionFa
             )
             == 0
         )
-        compiled = await compile_scope(session, scope_name, require_local_membership=True)
+        compiled = await compile_zone(session, scope_name, require_local_membership=True)
     wire = next(k for k in compiled.snapshot.api_keys if k.key_id == str(keys[0].id))
     assert wire.status == 1  # KEY_STATUS_ACTIVE
 
@@ -196,6 +196,6 @@ async def test_zero_budget_reports_once_across_batches(session_factory: SessionF
             )
             == 1
         )
-        compiled = await compile_scope(session, scope_name, require_local_membership=True)
+        compiled = await compile_zone(session, scope_name, require_local_membership=True)
     wire = next(k for k in compiled.snapshot.api_keys if k.key_id == str(keys[0].id))
     assert wire.status == 3

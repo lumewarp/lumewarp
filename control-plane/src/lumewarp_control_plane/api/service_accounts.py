@@ -17,7 +17,7 @@ from lumewarp_control_plane.api.common import (
     enqueue_recompile,
     ensure_not_null,
     get_team_or_404,
-    lock_scope,
+    lock_hierarchy,
     mutation,
     uuid_page,
 )
@@ -97,7 +97,7 @@ async def create_service_account(
 ) -> ServiceAccountOut:
     """Create a service account, a non-human key owner of the team. Requires a team admin."""
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         team = await get_team_or_404(session, authz, team_id)
         await authz.require(Action.SERVICE_ACCOUNT_MANAGE, team.id)
         policy = policy_from_fields(body, default_mode=ModelAccess.INHERIT)
@@ -155,7 +155,7 @@ async def update_service_account(
     deactivated service account stop authenticating.
     """
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         ensure_not_null(body, "name", "description")
         row, team = await _account_or_404(session, authz, account_id)
         await authz.require(Action.SERVICE_ACCOUNT_MANAGE, row.team_id)
@@ -210,7 +210,7 @@ async def delete_service_account(
     because usage history refers to them; deactivate it instead.
     """
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         row, _ = await _account_or_404(session, authz, account_id)
         await authz.require(Action.SERVICE_ACCOUNT_MANAGE, row.team_id)
         key = await session.scalar(

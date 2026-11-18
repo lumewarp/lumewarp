@@ -3,7 +3,7 @@
 import pytest
 from sqlalchemy import delete, select
 
-from lumewarp_control_plane.compiler import compile_scope, publish_pending, rollback_routing
+from lumewarp_control_plane.compiler import compile_zone, publish_pending, rollback_routing
 from lumewarp_control_plane.models import (
     Alias,
     CatalogName,
@@ -205,7 +205,7 @@ async def _rollback_and_compare(factory):
         assert await rollback_routing(session, SCOPE, 1, require_local_membership=True) == 3
     restored = await load_version(factory, 3)
     async with factory() as session:
-        recompiled = (await compile_scope(session, SCOPE, require_local_membership=True)).snapshot
+        recompiled = (await compile_zone(session, SCOPE, require_local_membership=True)).snapshot
     for field in fields:
         assert list(getattr(restored, field)) == list(getattr(before, field)), field
         assert list(getattr(recompiled, field)) == list(getattr(before, field)), field

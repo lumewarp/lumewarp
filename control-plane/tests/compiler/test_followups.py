@@ -29,7 +29,7 @@ async def test_restart_and_noop_recompile_keep_version(factory) -> None:
 
     # Startup's rollover scheduler enqueues work even in the same month. Publication
     # time and revision differ but the gateway-visible content has not changed.
-    await _rollover_once(Settings(scope=SCOPE), factory)
+    await _rollover_once(Settings(zone=SCOPE), factory)
     assert (
         await publisher.publish_pending(
             factory,
@@ -66,7 +66,7 @@ async def test_config_insert_serialization_conflict_retries_fresh_snapshot(
             text("""
             CREATE FUNCTION conflict_on_config_insert() RETURNS trigger LANGUAGE plpgsql AS $$
             BEGIN
-                PERFORM 1 FROM scopes WHERE name = NEW.scope FOR UPDATE;
+                PERFORM 1 FROM zones WHERE name = NEW.zone FOR UPDATE;
                 RETURN NEW;
             END $$
         """)

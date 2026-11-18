@@ -9,7 +9,7 @@ import pytest
 from sqlalchemy import select
 
 from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as pb
-from lumewarp_control_plane.compiler import compile_scope
+from lumewarp_control_plane.compiler import compile_zone
 from lumewarp_control_plane.compiler.validate import (
     SUPPORTED_CAPABILITIES,
     SnapshotInvalid,
@@ -35,7 +35,7 @@ def _m(*names: str) -> list[pb.RouterMember]:
 
 async def compile_(factory):
     async with factory() as s:
-        return await compile_scope(s, SCOPE, now=OCT, require_local_membership=True)
+        return await compile_zone(s, SCOPE, now=OCT, require_local_membership=True)
 
 
 def router_of(snap: pb.Snapshot, name: str) -> pb.Router:
