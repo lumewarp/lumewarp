@@ -27,6 +27,57 @@ from lumewarp_control_plane.security import SecretKind, generate_secret
 from tests.factories import make_user
 
 
+def app_zone(client) -> str:
+    """The zone the test app was configured with (the default for a record without one)."""
+    return client.app.state.settings.zone
+
+
+def create_model(
+    client,
+    upstream_id,
+    *,
+    name: str | None = None,
+    model_type: str = "llm",
+    upstream_model: str = "real-name",
+    zone: str | None = None,
+    deploy: bool = True,
+    **body,
+) -> dict:
+    """Create a model through the API and deploy it on `upstream_id` in one zone.
+
+    `chat_check` in `body` belongs to the deployment, so it goes there; everything else is
+    the model definition. Returns the model as `GET /models/{id}` renders it.
+    """
+    chat_check = body.pop("chat_check", None)
+    payload = {"name": name or f"model-{suffix()}", "model_type": model_type, **body}
+    response = client.post("/api/v1/models", json=payload, headers=ADMIN_AUTH)
+    assert response.status_code == 201, response.text
+    model = response.json()
+    if deploy:
+        deployment = {"upstream_id": upstream_id, "upstream_model": upstream_model}
+        if chat_check is not None:
+            deployment["chat_check"] = chat_check
+        response = client.put(
+            f"/api/v1/models/{model['id']}/deployments/{zone or app_zone(client)}",
+            json=deployment,
+            headers=ADMIN_AUTH,
+        )
+        assert response.status_code == 200, response.text
+        response = client.get(f"/api/v1/models/{model['id']}", headers=ADMIN_AUTH)
+        assert response.status_code == 200, response.text
+        model = response.json()
+    return model
+
+
+def deployment_of(model: dict, zone: str | None = None) -> dict:
+    """The model's one deployment (or the one in `zone`)."""
+    deployments = model["deployments"]
+    if zone is None:
+        assert len(deployments) == 1, deployments
+        return deployments[0]
+    return next(item for item in deployments if item["zone"] == zone)
+
+
 async def set_playground_url(client, session, url: str = "http://gateway:4000") -> None:
     """Point the default zone's Playground at a gateway, as an administrator would."""
     zone = await session.get(Zone, client.app.state.settings.zone)

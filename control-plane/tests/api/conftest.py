@@ -81,6 +81,21 @@ async def api_scope(api_engine: AsyncEngine) -> str:
     return API_SCOPE
 
 
+@pytest.fixture(autouse=True)
+def factories_use_api_zone(api_scope: str):
+    """Rows built by `tests.factories` land in this file's zone by default.
+
+    Function-scoped on purpose: a session-scoped value would leak into modules that run
+    after this directory in the same session.
+    """
+    from tests import factories
+
+    previous = factories.DEFAULT_ZONE
+    factories.DEFAULT_ZONE = api_scope
+    yield
+    factories.DEFAULT_ZONE = previous
+
+
 @pytest.fixture
 async def api_settings(api_database_url: str, api_scope: str, api_engine: AsyncEngine) -> Settings:
     async with AsyncSession(api_engine) as session, session.begin():

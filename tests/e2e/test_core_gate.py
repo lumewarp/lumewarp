@@ -291,10 +291,7 @@ def test_authz_denials(stack):
 
     # A key limited to other models cannot use "mock" through the gateway.
     up = stack.ok("GET", "/upstreams")["items"][0]
-    dep = stack.ok(
-        "POST",
-        "/models",
-        json={"name": "mock-b", "upstream_id": up["id"], "upstream_model": "mock", "model_type": "llm"},
+    dep = stack.create_model({"name": "mock-b", "upstream_id": up["id"], "upstream_model": "mock", "model_type": "llm"},
     )
     stack.ok("POST", "/routers", json={"name": "other-model", "members": [{"model_id": dep["id"]}]})
     other = stack.ok(

@@ -643,8 +643,9 @@ export interface paths {
         put?: never;
         /**
          * Create Model
-         * @description Create a model: one name served by one upstream model. Requires an installation admin. The
-         *     name shares one namespace with aliases and routers.
+         * @description Create a model definition. Requires an installation admin. The name shares one
+         *     namespace with aliases and routers. A model is served only where it has a deployment
+         *     (`PUT /models/{id}/deployments/{zone}`); creating it does not make it callable.
          */
         post: operations["createModel"];
         delete?: never;
@@ -707,6 +708,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/models/{model_id}/deployments/{zone}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Test Deployment
+         * @description Probe a saved deployment now with the configuration in the database. Without a WASM
+         *     auth plugin on its upstream the control plane calls the typed endpoint directly; with
+         *     one, a gateway of that zone connected to this control-plane process that advertises
+         *     `upstream_probe` and reports the plugin runs it. No such gateway is 409
+         *     `no_gateway_for_plugin`, no answer in time is 504 `probe_timeout`, and the reply is
+         *     never returned (the gateway sends no body).
+         */
+        post: operations["testDeployment"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/models/{model_id}/test": {
         parameters: {
             query?: never;
@@ -718,14 +744,39 @@ export interface paths {
         put?: never;
         /**
          * Test Saved Model
-         * @description Probe a saved model now with the configuration in the database. Without a WASM auth
-         *     plugin on its upstream the control plane calls the typed endpoint directly; with one, a
-         *     gateway connected to this control-plane process that advertises `upstream_probe` and
-         *     reports the plugin runs it. No such gateway is 409 `no_gateway_for_plugin`, no answer in
-         *     time is 504 `probe_timeout`, and the reply is never returned (the gateway sends no body).
+         * @description Probe the model's deployment in the default zone now. The same as
+         *     `POST /models/{id}/deployments/{zone}/test` for the default zone; a client that knows
+         *     the deployment's zone uses that endpoint.
          */
         post: operations["testSavedModel"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/models/{model_id}/deployments/{zone}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Put Model Deployment
+         * @description Create or replace the model's deployment in one zone: the upstream model that serves
+         *     it there. Requires an installation admin. The upstream must belong to the same zone;
+         *     changing it clears the deployment's stored Test now result. Only that zone recompiles.
+         */
+        put: operations["putModelDeployment"];
+        post?: never;
+        /**
+         * Delete Model Deployment
+         * @description Remove the model's deployment in one zone: it stops being callable there and that
+         *     zone recompiles. Requires an installation admin.
+         */
+        delete: operations["deleteModelDeployment"];
         options?: never;
         head?: never;
         patch?: never;
@@ -1800,6 +1851,11 @@ export interface components {
              */
             name: string;
             /**
+             * Zone
+             * @description Config zone the agent belongs to; null = the default zone.
+             */
+            zone?: string | null;
+            /**
              * Url
              * @description URL of the upstream agent.
              */
@@ -1837,6 +1893,8 @@ export interface components {
              * Format: uuid
              */
             id: string;
+            /** Zone */
+            zone: string;
             /** Name */
             name: string;
             /** Url */
@@ -1959,6 +2017,11 @@ export interface components {
             target_kind: components["schemas"]["CatalogKind"];
             /** Target Name */
             target_name: string;
+            /**
+             * Unavailable In
+             * @description Zones where the alias is absent from the snapshot because its target has no deployment there.
+             */
+            unavailable_in?: string[];
             /**
              * Created At
              * Format: date-time
@@ -2861,6 +2924,11 @@ export interface components {
              */
             name: string;
             /**
+             * Zone
+             * @description Config zone the server belongs to; null = the default zone.
+             */
+            zone?: string | null;
+            /**
              * Url
              * @description URL of the upstream MCP server.
              */
@@ -2891,6 +2959,8 @@ export interface components {
              * Format: uuid
              */
             id: string;
+            /** Zone */
+            zone: string;
             /** Name */
             name: string;
             /** Url */
@@ -3389,7 +3459,11 @@ export interface components {
          * @enum {string}
          */
         ModelAccess: "inherit" | "all" | "list";
-        /** ModelCreate */
+        /**
+         * ModelCreate
+         * @description A model definition: a callable name and its type-wide settings. It is served only
+         *     where it has a deployment (`PUT /models/{id}/deployments/{zone}`).
+         */
         ModelCreate: {
             /**
              * Max Input Tokens
@@ -3425,17 +3499,6 @@ export interface components {
              */
             name: string;
             /**
-             * Upstream Id
-             * Format: uuid
-             * @description The upstream that serves the model.
-             */
-            upstream_id: string;
-            /**
-             * Upstream Model
-             * @description The model name sent to the upstream.
-             */
-            upstream_model: string;
-            /**
              * Price Input Nano Usd Per Mtok
              * @description Price of a million input tokens in nano-USD. Set the input and output prices together, or leave both null (cost unknown).
              */
@@ -3445,6 +3508,63 @@ export interface components {
              * @description Price of a million output tokens in nano-USD. Set the input and output prices together, or leave both null (cost unknown).
              */
             price_output_nano_usd_per_mtok?: number | null;
+        };
+        /**
+         * ModelDeploymentIn
+         * @description The deployment to create or replace in one zone.
+         */
+        ModelDeploymentIn: {
+            /**
+             * Upstream Id
+             * Format: uuid
+             * @description An upstream of the deployment's zone.
+             */
+            upstream_id: string;
+            /**
+             * Upstream Model
+             * @description The model name sent to the upstream.
+             */
+            upstream_model: string;
+            /** @description Periodic type-specific probe sent by every gateway through this deployment; while it fails the model gets no traffic there. null = not probed (Test now still works). Probes may incur upstream charges. */
+            chat_check?: components["schemas"]["ChatCheckIn"] | null;
+        };
+        /**
+         * ModelDeploymentOut
+         * @description One zone that serves a model, through one upstream model.
+         */
+        ModelDeploymentOut: {
+            /** Zone */
+            zone: string;
+            /**
+             * Upstream Id
+             * Format: uuid
+             */
+            upstream_id: string;
+            /** Upstream Name */
+            upstream_name: string;
+            /** Upstream Model */
+            upstream_model: string;
+            /** @description Periodic type-specific probe sent through this deployment; null = not probed. */
+            chat_check?: components["schemas"]["ChatCheckOut"] | null;
+            /**
+             * Health
+             * @description Chat check as this zone's connected gateways report it: unhealthy if any says so, unknown when none has reported it yet.
+             * @default not_probed
+             * @enum {string}
+             */
+            health: "healthy" | "unhealthy" | "unknown" | "not_probed";
+            /** @description The last Test now of this deployment from the control plane, if any. */
+            probe?: components["schemas"]["ProbeResultOut"] | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
         };
         /** ModelGroupCreate */
         ModelGroupCreate: {
@@ -3548,13 +3668,6 @@ export interface components {
             id: string;
             /** Name */
             name: string;
-            /**
-             * Upstream Id
-             * Format: uuid
-             */
-            upstream_id: string;
-            /** Upstream Model */
-            upstream_model: string;
             /** Price Input Nano Usd Per Mtok */
             price_input_nano_usd_per_mtok: number | null;
             /** Price Output Nano Usd Per Mtok */
@@ -3568,16 +3681,11 @@ export interface components {
                 [key: string]: unknown;
             } | null;
             reasoning: components["schemas"]["ReasoningOut"];
-            chat_check: components["schemas"]["ChatCheckOut"] | null;
             /**
-             * Health
-             * @description Chat check as connected gateways report it: unhealthy if any says so, unknown when none has reported it yet.
-             * @default not_probed
-             * @enum {string}
+             * Deployments
+             * @description The zones that serve this model, one deployment each; empty = defined but not served anywhere.
              */
-            health: "healthy" | "unhealthy" | "unknown" | "not_probed";
-            /** @description The last Test now of the saved settings from the control plane, if any. */
-            probe?: components["schemas"]["ProbeResultOut"] | null;
+            deployments?: components["schemas"]["ModelDeploymentOut"][];
             /**
              * Created At
              * Format: date-time
@@ -3619,6 +3727,11 @@ export interface components {
              * @description A saved model; the result is kept on it when the form matches it.
              */
             model_id?: string | null;
+            /**
+             * Zone
+             * @description With `model_id`: the deployment whose Test now result this is; null = do not record it.
+             */
+            zone?: string | null;
         };
         /** ModelTestOut */
         ModelTestOut: {
@@ -3679,16 +3792,6 @@ export interface components {
              * @description The name clients call, without whitespace. Models, aliases and routers share one namespace.
              */
             name?: string | null;
-            /**
-             * Upstream Id
-             * @description The upstream that serves the model.
-             */
-            upstream_id?: string | null;
-            /**
-             * Upstream Model
-             * @description The model name sent to the upstream.
-             */
-            upstream_model?: string | null;
             /**
              * Price Input Nano Usd Per Mtok
              * @description Price of a million input tokens in nano-USD. Set the input and output prices together, or leave both null (cost unknown).
@@ -4703,6 +4806,11 @@ export interface components {
              */
             accepted_reasoning_levels: string[] | null;
             /**
+             * Unavailable In
+             * @description Zones where the router is absent from the snapshot because none of its members (or, with a traffic split, a split has none) has a deployment there.
+             */
+            unavailable_in?: string[];
+            /**
              * Config Invalid
              * @description Stored settings fail the strategy's current schema, or nothing reports it.
              */
@@ -5447,6 +5555,11 @@ export interface components {
              */
             health_url?: string | null;
             /**
+             * Zone
+             * @description Config zone the upstream belongs to, set on create and never changed; null = the default zone.
+             */
+            zone?: string | null;
+            /**
              * Name
              * @description Unique upstream name.
              */
@@ -5530,6 +5643,8 @@ export interface components {
              * Format: uuid
              */
             id: string;
+            /** Zone */
+            zone: string;
             /** Name */
             name: string;
             kind: components["schemas"]["UpstreamKind"];
@@ -5983,6 +6098,8 @@ export interface components {
         ZoneOut: {
             /** Name */
             name: string;
+            /** Is Default */
+            is_default: boolean;
             /** Display Name */
             display_name: string;
             /** Color */
@@ -9392,6 +9509,74 @@ export interface operations {
             };
         };
     };
+    testDeployment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                model_id: string;
+                zone: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelTestOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     testSavedModel: {
         parameters: {
             query?: never;
@@ -9411,6 +9596,144 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ModelTestOut"];
                 };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    putModelDeployment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                model_id: string;
+                zone: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ModelDeploymentIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelDeploymentOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    deleteModelDeployment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                model_id: string;
+                zone: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Missing or invalid credentials */
             401: {

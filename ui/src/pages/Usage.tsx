@@ -324,7 +324,7 @@ function LlmUsage({ range }: { range: RangeProps }) {
   );
 
   // Suggestions only: the filter takes any string, as old usage keeps the upstream name it was served under.
-  const upstreamSuggestions = [...new Set((models.data ?? []).map((m) => m.upstream_model))].sort();
+  const upstreamSuggestions = [...new Set((models.data ?? []).flatMap((m) => (m.deployments ?? []).map((d) => d.upstream_model)))].sort();
   const provenanceModes = (kind: "alias" | "router") => [
     { value: ANY, label: "Any" },
     { value: NONE, label: kind === "alias" ? "None (no alias)" : "None (no router)" },

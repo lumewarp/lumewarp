@@ -14,7 +14,7 @@ from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as pb
 from lumewarp_control_plane.compiler.compile import compile_zone
 from lumewarp_control_plane.models import AuditLog
 from tests.api.helpers import ADMIN_AUTH as H
-from tests.api.helpers import suffix
+from tests.api.helpers import app_zone, suffix
 
 API = "/api/v1"
 
@@ -41,14 +41,18 @@ def _upstream(client) -> str:
 
 
 def _create(client, **settings):
-    body = {
-        "name": f"m-{suffix()}",
-        "upstream_id": _upstream(client),
-        "upstream_model": "Qwen/Qwen3-8B",
-        "model_type": "llm",
-        **settings,
-    }
-    return client.post(f"{API}/models", json=body, headers=H)
+    body = {"name": f"m-{suffix()}", "model_type": "llm", **settings}
+    response = client.post(f"{API}/models", json=body, headers=H)
+    if response.status_code != 201:
+        return response
+    model = response.json()
+    deployed = client.put(
+        f"{API}/models/{model['id']}/deployments/{app_zone(client)}",
+        json={"upstream_id": _upstream(client), "upstream_model": "Qwen/Qwen3-8B"},
+        headers=H,
+    )
+    assert deployed.status_code == 200, deployed.text
+    return response
 
 
 async def _wire(committed, api_settings, name: str):

@@ -23,7 +23,14 @@ from lumewarp_control_plane.models import (
     PluginKind,
 )
 from lumewarp_control_plane.security import SecretKind, generate_secret
-from tests.api.helpers import ADMIN_AUTH, auth, report_plugins, suffix, user_with_token
+from tests.api.helpers import (
+    ADMIN_AUTH,
+    auth,
+    create_model,
+    report_plugins,
+    suffix,
+    user_with_token,
+)
 
 H = ADMIN_AUTH
 PREFIX = "plugins-test-"
@@ -85,18 +92,7 @@ def _model(client) -> str:
         json={"name": f"up-{suffix()}", "kind": "vllm", "base_url": "http://127.0.0.1:9/v1"},
         headers=H,
     ).json()
-    resp = client.post(
-        "/api/v1/models",
-        json={
-            "name": f"m-{suffix()}",
-            "upstream_id": upstream["id"],
-            "upstream_model": "m",
-            "model_type": "llm",
-        },
-        headers=H,
-    )
-    assert resp.status_code == 201, resp.text
-    return resp.json()["id"]
+    return create_model(client, upstream["id"], name=f"m-{suffix()}", upstream_model="m")["id"]
 
 
 def _create(client, strategy: str, members: list[dict] | None = None, **body):

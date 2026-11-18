@@ -13,6 +13,8 @@ from lumewarp_control_plane.settings import Settings
 from tests.api.helpers import (
     ADMIN_AUTH,
     auth,
+    create_model,
+    deployment_of,
     suffix,
     user_with_token,
 )
@@ -43,16 +45,7 @@ def _model(client, *, upstream_id=None):
         upstream_id = _post(
             client, "/upstreams", name=f"up-{suffix()}", kind="vllm", base_url="http://h:1/v1"
         ).json()["id"]
-    resp = _post(
-        client,
-        "/models",
-        name=f"dep-{suffix()}",
-        upstream_id=upstream_id,
-        upstream_model="m",
-        model_type="llm",
-    )
-    assert resp.status_code == 201, resp.text
-    return resp.json()
+    return create_model(client, upstream_id, name=f"dep-{suffix()}", upstream_model="m")
 
 
 # ------------------------------------------------------------------------------ B1
@@ -183,7 +176,9 @@ def test_openapi_documents_the_real_error_body(api_settings: Settings) -> None:
 
 def test_list_routers_returns_ordered_models_for_every_router(client) -> None:
     models = [_model(client)]
-    models += [_model(client, upstream_id=models[0]["upstream_id"]) for _ in range(2)]
+    models += [
+        _model(client, upstream_id=deployment_of(models[0])["upstream_id"]) for _ in range(2)
+    ]
     expected = {}
     for index in range(4):
         order = [d["id"] for d in models[index % 3 :] + models[: index % 3]]

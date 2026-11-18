@@ -374,7 +374,7 @@ async def seed_gateways(url: str) -> None:
             token_b = await session.scalar(select(GatewayToken).where(GatewayToken.name == "secondary"))
             if token_b is None:
                 token_b = GatewayToken(
-                    scope=token_a.scope,
+                    zone=token_a.zone,
                     name="secondary",
                     token_hash=uuid.uuid4().bytes * 2,
                     display_prefix="lwg-e2eb",
@@ -399,7 +399,7 @@ async def seed_gateways(url: str) -> None:
                 ]
                 session.add(
                     GatewaySession(
-                        scope=token.scope,
+                        zone=token.zone,
                         gateway_id=gateway_id,
                         token_id=token.id,
                         connected=connected,
@@ -423,7 +423,7 @@ async def seed_gateways(url: str) -> None:
                         continue
                     session.add(
                         GatewayPlugin(
-                            scope=token.scope,
+                            zone=token.zone,
                             gateway_id=gateway_id,
                             kind=PluginKind(descriptor["kind"]),
                             name=name,
@@ -447,6 +447,14 @@ class Api:
         self.csrf = self.call("GET", "/session")["csrf_token"]
 
     def call(self, method: str, path: str, data: dict | None = None) -> dict:
+        if method == "POST" and path == "/models" and data and "upstream_id" in data:
+            # A model is a global definition; its upstream is a deployment in the upstream's zone.
+            data = dict(data)
+            deployment = {k: data.pop(k) for k in ("upstream_id", "upstream_model", "chat_check") if k in data}
+            model = self.call("POST", "/models", data)
+            zone = self.call("GET", f"/upstreams/{deployment['upstream_id']}")["zone"]
+            self.call("PUT", f"/models/{model['id']}/deployments/{zone}", deployment)
+            return model | {"upstream_model": deployment["upstream_model"]}
         request = urllib.request.Request(
             f"http://127.0.0.1:{HTTP_PORT}/api/v1{path}",
             method=method,
@@ -578,7 +586,7 @@ async def published_version(url: str) -> int:
     not a fixed delay."""
     from sqlalchemy import func, select
     from sqlalchemy.ext.asyncio import AsyncSession
-    from lumewarp_control_plane.models import ConfigOutbox, ConfigVersion, OutboxStatus, Scope
+    from lumewarp_control_plane.models import ConfigOutbox, ConfigVersion, OutboxStatus, Zone
 
     engine = create_async_engine(url)
     try:
@@ -595,7 +603,7 @@ async def published_version(url: str) -> int:
                         .limit(1)
                     )
                 ).first()
-                source_revision = await session.scalar(select(func.max(Scope.source_revision)))
+                source_revision = await session.scalar(select(func.max(Zone.source_revision)))
                 # A version exists for every committed mutation: no pending outbox row and the
                 # newest version covers the scope's current source revision.
                 if (
@@ -686,7 +694,7 @@ async def seed_docs(url: str) -> None:
             for n, gateway_id in enumerate(gateway_ids, start=1):
                 session.add(
                     GatewaySession(
-                        scope=token.scope,
+                        zone=token.zone,
                         gateway_id=gateway_id,
                         token_id=token.id,
                         connected=True,

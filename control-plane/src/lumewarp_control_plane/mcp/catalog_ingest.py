@@ -357,7 +357,11 @@ async def ingest_report(
     if names:
         rows = await session.scalars(
             select(McpServer)
-            .where(McpServer.name.in_(names), McpServer.deleted_at.is_(None))
+            .where(
+                McpServer.zone == zone,
+                McpServer.name.in_(names),
+                McpServer.deleted_at.is_(None),
+            )
             .order_by(McpServer.id)
             .with_for_update()
         )
@@ -394,7 +398,7 @@ async def ingest_report(
     for server, observations in grouped.values():
         result.merge(await record_observations(session, server, observations, now=now))
 
-    agents = await _lock_agents(session, cards)
+    agents = await _lock_agents(session, zone, cards)
     seen_bytes = 0
     for card in cards:
         seen_bytes += len(card.card_json.encode("utf-8")) + len(card.error.encode("utf-8"))
@@ -449,15 +453,19 @@ async def ingest_report(
 
 
 async def _lock_agents(
-    session: AsyncSession, cards: Sequence[cpb.AgentCardReport]
+    session: AsyncSession, zone: str, cards: Sequence[cpb.AgentCardReport]
 ) -> dict[str, A2aAgent]:
-    """The live agents the report names, row-locked for the card update."""
+    """The live agents of `zone` the report names, row-locked for the card update."""
     names = sorted({card.agent for card in cards if _text_ok(card.agent)})
     if not names:
         return {}
     rows = await session.scalars(
         select(A2aAgent)
-        .where(A2aAgent.name.in_(names), A2aAgent.deleted_at.is_(None))
+        .where(
+            A2aAgent.zone == zone,
+            A2aAgent.name.in_(names),
+            A2aAgent.deleted_at.is_(None),
+        )
         .order_by(A2aAgent.id)
         .with_for_update()
     )

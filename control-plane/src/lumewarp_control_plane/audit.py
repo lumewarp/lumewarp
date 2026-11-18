@@ -94,6 +94,7 @@ DETAIL_ALLOWLIST: dict[str, dict[str, DetailSpec]] = {
     "budget.monthly_rollover": {"window_start": None},
     "config.rollback": {"to_version": None, "zone": None, "force": None},
     "a2a_agent.create": {
+        "zone": None,
         "name": None,
         "url": None,
         "card_url": None,
@@ -189,6 +190,7 @@ DETAIL_ALLOWLIST: dict[str, dict[str, DetailSpec]] = {
     },
     "mcp_server.create": {
         "name": None,
+        "zone": None,
         "url": None,
         "review_mode": None,
         "credential_stored": None,
@@ -229,15 +231,20 @@ DETAIL_ALLOWLIST: dict[str, dict[str, DetailSpec]] = {
         "policy_changed": None,
         "changes": _POLICY_CHANGES,
     },
-    "model.create": {"name": None, "upstream": None, "model_type": None},
+    "model.create": {"name": None, "model_type": None},
     "model.delete": {"name": None},
+    "model.deployment_delete": {"name": None, "zone": None},
+    "model.deployment_put": {
+        "name": None,
+        "zone": None,
+        "upstream": None,
+        "upstream_model": None,
+    },
     "model.rename": {"old_name": None, "new_name": None},
     "model.update": {
         "name": None,
         "changes": {
             "name": None,
-            "upstream_id": None,
-            "upstream_model": None,
             "model_type": None,
             "price_nano_usd_per_audio_second": None,
             "price_input_nano_usd_per_mtok": None,
@@ -296,6 +303,7 @@ DETAIL_ALLOWLIST: dict[str, dict[str, DetailSpec]] = {
     },
     "upstream.create": {
         "name": None,
+        "zone": None,
         "base_url": None,
         "credential_stored": None,
         "auth_plugin": None,

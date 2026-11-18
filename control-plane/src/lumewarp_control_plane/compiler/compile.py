@@ -42,6 +42,7 @@ from lumewarp_control_plane.models import (
     MemberPolicy,
     Model,
     ModelAccess,
+    ModelDeployment,
     ModelGroupMember,
     Org,
     OrgAdmin,
@@ -288,6 +289,12 @@ async def compile_zone(
     is `zones.source_revision` as seen there.
 
     Contract:
+    - Routing is per zone: only this zone's upstreams, model deployments, MCP servers and
+      A2A agents are read. A model is emitted only when it has a deployment in `zone`, and
+      its upstream comes from that deployment; a router member, split member or fallback
+      without one is dropped with a warning, a split left without models drops the router,
+      a router left without models is dropped, and an alias whose target was dropped is
+      dropped. Definitions (models, routers, aliases, grants) stay global.
     - Expands org -> team -> owner (member or service account) -> key policy into each
       key's EffectivePolicy. Model access: resolve INHERIT first (the owner takes the team's
       effective set unchanged; teams are never INHERIT), then intersect: ALL is the
@@ -345,8 +352,15 @@ async def compile_zone(
         raise CompileError(f"unknown config zone {zone!r}")
 
     # Routing. Rename and rollback may have run in this session, hence populate_existing.
-    upstreams = (await session.scalars(select(Upstream).order_by(Upstream.name))).all()
+    # Only this zone's upstreams and deployments: a name may repeat in another zone.
+    upstreams = (
+        await session.scalars(select(Upstream).where(Upstream.zone == zone).order_by(Upstream.name))
+    ).all()
     upstream_name = {u.id: u.name for u in upstreams}
+    deployments = {
+        d.name_id: d
+        for d in await session.scalars(select(ModelDeployment).where(ModelDeployment.zone == zone))
+    }
     catalog_rows = select(Model).order_by(Model.name).execution_options(populate_existing=True)
     models = (await session.scalars(catalog_rows)).all()
     catalog_rows = select(Router).order_by(Router.name).execution_options(populate_existing=True)
@@ -451,10 +465,16 @@ async def compile_zone(
                 up.metrics_url = u.metrics_url
         snap.upstreams.append(up)
     valid_models = []
+    undeployed: set[uuid.UUID] = set()
     for d in models:
-        if d.upstream_id not in valid_upstreams:
+        deployment = deployments.get(d.id)
+        if deployment is None:
+            # Defined, not served here: the definition is global, the deployment is not.
+            undeployed.add(d.id)
+            continue
+        if deployment.upstream_id not in valid_upstreams:
             warnings.append(f"model {d.name!r} left out: its upstream is left out")
-        elif not d.name or not d.upstream_model:
+        elif not d.name or not deployment.upstream_model:
             warnings.append(f"model {d.name!r} left out: empty name or upstream_model")
         elif d.name in RESERVED_ALIASES:
             warnings.append(f"model {d.name!r} left out: the name is reserved")
@@ -462,8 +482,8 @@ async def compile_zone(
             valid_models.append(d)
             out = pb.Model(
                 name=d.name,
-                upstream=upstream_name[d.upstream_id],
-                upstream_model=d.upstream_model,
+                upstream=upstream_name[deployment.upstream_id],
+                upstream_model=deployment.upstream_model,
                 type={
                     "llm": pb.MODEL_TYPE_LLM,
                     "embedding": pb.MODEL_TYPE_EMBEDDING,
@@ -483,13 +503,13 @@ async def compile_zone(
                     )
                 )
             _model_body_rules(out, d, warnings)
-            if d.chat_check_interval_ms is not None:
+            if deployment.chat_check_interval_ms is not None:
                 out.chat_check.CopyFrom(
                     pb.ChatCheck(
-                        interval_ms=d.chat_check_interval_ms,
-                        timeout_ms=d.chat_check_timeout_ms or 0,
-                        unhealthy_threshold=d.chat_check_unhealthy_threshold or 0,
-                        healthy_threshold=d.chat_check_healthy_threshold or 0,
+                        interval_ms=deployment.chat_check_interval_ms,
+                        timeout_ms=deployment.chat_check_timeout_ms or 0,
+                        unhealthy_threshold=deployment.chat_check_unhealthy_threshold or 0,
+                        healthy_threshold=deployment.chat_check_healthy_threshold or 0,
                     )
                 )
             snap.models.append(out)
@@ -509,7 +529,9 @@ async def compile_zone(
         ]
         members_of_router = [m for m in members_of_router if m.model_id in valid_model_ids]
         if dropped:
-            warnings.append(f"router {r.name!r}: left-out models {dropped} removed")
+            warnings.append(
+                f"router {r.name!r}: left-out models {dropped} removed (not available in this zone)"
+            )
         if not r.name or r.name in RESERVED_ALIASES:
             warnings.append(f"router {r.name!r} left out: name is empty or reserved")
             continue
@@ -532,7 +554,18 @@ async def compile_zone(
         if router_splits:
             bad = None
             for sr in router_splits:
-                pool = [m for m in split_members.get(sr.id, []) if m.model_id in valid_model_ids]
+                split_rows = split_members.get(sr.id, [])
+                dropped_split = [
+                    model_by_id[m.model_id].name
+                    for m in split_rows
+                    if m.model_id not in valid_model_ids
+                ]
+                if dropped_split:
+                    warnings.append(
+                        f"router {r.name!r}: split {sr.name!r} left out models"
+                        f" {dropped_split} removed (not available in this zone)"
+                    )
+                pool = [m for m in split_rows if m.model_id in valid_model_ids]
                 if not pool:
                     bad = f"split {sr.name!r} has no models"
                 elif weighted and not sum(m.weight for m in pool):
@@ -577,7 +610,7 @@ async def compile_zone(
             else:
                 warnings.append(
                     f"router {r.name!r}: fallback {model_by_id[fallback].name!r} is left out,"
-                    " dropped"
+                    " dropped (not available in this zone)"
                 )
         # A stored level the gateway would reject, or that a served model no longer accepts,
         # is left out with a warning instead of failing the compile (the API refuses both).
@@ -602,7 +635,10 @@ async def compile_zone(
         if not a.name or a.name in RESERVED_ALIASES:
             warnings.append(f"alias {a.name!r} left out: name is empty or reserved")
         elif target is None:
-            warnings.append(f"alias {a.name!r} left out: {a.target_name!r} is left out")
+            reason = (
+                "is not available in this zone" if a.target_name_id in undeployed else "is left out"
+            )
+            warnings.append(f"alias {a.name!r} left out: {a.target_name!r} {reason}")
         else:
             snap.aliases.append(pb.Alias(name=a.name, target=target))
 
@@ -613,7 +649,9 @@ async def compile_zone(
     # definition table), so a rejected definition cannot come back.
     mcp_servers = (
         await session.scalars(
-            select(McpServer).where(McpServer.deleted_at.is_(None)).order_by(McpServer.name)
+            select(McpServer)
+            .where(McpServer.zone == zone, McpServer.deleted_at.is_(None))
+            .order_by(McpServer.name)
         )
     ).all()
     definitions: dict[uuid.UUID, list[McpDefinition]] = {}
@@ -653,7 +691,9 @@ async def compile_zone(
         snap.mcp_servers.append(out)
     agents = (
         await session.scalars(
-            select(A2aAgent).where(A2aAgent.deleted_at.is_(None)).order_by(A2aAgent.name)
+            select(A2aAgent)
+            .where(A2aAgent.zone == zone, A2aAgent.deleted_at.is_(None))
+            .order_by(A2aAgent.name)
         )
     ).all()
     for agent in agents:

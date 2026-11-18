@@ -22,7 +22,7 @@ from lumewarp_control_plane.models import (
     GatewaySession,
     GatewayToken,
     KeyLifecycle,
-    Model,
+    ModelDeployment,
     OutboxStatus,
     Router,
     Team,
@@ -209,7 +209,7 @@ async def test_rollback_restores_routing_not_security(factory) -> None:
 
     # Change routing and revoke k1.
     async with factory() as s, s.begin():
-        await s.execute(update(Model).values(upstream_model="llama-new"))
+        await s.execute(update(ModelDeployment).values(upstream_model="llama-new"))
         await add_router(s, "qwen", [("qwen-a", None)])
         await s.execute(
             update(ApiKey)

@@ -734,6 +734,13 @@ class UpstreamCreate(ApiModel):
     health_url: str | None = Field(default=None, max_length=2000)
 
     _check_health_url = field_validator("health_url")(_health_url)
+    zone: ZoneName | None = Field(
+        default=None,
+        description=(
+            "Config zone the upstream belongs to, set on create and never changed; null ="
+            " the default zone."
+        ),
+    )
     name: Name
     kind: UpstreamKind
     base_url: str = Field(min_length=1)
@@ -857,6 +864,7 @@ class PluginRefOut(ReadModel):
 class UpstreamOut(ReadModel):
     health_url: str | None
     id: uuid.UUID
+    zone: str
     name: str
     kind: UpstreamKind
     base_url: str
@@ -906,6 +914,7 @@ class UpstreamOut(ReadModel):
             )
         return {
             "id": data.id,
+            "zone": data.zone,
             "name": data.name,
             "kind": data.kind,
             "base_url": data.base_url,
@@ -1041,11 +1050,13 @@ class _ModelSettings(ApiModel):
 
 
 class ModelCreate(_ModelSettings):
+    """A model definition: a callable name and its type-wide settings. It is served only
+    where it has a deployment (`PUT /models/{id}/deployments/{zone}`).
+    """
+
     model_type: ModelType
     price_nano_usd_per_audio_second: int | None = Field(default=None, ge=0)
     name: ModelName
-    upstream_id: uuid.UUID
-    upstream_model: str = Field(min_length=1, max_length=400)
     price_input_nano_usd_per_mtok: int | None = Field(default=None, ge=0)
     price_output_nano_usd_per_mtok: int | None = Field(default=None, ge=0)
 
@@ -1093,8 +1104,6 @@ class ModelUpdate(_ModelSettings):
     model_type: ModelType | None = None
     price_nano_usd_per_audio_second: int | None = Field(default=None, ge=0)
     name: ModelName | None = None
-    upstream_id: uuid.UUID | None = None
-    upstream_model: str | None = Field(default=None, min_length=1, max_length=400)
     price_input_nano_usd_per_mtok: int | None = Field(default=None, ge=0)
     price_output_nano_usd_per_mtok: int | None = Field(default=None, ge=0)
     keep_old_name_as_alias: bool = Field(
@@ -1103,30 +1112,66 @@ class ModelUpdate(_ModelSettings):
     )
 
 
+class ModelDeploymentOut(ReadModel):
+    """One zone that serves a model, through one upstream model."""
+
+    zone: str
+    upstream_id: uuid.UUID
+    upstream_name: str
+    upstream_model: str
+    chat_check: ChatCheckOut | None = Field(
+        default=None,
+        description=(
+            "Periodic type-specific probe sent through this deployment; null = not probed."
+        ),
+    )
+    health: HealthState = Field(
+        default="not_probed",
+        description=(
+            "Chat check as this zone's connected gateways report it: unhealthy if any says"
+            " so, unknown when none has reported it yet."
+        ),
+    )
+    probe: ProbeResultOut | None = Field(
+        default=None,
+        description="The last Test now of this deployment from the control plane, if any.",
+    )
+    created_at: datetime
+    updated_at: datetime
+
+
+class ModelDeploymentIn(ApiModel):
+    """The deployment to create or replace in one zone."""
+
+    upstream_id: uuid.UUID = Field(description="An upstream of the deployment's zone.")
+    upstream_model: str = Field(min_length=1, max_length=400)
+    chat_check: ChatCheckIn | None = Field(
+        default=None,
+        description=(
+            "Periodic type-specific probe sent by every gateway through this deployment;"
+            " while it fails the model gets no traffic there. null = not probed (Test now"
+            " still works). Probes may incur upstream charges."
+        ),
+    )
+
+
 class ModelOut(ReadModel):
     model_type: ModelType
     price_nano_usd_per_audio_second: int | None
     id: uuid.UUID
     name: str
-    upstream_id: uuid.UUID
-    upstream_model: str
     price_input_nano_usd_per_mtok: int | None
     price_output_nano_usd_per_mtok: int | None
     max_input_tokens: int | None
     max_output_tokens: int | None
     default_body: dict[str, Any] | None
     reasoning: ReasoningOut
-    chat_check: ChatCheckOut | None
-    health: HealthState = Field(
-        default="not_probed",
+    deployments: list[ModelDeploymentOut] = Field(
+        default_factory=list,
         description=(
-            "Chat check as connected gateways report it: unhealthy if any says so, unknown"
-            " when none has reported it yet."
+            "The zones that serve this model, one deployment each; empty = defined but not"
+            " served anywhere."
         ),
-    )
-    probe: ProbeResultOut | None = Field(
-        default=None,
-        description="The last Test now of the saved settings from the control plane, if any.",
     )
     created_at: datetime
     updated_at: datetime
@@ -1141,8 +1186,6 @@ class ModelOut(ReadModel):
             "name": data.name,
             "model_type": data.model_type,
             "price_nano_usd_per_audio_second": data.price_nano_usd_per_audio_second,
-            "upstream_id": data.upstream_id,
-            "upstream_model": data.upstream_model,
             "price_input_nano_usd_per_mtok": data.price_input_nano_usd_per_mtok,
             "price_output_nano_usd_per_mtok": data.price_output_nano_usd_per_mtok,
             "max_input_tokens": data.max_input_tokens,
@@ -1153,15 +1196,6 @@ class ModelOut(ReadModel):
                 fragments=data.reasoning_fragments,
                 default_level=data.reasoning_default_level,
             ),
-            "chat_check": None
-            if data.chat_check_interval_ms is None
-            else ChatCheckOut(
-                interval_ms=data.chat_check_interval_ms,
-                timeout_ms=data.chat_check_timeout_ms,
-                unhealthy_threshold=data.chat_check_unhealthy_threshold,
-                healthy_threshold=data.chat_check_healthy_threshold,
-            ),
-            "probe": _probe(data),
             "created_at": data.created_at,
             "updated_at": data.updated_at,
         }
@@ -1184,6 +1218,13 @@ class AliasOut(ReadModel):
     target: uuid.UUID = Field(validation_alias="target_name_id")
     target_kind: CatalogKind
     target_name: str
+    unavailable_in: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Zones where the alias is absent from the snapshot because its target has no"
+            " deployment there."
+        ),
+    )
     created_at: datetime
     updated_at: datetime
 
@@ -1416,6 +1457,13 @@ class RouterOut(ReadModel):
     )
     accepted_reasoning_levels: list[str] | None = Field(
         description=("Levels every member, split member and fallback accepts; null = any level.")
+    )
+    unavailable_in: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Zones where the router is absent from the snapshot because none of its members"
+            " (or, with a traffic split, a split has none) has a deployment there."
+        ),
     )
     config_invalid: bool = Field(
         description="Stored settings fail the strategy's current schema, or nothing reports it."
@@ -1899,6 +1947,7 @@ class ZoneUpdate(ApiModel):
 
 class ZoneOut(ReadModel):
     name: str
+    is_default: bool
     display_name: str
     color: str
     archived_at: datetime | None
@@ -2101,6 +2150,13 @@ class ModelTestIn(ApiModel):
         default=None,
         description="A saved model; the result is kept on it when the form matches it.",
     )
+    zone: ZoneName | None = Field(
+        default=None,
+        description=(
+            "With `model_id`: the deployment whose Test now result this is; null = do not"
+            " record it."
+        ),
+    )
 
     @field_validator("default_body")
     @classmethod
@@ -2242,6 +2298,9 @@ class PluginRefIn(ApiModel):
 
 class McpServerCreate(ApiModel):
     name: TargetName
+    zone: ZoneName | None = Field(
+        default=None, description="Config zone the server belongs to; null = the default zone."
+    )
     url: str = Field(min_length=1, max_length=2000)
     auth: TargetAuthIn = Field(default_factory=TargetAuthIn)
     # Per upstream request; 0 = the gateway default (30 s).
@@ -2267,6 +2326,7 @@ class McpServerUpdate(ApiModel):
 
 class McpServerOut(ReadModel):
     id: uuid.UUID
+    zone: str
     name: str
     url: str
     auth: PluginRefOut
@@ -2367,6 +2427,9 @@ class McpDiscoverOut(ApiModel):
 
 class A2aAgentCreate(ApiModel):
     name: TargetName
+    zone: ZoneName | None = Field(
+        default=None, description="Config zone the agent belongs to; null = the default zone."
+    )
     url: str = Field(min_length=1, max_length=2000)
     card_url: str | None = Field(default=None, max_length=2000)
     auth: TargetAuthIn = Field(default_factory=TargetAuthIn)
@@ -2402,6 +2465,7 @@ class A2aAgentUpdate(ApiModel):
 
 class A2aAgentOut(ReadModel):
     id: uuid.UUID
+    zone: str
     name: str
     url: str
     card_url: str = Field(description="Empty = the gateway derives it from `url`.")

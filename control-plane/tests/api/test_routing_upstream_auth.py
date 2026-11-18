@@ -21,7 +21,7 @@ from lumewarp_control_plane.models import (
     GatewayToken,
     Upstream,
 )
-from tests.api.helpers import ADMIN_AUTH, report_plugins, suffix
+from tests.api.helpers import ADMIN_AUTH, app_zone, create_model, report_plugins, suffix
 
 H = ADMIN_AUTH
 PREFIX = "up-auth-test-"
@@ -46,14 +46,8 @@ def _create(client, **body):
 
 
 def _model(client, upstream_id, **body):
-    body = {
-        "name": f"dep-{suffix()}",
-        "upstream_id": upstream_id,
-        "upstream_model": "name",
-        "model_type": "llm",
-        **body,
-    }
-    return client.post("/api/v1/models", json=body, headers=H)
+    model = create_model(client, upstream_id, name=f"dep-{suffix()}", upstream_model="name", **body)
+    return client.get(f"/api/v1/models/{model['id']}", headers=H)
 
 
 async def _row(committed: AsyncSession, upstream_id: str) -> Upstream:
@@ -267,7 +261,7 @@ def _saved_test(client, upstream_id: str):
 
 
 def _saved_model_test(client, model_id: str):
-    return client.post(f"/api/v1/models/{model_id}/test", headers=H)
+    return client.post(f"/api/v1/models/{model_id}/deployments/{app_zone(client)}/test", headers=H)
 
 
 async def test_saved_upstream_test_uses_a_capable_gateway(client, api_scope, gateway) -> None:

@@ -299,11 +299,12 @@ async def rollback_routing(
 ) -> int:
     """Publish an installation-wide rollback from the version `to_version` of `zone`.
 
-    The routing content (upstreams, models, aliases, routers, MCP servers, A2A agents) is
-    restored from that version, by id, while keys, teams, policies and statuses come from
-    current source state, so a revoked key is never revived. Every live zone is then
-    recompiled and gets a new version, so the whole installation sees the rolled-back
-    catalog. Returns the new version of `zone` (the version that was chosen).
+    The routing content (upstreams, model deployments, aliases, routers, MCP servers, A2A
+    agents) is restored from that version's `catalog_state`, by id, while keys, teams,
+    policies and statuses come from current source state, so a revoked key is never
+    revived. Every live zone is then recompiled from its own restored rows and gets a new
+    version, so the whole installation sees the rolled-back catalog. Returns the new
+    version of `zone` (the version that was chosen).
 
     Runs in the caller's transaction (the caller writes the audit row and commits). The
     catalog source tables are restored by id from the version's `catalog_state`, so later
@@ -331,7 +332,6 @@ async def rollback_routing(
     row = await session.get(ConfigVersion, (zone, to_version))
     if row is None or row.payload is None or row.catalog_state is None:
         raise LookupError(f"config version {to_version} of zone {zone!r} is not retained")
-    old = pb.Snapshot.FromString(row.payload)
     try:
         await restore_catalog_state(session, row.catalog_state)
     except ValueError as exc:
@@ -354,21 +354,11 @@ async def rollback_routing(
             now=now,
             require_local_membership=require_local_membership,
         )
+        # Each zone publishes what the restored source compiles to for that zone: a
+        # deployment or MCP server of another zone is not pushed into this one. Definition
+        # reviews are current state (catalog_state never captures them), so a rejected hash
+        # cannot come back through this compile.
         snap = compiled.snapshot
-        # Definition reviews are current state, never versioned: keep what the compile of
-        # the restored source just produced for each server, and put it back after the old
-        # snapshot's entities replace the current ones (a rejected hash must not come back).
-        definitions = {server.id: server.definitions for server in snap.mcp_servers}
-        # MCP servers and agents are routing content too, restored from the old snapshot.
-        for field in ("upstreams", "models", "aliases", "routers", "mcp_servers", "a2a_agents"):
-            del getattr(snap, field)[:]
-            getattr(snap, field).extend(getattr(old, field))
-        for server in snap.mcp_servers:
-            current = definitions.get(server.id)
-            if current is not None:
-                del server.definitions[:]
-                server.definitions.extend(current)
-
         latest = await _latest(session, live_zone)
         version = (latest[0] if latest else 0) + 1
         await store_version(

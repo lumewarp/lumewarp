@@ -23,6 +23,7 @@ from lumewarp_control_plane.models import (
     CatalogName,
     McpServer,
     Model,
+    ModelDeployment,
     Router,
     RouterFallback,
     RouterMember,
@@ -32,7 +33,14 @@ from lumewarp_control_plane.models import (
 )
 
 _ENTITY_TYPES = (Upstream, CatalogName, Model, Router)
-_EDGE_TYPES = (Alias, RouterMember, RouterFallback, RouterSplit, RouterSplitMember)
+_EDGE_TYPES = (
+    Alias,
+    ModelDeployment,
+    RouterMember,
+    RouterFallback,
+    RouterSplit,
+    RouterSplitMember,
+)
 # MCP servers and A2A agents are restored by id like routers, but are archived rather than
 # deleted when absent from the state: their definitions (a rejected hash must stay rejected)
 # and grants must survive. Reviewed definition states are deliberately *not* captured: a
@@ -48,7 +56,9 @@ TABLES = (*ENTITY_TABLES, *EDGE_TABLES, *TARGET_TABLES)
 # 5: models carry an explicit model_type and audio pricing.
 # 6: upstreams carry their WASM auth columns (auth_plugin/auth_params/auth_timeout_ms).
 # 7: routers carry `reasoning_default_level`.
-FORMAT_VERSION = 7
+# 8: model deployments live in their own table, and upstreams + MCP servers + A2A agents
+#    carry their zone.
+FORMAT_VERSION = 8
 
 
 def _encode(value: Any) -> Any:

@@ -34,13 +34,15 @@ from lumewarp_control_plane.authz import Action, Authz
 from lumewarp_control_plane.compiler.validate import metrics_url_problem
 from lumewarp_control_plane.errors import not_found
 from lumewarp_control_plane.models import ConfigOutbox, GatewaySession, GatewayToken, Zone
+from lumewarp_control_plane.settings import Settings
 
 router = APIRouter(tags=["zones"])
 
 
-def _out(row: Zone) -> ZoneOut:
+def _out(row: Zone, settings: Settings) -> ZoneOut:
     return ZoneOut(
         name=row.name,
+        is_default=row.name == settings.zone,
         display_name=row.display_name,
         color=row.color,
         archived_at=row.archived_at,
@@ -86,6 +88,7 @@ async def zone_archive_blockers(session: AsyncSession, zone: str) -> list[str]:
 async def list_zones(
     authz: Authz,
     session: SessionDep,
+    settings: SettingsDep,
     include_archived: Annotated[
         bool, Query(description="Installation admins also get archived zones.")
     ] = False,
@@ -97,7 +100,7 @@ async def list_zones(
     if not (include_archived and await authz.is_admin()):
         stmt = stmt.where(Zone.archived_at.is_(None))
     rows = list((await session.scalars(stmt)).all())
-    return Page[ZoneOut](items=[_out(row) for row in rows], next_cursor=None)
+    return Page[ZoneOut](items=[_out(row, settings) for row in rows], next_cursor=None)
 
 
 @router.post(
@@ -106,7 +109,9 @@ async def list_zones(
     status_code=status.HTTP_201_CREATED,
     operation_id="createZone",
 )
-async def create_zone(body: ZoneCreate, authz: Authz, session: SessionDep) -> ZoneOut:
+async def create_zone(
+    body: ZoneCreate, authz: Authz, session: SessionDep, settings: SettingsDep
+) -> ZoneOut:
     """Create a config zone. It starts empty: no gateway serves it and no upstream,
     key or snapshot belongs to it yet. Requires an installation admin.
     """
@@ -138,7 +143,7 @@ async def create_zone(body: ZoneCreate, authz: Authz, session: SessionDep) -> Zo
             details={"name": row.name, "display_name": row.display_name, "color": row.color},
         )
     await session.refresh(row)
-    return _out(row)
+    return _out(row, settings)
 
 
 async def _live_zone(session: AsyncSession, name: str) -> Zone:
@@ -151,7 +156,9 @@ async def _live_zone(session: AsyncSession, name: str) -> Zone:
 
 
 @router.patch("/zones/{name}", response_model=ZoneOut, operation_id="updateZone")
-async def update_zone(name: str, body: ZoneUpdate, authz: Authz, session: SessionDep) -> ZoneOut:
+async def update_zone(
+    name: str, body: ZoneUpdate, authz: Authz, session: SessionDep, settings: SettingsDep
+) -> ZoneOut:
     """Change a zone's display name, colour, Playground URL or key rules. The zone's `name`
     is immutable. Requires an installation admin.
     """
@@ -184,7 +191,7 @@ async def update_zone(name: str, body: ZoneUpdate, authz: Authz, session: Sessio
             details={"name": row.name, "changes": changes},
         )
     await session.refresh(row)
-    return _out(row)
+    return _out(row, settings)
 
 
 @router.delete("/zones/{name}", response_model=ZoneOut, operation_id="archiveZone")
@@ -242,4 +249,4 @@ async def archive_zone(
             details={"name": row.name, "revoked_tokens": len(tokens)},
         )
     await session.refresh(row)
-    return _out(row)
+    return _out(row, settings)

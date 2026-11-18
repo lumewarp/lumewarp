@@ -44,11 +44,12 @@ SettingsDep = Annotated[Settings, Depends(app_settings)]
 
 
 def default_zone(settings: Settings) -> str:
-    """The config zone a read or validation uses when no record's zone is known.
+    """The zone a create gets when its body names none, and where a global definition
+    (a router, or an MCP/A2A create without a zone) is validated against the gateways.
 
-    Health reports, plugin validation and Test now are not zone-aware yet (upstreams and
-    deployments get their zone next); keeping the fallback here means that change touches
-    one place. Explicitly zone-scoped endpoints take a `zone` parameter instead.
+    A record's own zone is used wherever the record has one: health reports, Test now,
+    plugin validation for an upstream/MCP/A2A record and deployments all take it from the
+    row. Explicitly zone-scoped endpoints take a `zone` parameter instead.
     """
     return settings.zone
 

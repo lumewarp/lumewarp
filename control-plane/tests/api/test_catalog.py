@@ -14,7 +14,15 @@ from lumewarp_control_plane.models import (
     CatalogNameHistory,
     PolicyGrant,
 )
-from tests.api.helpers import ADMIN_AUTH, auth, create_org, suffix, user_with_token
+from tests.api.helpers import (
+    ADMIN_AUTH,
+    auth,
+    create_model,
+    create_org,
+    deployment_of,
+    suffix,
+    user_with_token,
+)
 
 H = ADMIN_AUTH
 API = "/api/v1"
@@ -40,13 +48,7 @@ def _upstream(client) -> str:
 
 
 def _model(client, name: str | None = None) -> dict:
-    body = {
-        "name": name or _name("model"),
-        "upstream_id": _upstream(client),
-        "upstream_model": "real-name",
-        "model_type": "llm",
-    }
-    return _ok(client.post(f"{API}/models", json=body, headers=H))
+    return create_model(client, _upstream(client), name=name or _name("model"))
 
 
 def _router_raw(client, members: list[str], name: str | None = None, **body):
@@ -106,13 +108,7 @@ def test_name_is_unique_across_kinds(client, taken_by, creating) -> None:
     else:
         _router(client, [model["id"]], name)
     if creating == "model":
-        body = {
-            "name": name,
-            "upstream_id": model["upstream_id"],
-            "upstream_model": "m",
-            "model_type": "llm",
-        }
-        resp = client.post(f"{API}/models", json=body, headers=H)
+        resp = client.post(f"{API}/models", json={"name": name, "model_type": "llm"}, headers=H)
     elif creating == "alias":
         resp = client.post(f"{API}/aliases", json={"name": name, "target": model["id"]}, headers=H)
     else:
@@ -184,13 +180,7 @@ def test_router_without_fallback_is_creatable(client) -> None:
 
 
 def test_model_body_rejects_weight(client) -> None:
-    body = {
-        "name": _name(),
-        "upstream_id": _upstream(client),
-        "upstream_model": "m",
-        "model_type": "llm",
-        "weight": 2,
-    }
+    body = {"name": _name(), "model_type": "llm", "weight": 2}
     assert client.post(f"{API}/models", json=body, headers=H).status_code == 422
 
 
@@ -240,7 +230,7 @@ def test_member_and_fallback_must_be_models(client) -> None:
 
 def test_upstream_with_models_cannot_be_deleted(client) -> None:
     model = _model(client)
-    resp = client.delete(f"{API}/upstreams/{model['upstream_id']}", headers=H)
+    resp = client.delete(f"{API}/upstreams/{deployment_of(model)['upstream_id']}", headers=H)
     assert resp.status_code == 409
 
 

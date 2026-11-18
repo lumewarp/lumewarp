@@ -106,10 +106,7 @@ def traffic(keys):
             "base_url": f"http://127.0.0.1:{stack.mock_port}/v1",
         },
     )
-    model = stack.ok(
-        "POST",
-        "/models",
-        json={
+    model = stack.create_model({
             "name": "mock-a",
             "upstream_id": upstream["id"],
             "upstream_model": "mock",

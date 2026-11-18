@@ -242,6 +242,14 @@ def test_patch_rejects_null_for_a_required_field(client, admin: dict[str, str]) 
     assert "display_name" in response.text
 
 
+def test_only_the_default_zone_is_marked_default(client, admin: dict[str, str]) -> None:
+    name = _name()
+    assert client.post("/api/v1/zones", json={"name": name}, headers=admin).status_code == 201
+    zones = {z["name"]: z for z in client.get("/api/v1/zones", headers=admin).json()["items"]}
+    assert zones[DEFAULT_ZONE]["is_default"] is True
+    assert zones[name]["is_default"] is False
+
+
 def test_default_zone_cannot_be_archived(client, admin: dict[str, str]) -> None:
     response = client.delete(f"/api/v1/zones/{DEFAULT_ZONE}", headers=admin)
     assert response.status_code == 409

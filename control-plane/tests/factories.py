@@ -26,6 +26,7 @@ from lumewarp_control_plane.models import (
     McpServerGrant,
     MemberPolicy,
     Model,
+    ModelDeployment,
     Org,
     OrgAdmin,
     PolicyGrant,
@@ -42,6 +43,10 @@ from lumewarp_control_plane.models import (
     Zone,
 )
 from lumewarp_control_plane.security import SecretKind, generate_secret
+
+# The config zone rows are built in. API tests point this at their own zone row
+# (tests/api/conftest.py); compiler tests use the `default` zone they seed.
+DEFAULT_ZONE = "default"
 
 _seq = itertools.count(1)
 
@@ -109,12 +114,24 @@ async def grant(
     await session.refresh(owner)
 
 
-async def make_upstream(session: AsyncSession, name: str | None = None, **kw) -> Upstream:
+async def ensure_zone(session: AsyncSession, name: str) -> None:
+    """The zone row, created if the test did not seed it (an upstream/model needs one)."""
+    if await session.get(Zone, name) is None:
+        session.add(Zone(name=name))
+        await session.flush()
+
+
+async def make_upstream(
+    session: AsyncSession, name: str | None = None, *, zone: str | None = None, **kw
+) -> Upstream:
+    zone = zone or DEFAULT_ZONE
+    await ensure_zone(session, zone)
     name = name or _unique("upstream")
-    row = await session.scalar(select(Upstream).where(Upstream.name == name))
+    row = await session.scalar(select(Upstream).where(Upstream.zone == zone, Upstream.name == name))
     if row is None:
         row = Upstream(
             name=name,
+            zone=zone,
             kind=kw.pop("kind", UpstreamKind.VLLM),
             base_url=kw.pop("base_url", f"http://{name}/v1"),
             **kw,
@@ -128,19 +145,34 @@ async def make_model(
     session: AsyncSession,
     name: str | None = None,
     upstream: Upstream | None = None,
+    *,
+    zone: str | None = None,
+    deploy: bool = True,
     **kw,
 ) -> Model:
-    upstream = upstream or await make_upstream(session)
+    """A model definition, deployed in `zone` on `upstream` (a fresh one there by default)."""
+    zone = zone or DEFAULT_ZONE
+    await ensure_zone(session, zone)
+    upstream = upstream or await make_upstream(session, zone=zone)
+    upstream_model = kw.pop("upstream_model", None)
     row = await catalog_name(session, name or _unique("model"))
     model = Model(
         model_type=kw.pop("model_type", "llm"),
         name_id=row.id,
-        upstream_id=upstream.id,
-        upstream_model=kw.pop("upstream_model", f"{row.name}-name"),
         **kw,
     )
     session.add(model)
     await session.flush()
+    if deploy:
+        session.add(
+            ModelDeployment(
+                name_id=model.id,
+                zone=zone,
+                upstream_id=upstream.id,
+                upstream_model=upstream_model or f"{row.name}-name",
+            )
+        )
+        await session.flush()
     await session.refresh(model)
     return model
 
@@ -298,6 +330,7 @@ async def make_mcp_server(
 ) -> McpServer:
     server = McpServer(
         name=name or _unique("server").replace("_", "-"),
+        zone=kw.pop("zone", None) or DEFAULT_ZONE,
         url=kw.pop("url", f"http://{name or 'mcp'}.test/mcp"),
         review_mode=kw.pop("review_mode", McpReviewMode.TOFU),
         **kw,
@@ -346,6 +379,7 @@ def new_definition(
 async def make_agent(session: AsyncSession, name: str | None = None, **kw) -> A2aAgent:
     agent = A2aAgent(
         name=name or _unique("agent").replace("_", "-"),
+        zone=kw.pop("zone", None) or DEFAULT_ZONE,
         url=kw.pop("url", f"http://{name or 'agent'}.test/a2a"),
         **kw,
     )

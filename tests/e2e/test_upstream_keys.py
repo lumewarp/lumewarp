@@ -24,10 +24,7 @@ def test_sealed_upstream_key_reaches_the_upstream(stack):
         },
     )
     assert upstream["api_key_set"] is True
-    model = stack.ok(
-        "POST",
-        "/models",
-        json={"name": "sealed-a", "upstream_id": upstream["id"], "upstream_model": "echo", "model_type": "llm"},
+    model = stack.create_model({"name": "sealed-a", "upstream_id": upstream["id"], "upstream_model": "echo", "model_type": "llm"},
     )
     assert UPSTREAM_KEY not in str(stack.ok("GET", f"/upstreams/{upstream['id']}"))
     assert UPSTREAM_KEY not in stack.api("GET", "/audit").text

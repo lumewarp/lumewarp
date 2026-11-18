@@ -918,10 +918,17 @@ class Upstream(TimestampMixin, Base):
             " AND (circuit_open_ms IS NULL OR circuit_open_ms > 0)",
             name="circuit_breaker_positive",
         ),
+        # A name is unique inside its zone: the same name may exist in two zones.
+        UniqueConstraint("zone", "name"),
+        # Target of the composite FK that pins a deployment to an upstream of its zone.
+        UniqueConstraint("id", "zone"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
-    name: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
+    # The config zone this upstream belongs to; set on create and never changed (a
+    # deployment in another zone could otherwise be left pointing at it).
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.name", ondelete="RESTRICT"), nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
     kind: Mapped[UpstreamKind] = mapped_column(_enum(UpstreamKind, "upstream_kind"), nullable=False)
     base_url: Mapped[str] = mapped_column(Text, nullable=False)
     # Name of the env var on the gateway holding the bearer token; never the value.
@@ -988,9 +995,13 @@ def target_name_constraints() -> tuple[CheckConstraint, ...]:
 
 
 def _live_name_index(table: str) -> Index:
-    """Unique among live rows: archiving (`deleted_at`) frees the name for reuse."""
+    """Unique per zone among live rows: archiving (`deleted_at`) frees the name for reuse."""
     return Index(
-        f"uq_{table}_name", "name", unique=True, postgresql_where=text("deleted_at IS NULL")
+        f"uq_{table}_name",
+        "zone",
+        "name",
+        unique=True,
+        postgresql_where=text("deleted_at IS NULL"),
     )
 
 
@@ -1025,6 +1036,8 @@ class McpServer(TimestampMixin, Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
+    # The config zone this server belongs to; set on create and never changed.
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.name", ondelete="RESTRICT"), nullable=False)
     name: Mapped[str] = mapped_column(String(63), nullable=False)
     # The Streamable HTTP endpoint; absolute http(s) URL without userinfo (validated in
     # compiler/validate.py, mirrored by the gateway).
@@ -1136,6 +1149,8 @@ class A2aAgent(TimestampMixin, Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
+    # The config zone this agent belongs to; set on create and never changed.
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.name", ondelete="RESTRICT"), nullable=False)
     name: Mapped[str] = mapped_column(String(63), nullable=False)
     # The agent's JSON-RPC endpoint; absolute http(s) URL without userinfo.
     url: Mapped[str] = mapped_column(Text, nullable=False)
@@ -1321,9 +1336,13 @@ def _name_fk() -> ForeignKeyConstraint:
 
 
 class Model(TimestampMixin, Base):
-    """One typed public name -> one upstream model. All prices NULL = unknown, not free.
-    Token pairs are complete except for embedding (input only); transcription can add
-    audio pricing. Calling directly is a single attempt; weights live on router members.
+    """One typed public name, deployed zero or more times (`model_deployments`).
+
+    All prices NULL = unknown, not free. Token pairs are complete except for embedding
+    (input only); transcription can add audio pricing. Calling directly is a single
+    attempt; weights live on router members. A model is one definition across zones: a
+    zone serves it only when it has a deployment there, so a model may be defined and not
+    served anywhere yet.
     """
 
     __tablename__ = "models"
@@ -1369,6 +1388,50 @@ class Model(TimestampMixin, Base):
             " AND (reasoning_mode <> 'strip' OR reasoning_default_level IS NULL)",
             name="reasoning_shape",
         ),
+    )
+
+    name_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="model", server_default="model"
+    )
+    model_type: Mapped[ModelType] = mapped_column(_enum(ModelType, "model_type"), nullable=False)
+    price_nano_usd_per_audio_second: Mapped[int | None] = mapped_column(BigInteger)
+    price_input_nano_usd_per_mtok: Mapped[int | None] = mapped_column(BigInteger)
+    price_output_nano_usd_per_mtok: Mapped[int | None] = mapped_column(BigInteger)
+    # Context window, informational (the gateway does not tokenize). NULL = unknown.
+    max_input_tokens: Mapped[int | None] = mapped_column(Integer)
+    # Enforced by the gateway on max_tokens / max_completion_tokens. NULL = none.
+    max_output_tokens: Mapped[int | None] = mapped_column(Integer)
+    # Merged under every request body (the client's fields win). NULL = none.
+    default_body: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
+    # reasoning_effort handling: passthrough | strip | mapped (level -> fragment object).
+    reasoning_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="passthrough", server_default="passthrough"
+    )
+    reasoning_fragments: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
+    reasoning_default_level: Mapped[str | None] = mapped_column(String(32))
+
+    id = synonym("name_id")
+
+
+class ModelDeployment(TimestampMixin, Base):
+    """One upstream serving a model inside one config zone.
+
+    A deployment is per zone: the same model may be served by different upstreams (or not
+    at all) in different zones. Its upstream must belong to the same zone (composite FK).
+    The health check and the Test now result are properties of the deployment, not of the
+    definition: they probe one upstream.
+    """
+
+    __tablename__ = "model_deployments"
+    __table_args__ = (
+        PrimaryKeyConstraint("name_id", "zone"),
+        # The upstream is in this deployment's zone, by construction.
+        ForeignKeyConstraint(
+            ["upstream_id", "zone"],
+            ["upstreams.id", "upstreams.zone"],
+            ondelete="RESTRICT",
+        ),
         CheckConstraint(
             "(chat_check_interval_ms IS NULL) = (chat_check_timeout_ms IS NULL)"
             " AND (chat_check_interval_ms IS NOT NULL OR (chat_check_unhealthy_threshold IS NULL"
@@ -1386,32 +1449,15 @@ class Model(TimestampMixin, Base):
             " AND (chat_check_healthy_threshold IS NULL OR chat_check_healthy_threshold > 0)",
             name="chat_check_thresholds",
         ),
+        Index(None, "upstream_id", "zone"),
     )
 
-    name_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
-    kind: Mapped[str] = mapped_column(
-        String(32), nullable=False, default="model", server_default="model"
+    name_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("models.name_id", ondelete="CASCADE"), nullable=False
     )
-    upstream_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("upstreams.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.name", ondelete="RESTRICT"), nullable=False)
+    upstream_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
     upstream_model: Mapped[str] = mapped_column(String(400), nullable=False)
-    model_type: Mapped[ModelType] = mapped_column(_enum(ModelType, "model_type"), nullable=False)
-    price_nano_usd_per_audio_second: Mapped[int | None] = mapped_column(BigInteger)
-    price_input_nano_usd_per_mtok: Mapped[int | None] = mapped_column(BigInteger)
-    price_output_nano_usd_per_mtok: Mapped[int | None] = mapped_column(BigInteger)
-    # Context window, informational (the gateway does not tokenize). NULL = unknown.
-    max_input_tokens: Mapped[int | None] = mapped_column(Integer)
-    # Enforced by the gateway on max_tokens / max_completion_tokens. NULL = none.
-    max_output_tokens: Mapped[int | None] = mapped_column(Integer)
-    # Merged under every request body (the client's fields win). NULL = none.
-    default_body: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
-    # reasoning_effort handling: passthrough | strip | mapped (level -> fragment object).
-    reasoning_mode: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="passthrough", server_default="passthrough"
-    )
-    reasoning_fragments: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
-    reasoning_default_level: Mapped[str | None] = mapped_column(String(32))
     # Periodic type-specific probe by the gateway; interval NULL = not probed.
     chat_check_interval_ms: Mapped[int | None] = mapped_column(Integer)
     chat_check_timeout_ms: Mapped[int | None] = mapped_column(Integer)
@@ -1422,8 +1468,6 @@ class Model(TimestampMixin, Base):
     probe_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     probe_ok: Mapped[bool | None] = mapped_column(Boolean)
     probe_ok_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-    id = synonym("name_id")
 
 
 class Alias(TimestampMixin, Base):

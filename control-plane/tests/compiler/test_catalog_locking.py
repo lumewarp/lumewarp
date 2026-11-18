@@ -17,6 +17,7 @@ from sqlalchemy.exc import DBAPIError
 from lumewarp_control_plane.api import config, routing
 from lumewarp_control_plane.api.schemas import (
     ModelCreate,
+    ModelDeploymentIn,
     ModelUpdate,
     RollbackCreate,
 )
@@ -33,6 +34,7 @@ from lumewarp_control_plane.models import (
     ConfigVersion,
     Model,
     ModelAccess,
+    ModelDeployment,
     PolicyGrant,
     Router,
     Team,
@@ -240,18 +242,17 @@ async def test_rollback_first_blocks_a_rename(factory):
 
 
 @pytest.mark.parametrize("create_first", [True, False])
-async def test_create_model_and_delete_upstream_serialize(factory, monkeypatch, create_first):
+async def test_create_deployment_and_delete_upstream_serialize(factory, monkeypatch, create_first):
     await seed_scope(factory)
     async with factory() as session, session.begin():
         upstream = await factories.make_upstream(session, "lonely")
-        upstream_id = upstream.id
+        model = await factories.make_model(session, "fresh", upstream, deploy=False)
+        upstream_id, model_id = upstream.id, model.id
     authz = _authz()
 
     def create(session):
-        body = ModelCreate(
-            name="fresh", model_type="llm", upstream_id=upstream_id, upstream_model="x"
-        )
-        return routing.create_model(body, authz, session, SETTINGS)
+        body = ModelDeploymentIn(upstream_id=upstream_id, upstream_model="x")
+        return routing.put_model_deployment(model_id, SCOPE, body, authz, session, SETTINGS)
 
     def delete(session):
         return routing.delete_upstream(upstream_id, authz, session, SETTINGS)
@@ -263,18 +264,19 @@ async def test_create_model_and_delete_upstream_serialize(factory, monkeypatch, 
     async with factory() as session:
         names = await session.scalars(select(CatalogName.name))
         if create_first:
-            # Created first, so the delete sees a referencing model.
-            assert created.name == "fresh"
+            # Created first, so the delete sees a referencing deployment.
+            assert created.upstream_id == upstream_id
             assert isinstance(deleted, ApiError) and deleted.status == 409
             assert await session.get(Upstream, upstream_id) is not None
             assert list(names) == ["fresh"]
-            assert await session.scalar(select(Model.upstream_id)) == upstream_id
+            assert await session.scalar(select(ModelDeployment.upstream_id)) == upstream_id
         else:
             assert deleted.status_code == 204
             assert isinstance(created, ApiError) and created.status == 422
             assert await session.get(Upstream, upstream_id) is None
-            assert list(names) == []
-            assert await session.scalar(select(func.count()).select_from(Model)) == 0
+            assert list(names) == ["fresh"]
+            assert await session.scalar(select(func.count()).select_from(Model)) == 1
+            assert await session.scalar(select(func.count()).select_from(ModelDeployment)) == 0
 
 
 # --------------------------------------------------------------------- malformed sidecars
@@ -412,10 +414,14 @@ async def test_diff_after_rename_keep_old_alias_reuse_and_rollback(factory):
 
     # 3. The old name m is free again: reuse it for a different model.
     async with factory() as session:
-        await routing.create_model(
-            ModelCreate(
-                name="m", model_type="llm", upstream_id=ids.upstream, upstream_model="other"
-            ),
+        created = await routing.create_model(
+            ModelCreate(name="m", model_type="llm"), authz, session, SETTINGS
+        )
+    async with factory() as session:
+        await routing.put_model_deployment(
+            created.id,
+            SCOPE,
+            ModelDeploymentIn(upstream_id=ids.upstream, upstream_model="other"),
             authz,
             session,
             SETTINGS,

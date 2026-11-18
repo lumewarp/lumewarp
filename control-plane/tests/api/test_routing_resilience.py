@@ -19,7 +19,14 @@ from lumewarp_control_plane.authz import RequestAuthz
 from lumewarp_control_plane.errors import ApiError
 from lumewarp_control_plane.models import AuditLog, CatalogName, ConfigOutbox, Model
 from lumewarp_control_plane.security import Principal, PrincipalKind
-from tests.api.helpers import ADMIN_AUTH, auth, report_plugins, suffix, user_with_token
+from tests.api.helpers import (
+    ADMIN_AUTH,
+    auth,
+    create_model,
+    report_plugins,
+    suffix,
+    user_with_token,
+)
 
 H = ADMIN_AUTH
 
@@ -46,16 +53,7 @@ def _upstream(client, **body):
 def _model(client, upstream_id: str | None = None, **body) -> dict:
     if upstream_id is None:
         upstream_id = _upstream(client).json()["id"]
-    body = {
-        "name": f"dep-{suffix()}",
-        "upstream_id": upstream_id,
-        "upstream_model": "m",
-        "model_type": "llm",
-        **body,
-    }
-    resp = client.post("/api/v1/models", json=body, headers=H)
-    assert resp.status_code == 201, resp.text
-    return resp.json()
+    return create_model(client, upstream_id, name=f"dep-{suffix()}", upstream_model="m", **body)
 
 
 def _members(*ids: str, weight: int = 1) -> list[dict]:
@@ -287,8 +285,9 @@ async def test_router_writes_audit_and_recompile(client, committed) -> None:
     router = _ok(_router(client, fallback_model_ids=[backup["id"]], retry={"max_attempts": 2}))
     _ok(_patch(client, router["id"], retry={"max_attempts": 3}), 200)
     outbox_after = await committed.scalar(select(func.count()).select_from(ConfigOutbox))
-    # Two models + two upstreams + one router + one router update.
-    assert outbox_after == outbox_before + 6
+    # Two models (definition + deployment each) + two upstreams + one router + one
+    # router update.
+    assert outbox_after == outbox_before + 8
     rows = (
         await committed.scalars(select(AuditLog).where(AuditLog.resource_id == router["id"]))
     ).all()

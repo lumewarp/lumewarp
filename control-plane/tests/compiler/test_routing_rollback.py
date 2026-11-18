@@ -8,6 +8,7 @@ from lumewarp_control_plane.models import (
     Alias,
     CatalogName,
     Model,
+    ModelDeployment,
     Router,
     RouterFallback,
     RouterMember,
@@ -88,9 +89,14 @@ async def _set_group(session, group, configured):
             {"none": {"chat_template_kwargs": {"enable_thinking": False}}} if configured else None
         )
         model.reasoning_default_level = "none" if configured else None
-        model.chat_check_interval_ms = 30000 if configured else None
-        model.chat_check_timeout_ms = 5000 if configured else None
-        model.chat_check_unhealthy_threshold = 2 if configured else None
+        deployment = await session.scalar(
+            select(ModelDeployment).where(
+                ModelDeployment.name_id == model.id, ModelDeployment.zone == SCOPE
+            )
+        )
+        deployment.chat_check_interval_ms = 30000 if configured else None
+        deployment.chat_check_timeout_ms = 5000 if configured else None
+        deployment.chat_check_unhealthy_threshold = 2 if configured else None
     elif group in ("health_check", "health_defaults"):
         explicit = configured and group == "health_check"
         upstream.health_check_interval_ms = 5000 if configured else None
@@ -107,8 +113,13 @@ async def _set_group(session, group, configured):
         upstream.metrics_url = "http://metrics:9000/custom" if configured else None
     elif group == "model":
         secondary = await session.scalar(select(Upstream).where(Upstream.name == "secondary"))
-        model.upstream_id = secondary.id if configured else upstream.id
-        model.upstream_model = "alternate-name" if configured else "a-name"
+        deployment = await session.scalar(
+            select(ModelDeployment).where(
+                ModelDeployment.name_id == model.id, ModelDeployment.zone == SCOPE
+            )
+        )
+        deployment.upstream_id = secondary.id if configured else upstream.id
+        deployment.upstream_model = "alternate-name" if configured else "a-name"
     elif group in ("price", "free_price"):
         model.price_input_nano_usd_per_mtok = (
             (0 if group == "free_price" else 123) if configured else None

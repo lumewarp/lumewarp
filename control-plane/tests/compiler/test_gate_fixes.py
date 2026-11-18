@@ -27,6 +27,7 @@ from lumewarp_control_plane.models import (
     GatewayToken,
     KeyLifecycle,
     Model,
+    ModelDeployment,
     Upstream,
 )
 from lumewarp_control_plane.security import SecretKind, generate_secret
@@ -126,7 +127,10 @@ async def test_invalid_upstream_url_left_out_with_its_routers(factory) -> None:
         await s.execute(
             update(Upstream).where(Upstream.name == "bad").values(base_url="http://h/v1?q")
         )
-        await s.execute(update(Model).where(Model.name == "good-d").values(upstream_model=""))
+        good = await s.scalar(select(Model.name_id).where(Model.name == "good-d"))
+        await s.execute(
+            update(ModelDeployment).where(ModelDeployment.name_id == good).values(upstream_model="")
+        )
         await add_router(s, "good", [("fine-d", None)])
     async with factory() as s:
         c = await compile_zone(s, SCOPE, now=OCT, require_local_membership=True)

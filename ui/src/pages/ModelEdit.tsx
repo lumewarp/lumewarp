@@ -97,12 +97,15 @@ const blank: Values = {
   check_healthy: null,
 };
 
-const fromModel = (m: Model): Values => ({
+const fromModel = (m: Model): Values => {
+  // Z6 gives every zone its own deployment section; until then the first one stands in.
+  const deployment = m.deployments?.[0];
+  return {
   model_type: m.model_type,
   name: m.name,
   keep_old_name_as_alias: true,
-  upstream_id: m.upstream_id,
-  upstream_model: m.upstream_model,
+  upstream_id: deployment?.upstream_id ?? "",
+  upstream_model: deployment?.upstream_model ?? "",
   max_input_tokens: m.max_input_tokens,
   max_output_tokens: m.max_output_tokens,
   price_in: nanoToUsd(m.price_input_nano_usd_per_mtok),
@@ -114,12 +117,13 @@ const fromModel = (m: Model): Values => ({
   reasoning_mode: m.reasoning.mode === "passthrough" && !m.reasoning.default_level ? blank.reasoning_mode : m.reasoning.mode,
   levels: rowsOf(Object.entries(m.reasoning.fragments ?? {}).map(([k, v]) => [k, Object.keys(v).length ? JSON.stringify(v, null, 1) : ""])),
   reasoning_default: m.reasoning.default_level ?? "",
-  check_enabled: !!m.chat_check,
-  check_interval_ms: m.chat_check?.interval_ms ?? blank.check_interval_ms,
-  check_timeout_ms: m.chat_check?.timeout_ms ?? blank.check_timeout_ms,
-  check_unhealthy: m.chat_check?.unhealthy_threshold ?? null,
-  check_healthy: m.chat_check?.healthy_threshold ?? null,
-});
+  check_enabled: !!deployment?.chat_check,
+  check_interval_ms: deployment?.chat_check?.interval_ms ?? blank.check_interval_ms,
+  check_timeout_ms: deployment?.chat_check?.timeout_ms ?? blank.check_timeout_ms,
+  check_unhealthy: deployment?.chat_check?.unhealthy_threshold ?? null,
+  check_healthy: deployment?.chat_check?.healthy_threshold ?? null,
+  };
+};
 
 /** An empty string is "not set"; anything else must be a JSON object without gateway-owned keys. */
 function jsonObjectProblem(text: string, reserved: string[] = RESERVED): string | undefined {
@@ -179,8 +183,6 @@ const body = (v: Values) => {
   return {
   model_type: type,
   name: v.name.trim(),
-  upstream_id: v.upstream_id,
-  upstream_model: v.upstream_model.trim(),
   price_input_nano_usd_per_mtok: usdToNano(v.price_in),
   price_output_nano_usd_per_mtok: shows.out ? usdToNano(v.price_out) : null,
   price_nano_usd_per_audio_second: shows.audio ? usdToNano(v.price_audio) : null,
@@ -189,9 +191,6 @@ const body = (v: Values) => {
   default_body: shows.body ? parseObject(v.default_body) : null,
   // Level names are free strings; schema.d.ts may still list the old literals.
   reasoning: shows.llm ? reasoning(v) : null,
-  chat_check: v.check_enabled
-    ? { interval_ms: v.check_interval_ms ?? 0, timeout_ms: v.check_timeout_ms ?? 0, unhealthy_threshold: v.check_unhealthy, healthy_threshold: v.check_healthy }
-    : null,
   };
 };
 
@@ -251,13 +250,16 @@ function ModelForm({ existing }: { existing?: Model }) {
   const shows = v.model_type ? SHOWS[v.model_type] : null;
   const dirty = JSON.stringify(v) !== JSON.stringify(initial);
   const selectedUpstream = upstreams.data?.find((u) => u.id === v.upstream_id);
-  const savedUpstream = existing ? upstreams.data?.find((u) => u.id === existing.upstream_id) : undefined;
+  const savedDeployment = existing?.deployments?.[0];
+  const savedUpstream = savedDeployment
+    ? upstreams.data?.find((u) => u.id === savedDeployment.upstream_id)
+    : undefined;
   const pluginMode = !!selectedUpstream?.auth || !!savedUpstream?.auth;
   const saveFirst =
     pluginMode && (!existing || dirty)
       ? "Save the model first: Test now for an auth plugin upstream runs on a gateway with the saved configuration."
       : undefined;
-  const test = useChatTest(v, existing?.id, pluginMode, saveFirst, upstreams.isPending);
+  const test = useChatTest(v, existing?.id, pluginMode, saveFirst, upstreams.isPending, savedDeployment);
   const renamed = !!existing && v.name.trim() !== existing.name;
   const save = useMut(
     (x: Values) => (existing ? api.updateModel(existing.id, { ...body(x), keep_old_name_as_alias: renamed && x.keep_old_name_as_alias }) : api.createModel(body(x))),
@@ -294,14 +296,14 @@ function ModelForm({ existing }: { existing?: Model }) {
   return (
     <EditPage
       title={existing ? existing.name : "New model"}
-      description={v.upstream_id && v.upstream_model.trim() ? `${upstreamName(v.upstream_id)}/${v.upstream_model.trim()}` : undefined}
+      description={v.upstream_id && v.upstream_model.trim() ? `${upstreamName(v.upstream_id)}/${v.upstream_model.trim()}${savedDeployment ? ` in ${savedDeployment.zone}` : ""}` : undefined}
       back="/models"
       backLabel="Models"
       dirty={dirty}
       submitLabel={existing ? "Save" : "Create"}
       actions={
         <>
-          {existing && <HealthBadge health={existing.health} probe={existing.probe} />}
+          {savedDeployment && <HealthBadge health={savedDeployment.health} probe={savedDeployment.probe} />}
           {test.button}
           {test.hint && <HelpTip label="Test now" text={test.hint} />}
         </>
@@ -469,7 +471,7 @@ const CREDENTIAL: Record<ModelTest["credential"], string> = {
  * One probe request now. Without an auth plugin it tests the form as it stands; with one only a
  * saved model can be probed, by a gateway, so the button waits for a save.
  */
-function useChatTest(values: Values, modelId: string | undefined, pluginMode: boolean, saveReason: string | undefined, upstreamsPending: boolean) {
+function useChatTest(values: Values, modelId: string | undefined, pluginMode: boolean, saveReason: string | undefined, upstreamsPending: boolean, existingZone: { zone: string } | undefined) {
   const [result, setResult] = useState<ModelTest | null>(null);
   const qc = useQueryClient();
   const run = useMutation({
@@ -486,7 +488,8 @@ function useChatTest(values: Values, modelId: string | undefined, pluginMode: bo
       } catch {
         // An invalid body is flagged on the field; test without it.
       }
-      return api.testModel({ model_type: values.model_type as ModelType, upstream_id: values.upstream_id, upstream_model: values.upstream_model.trim(), default_body: defaultBody, model_id: modelId });
+      // A form test is kept on the saved deployment only when one exists.
+      return api.testModel({ model_type: values.model_type as ModelType, upstream_id: values.upstream_id, upstream_model: values.upstream_model.trim(), default_body: defaultBody, model_id: modelId, zone: existingZone?.zone ?? null });
     },
     onSuccess: setResult,
   });

@@ -79,10 +79,7 @@ def self_service(request, binaries):
                     "api_key_ref": UPSTREAM_KEY_REF,
                 },
             )
-            state.model = stack.ok(
-                "POST",
-                "/models",
-                json={
+            state.model = stack.create_model({
                     "name": "mock-a",
                     "model_type": "llm",
                     "upstream_id": upstream["id"],
@@ -91,10 +88,7 @@ def self_service(request, binaries):
                     "price_output_nano_usd_per_mtok": 2_000_000_000,
                 },
             )
-            state.other_model = stack.ok(
-                "POST",
-                "/models",
-                json={
+            state.other_model = stack.create_model({
                     "name": "other-a",
                     "model_type": "llm",
                     "upstream_id": upstream["id"],

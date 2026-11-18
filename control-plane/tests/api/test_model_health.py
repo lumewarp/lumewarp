@@ -13,7 +13,13 @@ from sqlalchemy import delete
 from lumewarp_control_plane import upstream_client
 from lumewarp_control_plane.models import GatewaySession, GatewayToken
 from lumewarp_control_plane.security import SecretKind, generate_secret
-from tests.api.helpers import ADMIN_AUTH, suffix
+from tests.api.helpers import (
+    ADMIN_AUTH,
+    app_zone,
+    create_model,
+    deployment_of,
+    suffix,
+)
 
 KEY = "sk-chat-check-secret-7719"
 CHAT_URL = "http://chat.test/v1/chat/completions"
@@ -28,32 +34,46 @@ def _upstream(client, **body) -> dict:
 
 
 def _model(client, upstream: dict, **body) -> dict:
-    body = {
-        "name": f"m-{suffix()}",
-        "upstream_id": upstream["id"],
-        "upstream_model": "qwen",
-        "model_type": "llm",
+    return create_model(
+        client,
+        upstream["id"],
+        name=f"m-{suffix()}",
+        upstream_model="qwen",
         **body,
-    }
-    response = client.post("/api/v1/models", json=body, headers=ADMIN_AUTH)
-    assert response.status_code == 201, response.text
-    return response.json()
+    )
+
+
+def _put_deployment(client, model: dict, upstream: dict, **body):
+    return client.put(
+        f"/api/v1/models/{model['id']}/deployments/{app_zone(client)}",
+        json={"upstream_id": upstream["id"], "upstream_model": "qwen", **body},
+        headers=ADMIN_AUTH,
+    )
+
+
+def _deployment(client, model: dict) -> dict:
+    got = client.get(f"/api/v1/models/{model['id']}", headers=ADMIN_AUTH).json()
+    return deployment_of(got)
 
 
 def test_chat_check_round_trips_and_clears(client) -> None:
     up = _upstream(client)
     model = _model(client, up, chat_check=CHECK)
-    assert model["chat_check"] == {**CHECK, "unhealthy_threshold": None, "healthy_threshold": None}
-    assert model["health"] == "unknown"
-    url = f"/api/v1/models/{model['id']}"
-    patched = client.patch(
-        url, json={"chat_check": {**CHECK, "unhealthy_threshold": 2}}, headers=ADMIN_AUTH
+    deployment = _deployment(client, model)
+    assert deployment["chat_check"] == {
+        **CHECK,
+        "unhealthy_threshold": None,
+        "healthy_threshold": None,
+    }
+    assert deployment["health"] == "unknown"
+    patched = _put_deployment(
+        client, model, up, chat_check={**CHECK, "unhealthy_threshold": 2}
     ).json()
     assert patched["chat_check"]["unhealthy_threshold"] == 2
-    cleared = client.patch(url, json={"chat_check": None}, headers=ADMIN_AUTH).json()
+    cleared = _put_deployment(client, model, up, chat_check=None).json()
     assert cleared["chat_check"] is None
     assert cleared["health"] == "not_probed"
-    assert _model(client, up)["chat_check"] is None
+    assert _deployment(client, _model(client, up))["chat_check"] is None
 
 
 @pytest.mark.parametrize(
@@ -67,13 +87,8 @@ def test_chat_check_round_trips_and_clears(client) -> None:
 )
 def test_bad_chat_check_is_rejected(client, check) -> None:
     up = _upstream(client)
-    body = {
-        "name": f"m-{suffix()}",
-        "upstream_id": up["id"],
-        "upstream_model": "q",
-        "model_type": "llm",
-    }
-    response = client.post("/api/v1/models", json={**body, "chat_check": check}, headers=ADMIN_AUTH)
+    model = _model(client, up)
+    response = _put_deployment(client, model, up, chat_check=check)
     assert response.status_code == 422
 
 
@@ -121,13 +136,18 @@ async def test_model_health_aggregates_connected_gateways(
     await _report(committed, scope, "gw-a", {checked["name"]: True, other["name"]: True})
     await _report(committed, scope, "gw-b", {checked["name"]: False})
     await _report(committed, scope, "gw-c", {other["name"]: False}, connected=False)
-    get = lambda m: client.get(f"/api/v1/models/{m['id']}", headers=ADMIN_AUTH).json()  # noqa: E731
-    assert get(checked)["health"] == "unhealthy"
-    assert get(other)["health"] == "healthy"
-    assert get(plain)["health"] == "not_probed"
+
+    def deployment(m: dict) -> dict:
+        got = client.get(f"/api/v1/models/{m['id']}", headers=ADMIN_AUTH).json()
+        return deployment_of(got)
+
+    assert deployment(checked)["health"] == "unhealthy"
+    assert deployment(other)["health"] == "healthy"
+    assert deployment(plain)["health"] == "not_probed"
     listed = {
-        m["id"]: m["health"]
+        m["id"]: deployment_of(m)["health"]
         for m in client.get("/api/v1/models?limit=500", headers=ADMIN_AUTH).json()["items"]
+        if m["deployments"]
     }
     assert listed[checked["id"]] == "unhealthy"
 
@@ -148,7 +168,13 @@ def replies(monkeypatch):
 
 
 def _test(client, up: dict, **extra):
-    body = {"upstream_id": up["id"], "upstream_model": "qwen", "model_type": "llm", **extra}
+    body = {
+        "upstream_id": up["id"],
+        "upstream_model": "qwen",
+        "model_type": "llm",
+        "zone": app_zone(client),
+        **extra,
+    }
     return client.post("/api/v1/models/test", json=body, headers=ADMIN_AUTH)
 
 
@@ -208,10 +234,10 @@ def test_test_now_result_is_kept_on_the_saved_row_until_its_settings_change(
     _, table = replies
     up = _upstream(client)
     model = _model(client, up)
-    assert model["probe"] is None
+    assert _deployment(client, model)["probe"] is None
 
     def probe() -> dict | None:
-        return client.get(f"/api/v1/models/{model['id']}", headers=ADMIN_AUTH).json()["probe"]
+        return _deployment(client, model)["probe"]
 
     # Without model_id (an unsaved form) nothing is kept.
     table[CHAT_URL] = httpx.Response(200, json={"choices": [{"message": {"content": "2"}}]})
@@ -236,11 +262,9 @@ def test_test_now_result_is_kept_on_the_saved_row_until_its_settings_change(
     patch = client.patch(
         f"/api/v1/models/{model['id']}", json={"name": f"m-{suffix()}"}, headers=ADMIN_AUTH
     )
-    assert patch.status_code == 200 and patch.json()["probe"] == failed
-    patch = client.patch(
-        f"/api/v1/models/{model['id']}", json={"upstream_model": "qwen2"}, headers=ADMIN_AUTH
-    )
-    assert patch.status_code == 200 and patch.json()["probe"] is None
+    assert patch.status_code == 200 and probe() == failed
+    moved = _put_deployment(client, model, up, upstream_model="qwen2")
+    assert moved.status_code == 200 and moved.json()["probe"] is None
 
     # An upstream's own result, and a new address clears its models' results too.
     table[CHAT_URL] = httpx.Response(200, json={"choices": [{"message": {"content": "2"}}]})

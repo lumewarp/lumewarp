@@ -32,7 +32,7 @@ from secret_scan import (
 ROOT = Path(__file__).resolve().parents[2]
 BREAK_GLASS_PASSWORD = "e2e-break-glass-password"
 ENCRYPTION_KEY = "e2e-lumewarp-encryption-key-0123456789abcdef"
-SCOPE = "e2e"
+ZONE = "e2e"
 FORBIDDEN_PORTS = {9000, 5432, 8080, 8081}
 
 
@@ -339,8 +339,8 @@ class Gateway:
                 "E2E_GATEWAY_TOKEN",
                 "--state-dir",
                 str(state_dir),
-                "--scope",
-                SCOPE,
+                "--zone",
+                ZONE,
                 "--local-config",
                 str(local),
             ],
@@ -361,7 +361,11 @@ class Gateway:
             if row["gateway_id"].startswith(self.prefix)
         ]
         connected = [row for row in rows if row["connected"]]
-        return max(connected or rows, key=lambda row: row["last_seen_at"] or "") if rows else None
+        return (
+            max(connected or rows, key=lambda row: row["last_seen_at"] or "")
+            if rows
+            else None
+        )
 
     def wait_listening(self) -> None:
         def up():
@@ -455,7 +459,7 @@ class Stack:
             "LUMEWARP_SESSION_COOKIE_SECURE": "false",
             "LUMEWARP_SECRET_KEY": "e2e-lumewarp-secret-key-0123456789abcdef",
             "LUMEWARP_ENCRYPTION_KEY": ENCRYPTION_KEY,
-            "LUMEWARP_SCOPE": SCOPE,
+            "LUMEWARP_ZONE": ZONE,
             "LUMEWARP_HTTP_BIND": f"127.0.0.1:{self.http_port}",
             "LUMEWARP_GRPC_BIND": f"127.0.0.1:{self.grpc_port}",
             "LUMEWARP_METRICS_BIND": f"127.0.0.1:{self.metrics_port}",
@@ -499,7 +503,7 @@ class Stack:
         pg(PG_DSN, f'CREATE DATABASE "{self.db_name}"')
         self.db_created = True
         self._run_cli("migrate")
-        out = self._run_cli("bootstrap", "--name", "e2e", "--scope", SCOPE)
+        out = self._run_cli("bootstrap", "--name", "e2e", "--zone", ZONE)
         self.gateway_token = out.strip().splitlines()[-1]
         assert self.gateway_token.startswith("lwg-"), out
         record_secret(self.gateway_token, "gateway token")
@@ -687,6 +691,31 @@ class Stack:
         assert r.status_code in (200, 201), (method, path, r.status_code, r.text)
         return r.json()
 
+    def create_model(self, body: dict, zone: str = ZONE) -> dict:
+        """POST /models, then deploy it in `zone` when the body names an upstream.
+
+        A model is a global definition; its upstream lives on a per-zone deployment.
+        """
+        body = dict(body)
+        deployment = {
+            k: body.pop(k)
+            for k in ("upstream_id", "upstream_model", "chat_check")
+            if k in body
+        }
+        model = self.ok("POST", "/models", json=body)
+        if "upstream_id" in deployment:
+            model["deployment"] = self.deploy_model(
+                model["id"], zone=zone, **deployment
+            )
+        return model
+
+    def deploy_model(self, model_id: str, zone: str = ZONE, **deployment) -> dict:
+        return self.ok("PUT", f"/models/{model_id}/deployments/{zone}", json=deployment)
+
+    def deployment(self, model_id: str, zone: str = ZONE) -> dict:
+        model = self.ok("GET", f"/models/{model_id}")
+        return next(d for d in model["deployments"] if d["zone"] == zone)
+
     def seed(
         self,
         *,
@@ -704,13 +733,18 @@ class Stack:
                 "base_url": f"http://127.0.0.1:{self.mock_port}/v1",
             },
         )
-        dep = {"name": "mock-a", "upstream_id": up["id"], "upstream_model": "mock", "model_type": "llm"}
+        dep = {
+            "name": "mock-a",
+            "upstream_id": up["id"],
+            "upstream_model": "mock",
+            "model_type": "llm",
+        }
         if priced:
             dep |= {
                 "price_input_nano_usd_per_mtok": 1_000_000_000,
                 "price_output_nano_usd_per_mtok": 2_000_000_000,
             }
-        dep = self.ok("POST", "/models", json=dep)
+        dep = self.create_model(dep)
         self.ok(
             "POST",
             "/routers",

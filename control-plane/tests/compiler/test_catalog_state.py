@@ -23,6 +23,7 @@ from lumewarp_control_plane.models import (
     KeyLifecycle,
     Model,
     ModelAccess,
+    ModelDeployment,
     ModelGroup,
     ModelGroupMember,
     PolicyGrant,
@@ -78,11 +79,18 @@ async def test_restore_recreates_deleted_ids_and_preserves_changed_policy(factor
         await session.execute(delete(RouterFallback))
         await session.execute(delete(CatalogName).where(CatalogName.id == backup_id))
         await session.execute(delete(CatalogName).where(CatalogName.name == "backup-model"))
-        upstream = Upstream(name="new-upstream", kind=UpstreamKind.OPENAI, base_url="http://new/v1")
+        upstream = Upstream(
+            name="new-upstream",
+            zone=SCOPE,
+            kind=UpstreamKind.OPENAI,
+            base_url="http://new/v1",
+        )
         session.add(upstream)
         await session.flush()
         await session.execute(
-            update(Model).where(Model.id == model_id).values(upstream_id=upstream.id)
+            update(ModelDeployment)
+            .where(ModelDeployment.name_id == model_id)
+            .values(upstream_id=upstream.id)
         )
         # Current policy is not restored from the routing sidecar.
         await session.execute(update(Team).values(rpm_limit=23))

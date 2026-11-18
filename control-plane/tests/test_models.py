@@ -224,7 +224,14 @@ async def test_user_email_case_insensitive_unique(session: AsyncSession) -> None
 
 
 async def test_routing_checks(session: AsyncSession) -> None:
-    up = Upstream(name="u", kind=UpstreamKind.VLLM, base_url="http://x/v1", api_key_ref="VLLM_KEY")
+    await factories.ensure_zone(session, "default")
+    up = Upstream(
+        name="u",
+        zone="default",
+        kind=UpstreamKind.VLLM,
+        base_url="http://x/v1",
+        api_key_ref="VLLM_KEY",
+    )
     session.add(up)
     await session.flush()
     await _fails(
@@ -232,13 +239,18 @@ async def test_routing_checks(session: AsyncSession) -> None:
         Model(
             name="d1",
             model_type="llm",
-            upstream_id=up.id,
-            upstream_model="m",
             price_input_nano_usd_per_mtok=1,
         ),
     )
     await _fails(
-        session, Upstream(name="u2", kind=UpstreamKind.OPENAI, base_url="x", api_key_ref="$(rm)")
+        session,
+        Upstream(
+            name="u2",
+            zone="default",
+            kind=UpstreamKind.OPENAI,
+            base_url="x",
+            api_key_ref="$(rm)",
+        ),
     )
 
 

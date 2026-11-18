@@ -71,6 +71,7 @@ from lumewarp_control_plane.models import (
     McpReviewMode,
     McpServer,
     PluginKind,
+    Zone,
 )
 from lumewarp_control_plane.settings import Settings
 
@@ -97,12 +98,12 @@ def _secret(settings: Settings, secret: SecretStr) -> bytes:
 
 async def _validate_auth(
     session: AsyncSession,
-    settings: Settings,
     auth: Any,
     *,
+    zone: str,
     force: bool,
 ) -> list[str]:
-    """422 unless the gateways can serve the auth plugin; returns what `force` saved past."""
+    """422 unless the zone's gateways can serve the auth plugin; returns forced past."""
     try:
         return await validate_plugin_params(
             session,
@@ -110,7 +111,7 @@ async def _validate_auth(
             auth.plugin,
             auth.params,
             force=force,
-            zone=default_zone(settings),
+            zone=zone,
         )
     except PluginRejected as exc:
         raise validation_error(f"auth.{exc.field}", exc.message) from exc
@@ -118,9 +119,9 @@ async def _validate_auth(
 
 async def _validate_middleware(
     session: AsyncSession,
-    settings: Settings,
     middleware: Any,
     *,
+    zone: str,
     force: bool,
 ) -> list[str]:
     if middleware is None:
@@ -132,10 +133,19 @@ async def _validate_middleware(
             middleware.plugin,
             middleware.params,
             force=force,
-            zone=default_zone(settings),
+            zone=zone,
         )
     except PluginRejected as exc:
         raise validation_error(f"middleware.{exc.field}", exc.message) from exc
+
+
+async def _zone_or_default(session: AsyncSession, settings: Settings, zone: str | None) -> str:
+    """The record's zone; must exist and be live. A write into another scope is refused."""
+    name = zone or default_zone(settings)
+    row = await session.get(Zone, name)
+    if row is None or row.archived_at is not None:
+        raise validation_error("zone", f"unknown zone {name!r}")
+    return name
 
 
 def _plugin_ref(row: Any, *, prefix: str = "") -> PluginRefOut:
@@ -163,9 +173,11 @@ def _target_problems(
 
 
 async def _ensure_mcp_name_free(
-    session: AsyncSession, name: str, *, exclude: uuid.UUID | None = None
+    session: AsyncSession, zone: str, name: str, *, exclude: uuid.UUID | None = None
 ) -> None:
-    stmt = select(McpServer.id).where(McpServer.name == name, McpServer.deleted_at.is_(None))
+    stmt = select(McpServer.id).where(
+        McpServer.zone == zone, McpServer.name == name, McpServer.deleted_at.is_(None)
+    )
     if exclude is not None:
         stmt = stmt.where(McpServer.id != exclude)
     if await session.scalar(stmt) is not None:
@@ -173,9 +185,11 @@ async def _ensure_mcp_name_free(
 
 
 async def _ensure_agent_name_free(
-    session: AsyncSession, name: str, *, exclude: uuid.UUID | None = None
+    session: AsyncSession, zone: str, name: str, *, exclude: uuid.UUID | None = None
 ) -> None:
-    stmt = select(A2aAgent.id).where(A2aAgent.name == name, A2aAgent.deleted_at.is_(None))
+    stmt = select(A2aAgent.id).where(
+        A2aAgent.zone == zone, A2aAgent.name == name, A2aAgent.deleted_at.is_(None)
+    )
     if exclude is not None:
         stmt = stmt.where(A2aAgent.id != exclude)
     if await session.scalar(stmt) is not None:
@@ -223,20 +237,19 @@ def _definition_page_cursor(cursor: str | None) -> uuid.UUID | None:
 # --------------------------------------------------------------------------- mcp servers
 
 
-async def _mcp_servers_out(
-    session: AsyncSession, settings: Settings, rows: Sequence[McpServer]
-) -> list[McpServerOut]:
-    registry = await load_plugins(session, default_zone(settings))
+async def _mcp_servers_out(session: AsyncSession, rows: Sequence[McpServer]) -> list[McpServerOut]:
+    registries = {zone: await load_plugins(session, zone) for zone in {r.zone for r in rows}}
     counts = await _definition_counts(session, [row.id for row in rows])
     problems = {
         row.id: _target_problems(
-            registry, PluginKind.UPSTREAM_AUTH, row.auth_plugin, row.auth_params or {}
+            registries[row.zone], PluginKind.UPSTREAM_AUTH, row.auth_plugin, row.auth_params or {}
         )
         for row in rows
     }
     return [
         McpServerOut(
             id=row.id,
+            zone=row.zone,
             name=row.name,
             url=row.url,
             auth=_plugin_ref(row),
@@ -275,9 +288,7 @@ async def list_mcp_servers(
     # the next page is "id greater than it". Ordering by name made the two disagree.
     stmt = select(McpServer).where(McpServer.deleted_at.is_(None)).order_by(McpServer.id)
     rows, next_cursor = await uuid_page(session, stmt, McpServer.id, limit, cursor)
-    return Page[McpServerOut](
-        items=await _mcp_servers_out(session, settings, rows), next_cursor=next_cursor
-    )
+    return Page[McpServerOut](items=await _mcp_servers_out(session, rows), next_cursor=next_cursor)
 
 
 @router.post(
@@ -296,10 +307,12 @@ async def create_mcp_server(
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
         await lock_hierarchy(session)
-        await _ensure_mcp_name_free(session, body.name)
-        missing = await _validate_auth(session, settings, body.auth, force=body.force)
+        zone = await _zone_or_default(session, settings, body.zone)
+        await _ensure_mcp_name_free(session, zone, body.name)
+        missing = await _validate_auth(session, body.auth, zone=zone, force=body.force)
         row = McpServer(
             name=body.name,
+            zone=zone,
             url=body.url,
             timeout_ms=body.timeout_ms,
             review_mode=body.review_mode,
@@ -310,7 +323,9 @@ async def create_mcp_server(
         # Provenance for a CatalogReport: only a version compiled at least this new can be
         # trusted about this row (catalog_ingest). Set before the refresh, so the refreshed
         # row (and its server-side `updated_at`) is what the response reads.
-        row.config_revision = await enqueue_recompile(session, settings, "api.mcp_server.create")
+        row.config_revision = await enqueue_recompile(
+            session, settings, "api.mcp_server.create", zone=zone
+        )
         # refresh() does not autoflush, so flush the new revision first: otherwise the
         # reload discards the assignment and the row keeps the server default 0.
         await session.flush()
@@ -323,6 +338,7 @@ async def create_mcp_server(
             principal=authz.principal,
             details={
                 "name": row.name,
+                "zone": row.zone,
                 "url": row.url,
                 "review_mode": row.review_mode,
                 "credential_stored": row.secret_ciphertext is not None,
@@ -337,7 +353,7 @@ async def create_mcp_server(
             missing=missing,
             principal=authz.principal,
         )
-    return (await _mcp_servers_out(session, settings, [row]))[0]
+    return (await _mcp_servers_out(session, [row]))[0]
 
 
 @router.get("/mcp-servers/{server_id}", response_model=McpServerOut, operation_id="getMcpServer")
@@ -347,7 +363,7 @@ async def get_mcp_server(
     """Requires an installation admin."""
     await authz.require(Action.ROUTING_READ)
     row = await _live_server(session, server_id)
-    return (await _mcp_servers_out(session, settings, [row]))[0]
+    return (await _mcp_servers_out(session, [row]))[0]
 
 
 @router.patch(
@@ -368,18 +384,20 @@ async def update_mcp_server(
         await lock_hierarchy(session)
         row = await _live_server(session, server_id)
         if "name" in body.model_fields_set:
-            await _ensure_mcp_name_free(session, body.name, exclude=row.id)
+            await _ensure_mcp_name_free(session, row.zone, body.name, exclude=row.id)
         missing: list[str] = []
         if "auth" in body.model_fields_set:
             # A stale stored plugin never blocks a rename or a timeout change, only a write
             # that names one (the routers rule).
-            missing = await _validate_auth(session, settings, body.auth, force=body.force)
+            missing = await _validate_auth(session, body.auth, zone=row.zone, force=body.force)
             for name, value in _auth_columns(settings, body.auth).items():
                 setattr(row, name, value)
         for name in ("name", "url", "timeout_ms", "review_mode"):
             if name in body.model_fields_set:
                 setattr(row, name, getattr(body, name))
-        row.config_revision = await enqueue_recompile(session, settings, "api.mcp_server.update")
+        row.config_revision = await enqueue_recompile(
+            session, settings, "api.mcp_server.update", zone=row.zone
+        )
         await session.flush()
         await session.refresh(row)
         audit.record(
@@ -403,7 +421,7 @@ async def update_mcp_server(
             missing=missing,
             principal=authz.principal,
         )
-    return (await _mcp_servers_out(session, settings, [row]))[0]
+    return (await _mcp_servers_out(session, [row]))[0]
 
 
 @router.delete(
@@ -433,7 +451,7 @@ async def delete_mcp_server(
             principal=authz.principal,
             details={"name": row.name},
         )
-        await enqueue_recompile(session, settings, "api.mcp_server.delete")
+        await enqueue_recompile(session, settings, "api.mcp_server.delete", zone=row.zone)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -532,7 +550,9 @@ async def _review(
                 "superseded": superseded,
             },
         )
-        await enqueue_recompile(session, settings, f"api.mcp_server.definition_{action}")
+        await enqueue_recompile(
+            session, settings, f"api.mcp_server.definition_{action}", zone=server.zone
+        )
     return row
 
 
@@ -709,7 +729,9 @@ async def discover_mcp_server(
                 ]
                 result = await catalog_ingest.record_observations(session, server, observations)
                 if result.changed:
-                    await enqueue_recompile(session, settings, "api.mcp_server.discover")
+                    await enqueue_recompile(
+                        session, settings, "api.mcp_server.discover", zone=server.zone
+                    )
                 audit.record(
                     session,
                     action="mcp_server.discover",
@@ -767,12 +789,11 @@ async def discover_mcp_server(
 # --------------------------------------------------------------------------- a2a agents
 
 
-async def _agents_out(
-    session: AsyncSession, settings: Settings, rows: Sequence[A2aAgent]
-) -> list[A2aAgentOut]:
-    registry = await load_plugins(session, default_zone(settings))
+async def _agents_out(session: AsyncSession, rows: Sequence[A2aAgent]) -> list[A2aAgentOut]:
+    registries = {zone: await load_plugins(session, zone) for zone in {r.zone for r in rows}}
     out: list[A2aAgentOut] = []
     for row in rows:
+        registry = registries[row.zone]
         problems = _target_problems(
             registry, PluginKind.UPSTREAM_AUTH, row.auth_plugin, row.auth_params or {}
         )
@@ -786,6 +807,7 @@ async def _agents_out(
         out.append(
             A2aAgentOut(
                 id=row.id,
+                zone=row.zone,
                 name=row.name,
                 url=row.url,
                 card_url=row.card_url,
@@ -828,9 +850,7 @@ async def list_a2a_agents(
     await authz.require(Action.ROUTING_READ)
     stmt = select(A2aAgent).where(A2aAgent.deleted_at.is_(None)).order_by(A2aAgent.id)
     rows, next_cursor = await uuid_page(session, stmt, A2aAgent.id, limit, cursor)
-    return Page[A2aAgentOut](
-        items=await _agents_out(session, settings, rows), next_cursor=next_cursor
-    )
+    return Page[A2aAgentOut](items=await _agents_out(session, rows), next_cursor=next_cursor)
 
 
 @router.post(
@@ -849,11 +869,13 @@ async def create_a2a_agent(
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
         await lock_hierarchy(session)
-        await _ensure_agent_name_free(session, body.name)
-        missing = await _validate_auth(session, settings, body.auth, force=body.force)
-        missing += await _validate_middleware(session, settings, body.middleware, force=body.force)
+        zone = await _zone_or_default(session, settings, body.zone)
+        await _ensure_agent_name_free(session, zone, body.name)
+        missing = await _validate_auth(session, body.auth, zone=zone, force=body.force)
+        missing += await _validate_middleware(session, body.middleware, zone=zone, force=body.force)
         row = A2aAgent(
             name=body.name,
+            zone=zone,
             url=body.url,
             card_url=body.card_url or "",
             timeout_ms=body.timeout_ms,
@@ -865,7 +887,9 @@ async def create_a2a_agent(
         )
         session.add(row)
         await session.flush()
-        row.config_revision = await enqueue_recompile(session, settings, "api.a2a_agent.create")
+        row.config_revision = await enqueue_recompile(
+            session, settings, "api.a2a_agent.create", zone=zone
+        )
         # refresh() does not autoflush; flush the revision or the reload keeps 0.
         await session.flush()
         await session.refresh(row)
@@ -877,6 +901,7 @@ async def create_a2a_agent(
             principal=authz.principal,
             details={
                 "name": row.name,
+                "zone": row.zone,
                 "url": row.url,
                 "card_url": row.card_url,
                 "credential_stored": row.secret_ciphertext is not None,
@@ -892,7 +917,7 @@ async def create_a2a_agent(
             missing=missing,
             principal=authz.principal,
         )
-    return (await _agents_out(session, settings, [row]))[0]
+    return (await _agents_out(session, [row]))[0]
 
 
 @router.get("/a2a-agents/{agent_id}", response_model=A2aAgentOut, operation_id="getA2aAgent")
@@ -902,7 +927,7 @@ async def get_a2a_agent(
     """Requires an installation admin."""
     await authz.require(Action.ROUTING_READ)
     row = await _live_agent(session, agent_id)
-    return (await _agents_out(session, settings, [row]))[0]
+    return (await _agents_out(session, [row]))[0]
 
 
 @router.patch("/a2a-agents/{agent_id}", response_model=A2aAgentOut, operation_id="updateA2aAgent")
@@ -919,15 +944,15 @@ async def update_a2a_agent(
         await lock_hierarchy(session)
         row = await _live_agent(session, agent_id)
         if "name" in body.model_fields_set:
-            await _ensure_agent_name_free(session, body.name, exclude=row.id)
+            await _ensure_agent_name_free(session, row.zone, body.name, exclude=row.id)
         missing: list[str] = []
         if "auth" in body.model_fields_set:
-            missing = await _validate_auth(session, settings, body.auth, force=body.force)
+            missing = await _validate_auth(session, body.auth, zone=row.zone, force=body.force)
             for name, value in _auth_columns(settings, body.auth).items():
                 setattr(row, name, value)
         if "middleware" in body.model_fields_set:
             missing += await _validate_middleware(
-                session, settings, body.middleware, force=body.force
+                session, body.middleware, zone=row.zone, force=body.force
             )
             row.middleware_plugin = body.middleware.plugin if body.middleware else ""
             row.middleware_params = body.middleware.params if body.middleware else {}
@@ -942,7 +967,9 @@ async def update_a2a_agent(
             row.timeout_ms = body.timeout_ms
         if "card_json" in body.model_fields_set:
             row.card_json = body.card_json or ""
-        row.config_revision = await enqueue_recompile(session, settings, "api.a2a_agent.update")
+        row.config_revision = await enqueue_recompile(
+            session, settings, "api.a2a_agent.update", zone=row.zone
+        )
         await session.flush()
         await session.refresh(row)
         audit.record(
@@ -966,7 +993,7 @@ async def update_a2a_agent(
             missing=missing,
             principal=authz.principal,
         )
-    return (await _agents_out(session, settings, [row]))[0]
+    return (await _agents_out(session, [row]))[0]
 
 
 @router.delete(
@@ -995,5 +1022,5 @@ async def delete_a2a_agent(
             principal=authz.principal,
             details={"name": row.name},
         )
-        await enqueue_recompile(session, settings, "api.a2a_agent.delete")
+        await enqueue_recompile(session, settings, "api.a2a_agent.delete", zone=row.zone)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

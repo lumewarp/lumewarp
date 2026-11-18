@@ -40,6 +40,11 @@ class ControlPlane:
         assert r.status_code in (200, 201), (path, r.status_code, r.text)
         return r.json()
 
+    async def put(self, path: str, body: dict | None = None) -> dict:
+        r = await self.http.put(f"/api/v1{path}", json=body or {}, headers=ADMIN)
+        assert r.status_code in (200, 201), (path, r.status_code, r.text)
+        return r.json()
+
 
 @pytest.fixture
 async def cp() -> AsyncIterator[ControlPlane]:
@@ -152,12 +157,14 @@ async def test_end_to_end(cp: ControlPlane) -> None:
         "/models",
         {
             "name": "llama-a",
-            "upstream_id": up["id"],
-            "upstream_model": "llama",
             "model_type": "llm",
             "price_input_nano_usd_per_mtok": 1_000,
             "price_output_nano_usd_per_mtok": 2_000,
         },
+    )
+    await cp.put(
+        f"/models/{dep['id']}/deployments/{SCOPE}",
+        {"upstream_id": up["id"], "upstream_model": "llama"},
     )
     await cp.post("/routers", {"name": "llama", "members": [{"model_id": dep["id"]}]})
     org = await cp.post("/orgs", {"name": "ml"})
