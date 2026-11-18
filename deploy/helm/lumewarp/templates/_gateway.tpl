@@ -33,7 +33,7 @@ Usage: include "lumewarp.gateway.workload" (dict "root" $ "kind" "Deployment")
 {{- $scheme := ternary "https" "http" $root.Values.controlPlane.grpcTls.enabled -}}
 {{- $controlPlaneUrl = printf "%s://%s:%v" $scheme (include "lumewarp.controlPlane.name" $root) $root.Values.controlPlane.service.grpcPort -}}
 {{- end -}}
-{{- $scope := $root.Values.global.scope -}}
+{{- $zone := $root.Values.global.zone -}}
 {{- $plugins := $values.plugins -}}
 {{- $pluginMountPath := "/etc/lumewarp/plugins" -}}
 {{- $pluginDirs := list
@@ -122,7 +122,7 @@ spec:
             - --control-plane=$(LUMEWARP_CONTROL_PLANE_URL)
             - --gateway-token-env=LUMEWARP_GATEWAY_TOKEN
             - --state-dir=/var/lib/lumewarp
-            - --scope=$(LUMEWARP_SCOPE)
+            - --zone=$(LUMEWARP_ZONE)
             - --local-config=/etc/lumewarp/config.yaml
           ports:
             - name: http
@@ -134,8 +134,8 @@ spec:
           env:
             - name: LUMEWARP_CONTROL_PLANE_URL
               value: {{ $controlPlaneUrl | quote }}
-            - name: LUMEWARP_SCOPE
-              value: {{ $scope | quote }}
+            - name: LUMEWARP_ZONE
+              value: {{ $zone | quote }}
             - name: LUMEWARP_GATEWAY_TOKEN
               valueFrom:
                 secretKeyRef:

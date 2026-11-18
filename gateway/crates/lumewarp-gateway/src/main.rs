@@ -107,12 +107,12 @@ struct Args {
         long,
         short,
         env = "LUMEWARP_CONFIG",
-        conflicts_with_all = ["control_plane", "gateway_token_env", "state_dir", "scope", "local_config"],
+        conflicts_with_all = ["control_plane", "gateway_token_env", "state_dir", "zone", "local_config"],
         required_unless_present = "control_plane"
     )]
     config: Option<PathBuf>,
     /// Control-plane gRPC URL (http:// or https://); enables control-plane mode.
-    #[arg(long, env = "LUMEWARP_CONTROL_PLANE", requires_all = ["gateway_token_env", "state_dir", "scope"])]
+    #[arg(long, env = "LUMEWARP_CONTROL_PLANE", requires_all = ["gateway_token_env", "state_dir", "zone"])]
     control_plane: Option<String>,
     /// Name of the environment variable holding the gateway token.
     #[arg(long)]
@@ -120,9 +120,9 @@ struct Args {
     /// Directory for the last good snapshot (created 0700).
     #[arg(long)]
     state_dir: Option<PathBuf>,
-    /// Control-plane scope this gateway serves.
-    #[arg(long)]
-    scope: Option<String>,
+    /// Control-plane zone this gateway serves.
+    #[arg(long, env = "LUMEWARP_ZONE")]
+    zone: Option<String>,
     /// YAML with only `server:` settings (listen, admin, timeouts).
     #[arg(long)]
     local_config: Option<PathBuf>,
@@ -138,7 +138,7 @@ struct Args {
         value_parser = clap::value_parser!(u64).range(shared_limits::SYNC_MS_MIN..=shared_limits::SYNC_MS_MAX)
     )]
     shared_limits_sync_ms: u64,
-    /// Redis key namespace for shared limits. Defaults to `--scope` in
+    /// Redis key namespace for shared limits. Defaults to `--zone` in
     /// control-plane mode; required with a URL in standalone mode.
     #[arg(long, env = "LUMEWARP_SHARED_LIMITS_NAMESPACE")]
     shared_limits_namespace: Option<String>,
@@ -231,7 +231,7 @@ async fn main() -> anyhow::Result<()> {
     // A malformed URL or a missing standalone namespace is a startup error; an
     // unreachable Redis is not (the task starts in fallback).
     let default_namespace = if args.control_plane.is_some() {
-        args.scope.as_deref()
+        args.zone.as_deref()
     } else {
         None
     };
@@ -255,7 +255,7 @@ async fn main() -> anyhow::Result<()> {
                 .ok()
                 .filter(|token| !token.is_empty())
                 .with_context(|| format!("gateway token variable {env_name} is not set"))?;
-            let scope = args.scope.clone().context("--scope")?;
+            let zone = args.zone.clone().context("--zone")?;
             let state_dir = args.state_dir.clone().context("--state-dir")?;
             let settings = match &args.local_config {
                 Some(path) => {
@@ -289,13 +289,13 @@ async fn main() -> anyhow::Result<()> {
             // Serve a valid cached snapshot immediately; otherwise stay
             // not-ready (never an open routing table) until the first full arrives.
             let mut current = lumewarp_proto::config::v1::Snapshot {
-                scope: scope.clone(),
+                zone: zone.clone(),
                 ..Default::default()
             };
             let slot = Arc::new(ArcSwapOption::empty());
             let mut digest = Vec::new();
             let mut has_base = false;
-            match snapshot::load_with_digest(&state_dir, &scope) {
+            match snapshot::load_with_digest(&state_dir, &zone) {
                 Ok(Some((cached, cached_digest))) => {
                     match activated(config_stream::compile(&cached, &runtime)) {
                         Ok(routing_table) => {
@@ -319,7 +319,7 @@ async fn main() -> anyhow::Result<()> {
                 config_stream::StreamConfig {
                     url: url.clone(),
                     token,
-                    scope,
+                    zone,
                     state_dir,
                     shared_limits_namespace: shared_limits
                         .as_ref()

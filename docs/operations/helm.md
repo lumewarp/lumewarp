@@ -40,8 +40,8 @@ CHART=oci://ghcr.io/lumewarp/charts/lumewarp
 VERSION=0.1.0
 ```
 
-The control plane creates the config scope at startup and lets you create gateway tokens,
-so a fresh install has no gateway token yet. A token is a scope credential with a label, not
+The control plane creates the config zone at startup and lets you create gateway tokens,
+so a fresh install has no gateway token yet. A token is a zone credential with a label, not
 bound to a gateway id; any number of gateway pods may share it. Install the control plane
 first, create a token, then enable the gateway:
 
@@ -79,12 +79,12 @@ once before receiving an installation role (assign/transfer return 409 otherwise
 identity cannot be linked to an already privileged account. Set
 `controlPlane.breakGlass.passwordHashSecret.name` to an existing Secret holding an argon2id hash
 (`lumewarp-control-plane hash-password`). `bootstrap` is not a required first step: `serve`
-creates the scope row at startup, and `bootstrap` only creates a gateway token without the UI
+creates the zone row at startup, and `bootstrap` only creates a gateway token without the UI
 (for scripted installs).
 
 `controlPlane.databaseUrl.secretName` defaults to `lumewarp-control-plane` and
 `gateway.token.secretName` to `lumewarp-gateway`; both must exist before the respective
-pods start. `global.scope` (default `default`) is the config scope the control plane
+pods start. `global.zone` (default `default`) is the config zone the control plane
 publishes and the gateway follows.
 
 ## What gets deployed
@@ -129,8 +129,8 @@ Three consequences:
 - **A fresh pod may be unready.** With the default state directory a new pod has no cached
   snapshot and `/readyz` answers 503 until the control plane sends one, while the other
   gateways keep serving.
-- **Rejections have two scopes.** A gateway that NACKs `INVALID_CONFIG` quarantines the
-  version for the whole scope, including gateways that start later; one that NACKs
+- **Rejections differ in blast radius.** A gateway that NACKs `INVALID_CONFIG` quarantines the
+  version for the whole zone, including gateways that start later; one that NACKs
   `UNSUPPORTED_FEATURE` skips only that version, while the others apply it. A gateway that
   already applied a version keeps it until the next one. During a rolling upgrade the
   old-build pods can keep an older config and NACK every version that needs the new build,
@@ -232,7 +232,7 @@ gateway:
     redis:
       existingSecret: lumewarp-redis-url   # key: url
     syncMs: 100          # optional, 10-1000; the gateway default is 100
-    namespace: default   # optional; the config scope by default
+    namespace: default   # optional; the config zone by default
 ```
 
 `valkey.enabled` and `gateway.sharedLimits.redis.existingSecret` are mutually exclusive: a
@@ -244,7 +244,7 @@ One release can hold the gateway replicas and their Valkey; a gateway-only relea
 (another cluster, `controlPlane.enabled=false`, `gateway.controlPlaneUrl` set) points at the
 same Redis with `gateway.sharedLimits.redis.existingSecret`. Every gateway that should share
 counts needs the same Redis and the same `gateway.sharedLimits.namespace`, which is the
-config scope unless it is set. Router state — health, circuit breakers, latency — stays local
+config zone unless it is set. Router state — health, circuit breakers, latency — stays local
 to each gateway.
 
 ## Upstream API keys
@@ -434,7 +434,7 @@ the gateway take `extraEnv`. `nameOverride` and `fullnameOverride` are top-level
 | `global.imageTag` | empty | Tag of both images; empty means the chart's app version, and a component's own `image.tag` wins. |
 | `global.imagePullSecrets` | `[]` | Pull secrets for every pod. |
 | `global.commonLabels` | `{}` | Extra labels on every object. |
-| `global.scope` | `default` | Config scope the control plane publishes and the gateway follows. |
+| `global.zone` | `default` | Config zone the control plane publishes and the gateway follows. |
 | `global.encryptionKey.secretName` / `.key` | empty / `encryption-key` | Existing Secret with `LUMEWARP_ENCRYPTION_KEY` (32+ characters), given to both components; required once an upstream stores a key. |
 | `controlPlane.enabled` | `true` | Deploy the control plane; always one pod. |
 | `controlPlane.image.repository` / `.tag` | `ghcr.io/lumewarp/lumewarp-control-plane` / `global.imageTag` | Control-plane image. |
@@ -470,7 +470,7 @@ the gateway take `extraEnv`. `nameOverride` and `fullnameOverride` are top-level
 | `gateway.publicUrl` | `""` | `LUMEWARP_GATEWAY_PUBLIC_URL`: external base URL for agent cards; empty answers 503 on A2A. |
 | `gateway.idKey.secretName` / `.key` | empty / `gateway-id-key` | Existing Secret with `LUMEWARP_GATEWAY_ID_KEY` (base64, 32+ bytes), identical on every gateway; empty answers 503 on MCP and A2A. |
 | `gateway.sharedLimits.redis.existingSecret` / `.existingSecretKey` | empty / `url` | Existing Secret with the full `redis://` or `rediss://` URL; exclusive with `valkey.enabled`. |
-| `gateway.sharedLimits.syncMs` / `.namespace` | `""` | `LUMEWARP_SHARED_LIMITS_SYNC_MS` (10–1000; empty = 100) and the Redis key namespace (empty = the scope; gateways that share counts must agree). |
+| `gateway.sharedLimits.syncMs` / `.namespace` | `""` | `LUMEWARP_SHARED_LIMITS_SYNC_MS` (10–1000; empty = 100) and the Redis key namespace (empty = the zone; gateways that share counts must agree). |
 | `gateway.service.type` / `.port` / `.adminPort` | `ClusterIP` / `4000` / `9464` | Gateway Service; the admin port serves `/metrics` and `/readyz`. |
 | `gateway.otel.endpoint` / `.samplingRatio` | empty / `1` | OTLP/HTTP collector base URL (empty = no traces) and the share of requests exported, 0 to 1. |
 | `gateway.terminationGracePeriodSeconds` | `35` | Must exceed `server.shutdownGraceMs` / 1000 + 5 s + margin. |
@@ -498,7 +498,7 @@ is an umbrella chart for an install that should work from one command. It depend
   `authz.openfga.url` pointing at it and `init: true`, so the store and model are created at
   startup.
 
-The stack's `global.*` values are the `lumewarp` chart's (`global.imageTag`, `global.scope`,
+The stack's `global.*` values are the `lumewarp` chart's (`global.imageTag`, `global.zone`,
 `global.encryptionKey`, ...); everything else of the `lumewarp` chart goes under a
 `lumewarp:` key, for example `lumewarp.gateway.replicaCount`. The stack is not published to
 the registry: install it from a checkout of the release tag, after fetching its dependencies

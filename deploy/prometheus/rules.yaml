@@ -113,7 +113,7 @@ groups:
         annotations:
           summary: "Gateway config version differs from control plane"
           description: "Gateway {{ $labels.instance }} has not converged to the control-plane config version for 5 minutes."
-          runbook: "Inspect stream status, NACK codes and CP compilation; verify scope and intended canary version."
+          runbook: "Inspect stream status, NACK codes and CP compilation; verify zone and intended canary version."
       # Any apply failure sustained over two minutes may prevent config convergence.
       - alert: LumewarpConfigApplyFailures
         expr: "increase(lumewarp_config_apply_failures_total[5m]) > 0"

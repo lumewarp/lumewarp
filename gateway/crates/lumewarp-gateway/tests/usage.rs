@@ -51,7 +51,7 @@ use tokio::{
 };
 use usage_cp::FakeCp;
 
-const SCOPE: &str = "usage-test";
+const ZONE: &str = "usage-test";
 const TOKEN_ENV: &str = "LUMEWARP_USAGE_TEST_TOKEN";
 const KEY: &str = "lw-usage-key";
 const LIMITED_KEY: &str = "lw-limited-key";
@@ -338,7 +338,7 @@ fn snapshot(upstream: SocketAddr) -> Snapshot {
         created_at_unix_ms: 1,
         aliases: vec![],
         required_capabilities: vec!["strategy:weighted".into()],
-        scope: SCOPE.into(),
+        zone: ZONE.into(),
     }
 }
 
@@ -373,7 +373,7 @@ impl Gateway {
             .args(["--gateway-token-env", TOKEN_ENV])
             .arg("--state-dir")
             .arg(dir.join("state"))
-            .args(["--scope", SCOPE])
+            .args(["--zone", ZONE])
             .arg("--local-config")
             .arg(&local)
             .env(TOKEN_ENV, "gw-secret")

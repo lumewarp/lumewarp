@@ -88,8 +88,8 @@ kubectl -n lumewarp wait --for=condition=complete job/lumewarp-migrate-1 job/lum
 kubectl -n lumewarp rollout status deploy/lumewarp-control-plane
 ```
 
-The control plane creates the config scope at startup and lets you create gateway tokens,
-so a fresh install has none. A token is a scope credential, not bound to a gateway; any number of
+The control plane creates the config zone at startup and lets you create gateway tokens,
+so a fresh install has none. A token is a zone credential, not bound to a gateway; any number of
 gateway pods may share it. Port-forward the UI:
 
 ```sh

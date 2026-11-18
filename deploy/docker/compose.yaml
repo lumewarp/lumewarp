@@ -58,7 +58,7 @@ services:
       - --control-plane=http://control-plane:50051
       - --gateway-token-env=LUMEWARP_GATEWAY_TOKEN
       - --state-dir=/var/lib/lumewarp/state
-      - --scope=default
+      - --zone=default
       - --local-config=/etc/lumewarp/local.yaml
     environment:
       LUMEWARP_GATEWAY_TOKEN: ${LUMEWARP_GATEWAY_TOKEN:-}

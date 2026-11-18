@@ -84,8 +84,8 @@ spec:
               value: "0.0.0.0:{{ .Values.controlPlane.service.httpPort }}"
             - name: LUMEWARP_GRPC_BIND
               value: "0.0.0.0:{{ .Values.controlPlane.service.grpcPort }}"
-            - name: LUMEWARP_SCOPE
-              value: {{ .Values.global.scope | quote }}
+            - name: LUMEWARP_ZONE
+              value: {{ .Values.global.zone | quote }}
             - name: LUMEWARP_METRICS_BIND
               value: {{ ternary (printf "0.0.0.0:%v" .Values.controlPlane.service.metricsPort) "" .Values.controlPlane.metrics.enabled | quote }}
             - name: LUMEWARP_INITIAL_ADMIN_EMAIL

@@ -275,12 +275,12 @@ cm="$(doc gateway-configmap.yaml)"
 expect "defaults: listen on 4000" 'listen: "0.0.0.0:4000"' "$cm"
 expect "defaults: admin listen on 9464" 'admin_listen: "0.0.0.0:9464"' "$cm"
 
-# --- global: scope, image tag, plugins ------------------------------------------------------
-render global --set global.scope=prod --set global.imageTag=9.9.9 \
+# --- global: zone, image tag, plugins -------------------------------------------------------
+render global --set global.zone=prod --set global.imageTag=9.9.9 \
   --set gateway.plugins.volume.persistentVolumeClaim.claimName=plug
 whole="$(cat "$file")"
-expect "global: scope on the control plane" '^ +value: "prod"$' "$(doc control-plane-deployment.yaml)"
-expect "global: scope on the gateway" '^ +value: "prod"$' "$(doc gateway-deployment.yaml)"
+expect "global: zone on the control plane" '^ +value: "prod"$' "$(doc control-plane-deployment.yaml)"
+expect "global: zone on the gateway" '^ +value: "prod"$' "$(doc gateway-deployment.yaml)"
 expect "global: imageTag on both components" 'lumewarp-gateway:9.9.9' "$whole"
 expect "global: imageTag on the control plane" 'lumewarp-control-plane:9.9.9' "$whole"
 expect "plugins: fixed directories" 'value: "/etc/lumewarp/plugins/a2a-middleware"' "$(doc gateway-deployment.yaml)"

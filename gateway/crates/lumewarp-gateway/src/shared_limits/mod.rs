@@ -76,7 +76,7 @@ impl Config {
     /// Builds the configuration from the CLI values. `None` means sharing is
     /// off; an empty URL (the Compose template passes one) counts as absent.
     ///
-    /// In control-plane mode `default_namespace` is the config scope; in
+    /// In control-plane mode `default_namespace` is the config zone; in
     /// standalone mode there is no such value, so the namespace is required
     /// with a URL and a clear error is better than silently mixing two
     /// installations' counters under an empty prefix.

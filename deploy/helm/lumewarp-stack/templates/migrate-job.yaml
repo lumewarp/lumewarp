@@ -60,8 +60,8 @@ spec:
                 secretKeyRef:
                   name: {{ required "lumewarp.controlPlane.databaseUrl.secretName is required" $cp.databaseUrl.secretName }}
                   key: {{ $cp.databaseUrl.key }}
-            - name: LUMEWARP_SCOPE
-              value: {{ .Values.global.scope | quote }}
+            - name: LUMEWARP_ZONE
+              value: {{ .Values.global.zone | quote }}
           resources:
             {{- toYaml $cp.resources | nindent 12 }}
           {{- with $cp.securityContext }}
