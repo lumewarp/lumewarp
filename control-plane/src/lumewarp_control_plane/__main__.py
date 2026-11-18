@@ -148,8 +148,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser(
         "bootstrap",
         help=(
-            "create the config scope and print a new gateway token (once); any number of"
-            " gateways may use it"
+            "optional: create a gateway token without the Admin UI, for automated installs;"
+            " `serve` creates the config scope"
+        ),
+        description=(
+            "Optional. `serve` creates the config scope at startup and the Admin UI's"
+            " Gateways page creates tokens; this command creates one for scripted installs."
         ),
     )
     p.add_argument("--name", default="", help="label for the token")

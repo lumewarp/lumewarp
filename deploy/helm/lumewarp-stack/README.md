@@ -16,7 +16,9 @@ helm install lumewarp deploy/helm/lumewarp-stack -n lumewarp --create-namespace 
 ```
 
 The control plane starts after the migration Job. Then create the gateway token as the
-install notes say (`kubectl exec ... bootstrap`, then a Secret named `lumewarp-gateway`).
+install notes say: sign in to the Admin UI and use **Gateways → New gateway token**, or use
+`kubectl exec ... bootstrap` without the UI, and put the secret in a Secret named
+`lumewarp-gateway`.
 
 ## Bundled PostgreSQL: evaluation and small installs only
 

@@ -62,7 +62,7 @@ kubectl -n lumewarp create secret generic lumewarp-encryption-key \
 | `lumewarp-encryption-key` | `encryption-key` | `LUMEWARP_ENCRYPTION_KEY`, 32+ characters, given to both Lumewarp components; it seals the upstream API keys stored in the Admin UI, and changing it makes them unreadable ([Upstream API keys](./helm.md#upstream-api-keys)). |
 | `lumewarp-gateway` | `token` | A gateway token, created after the control plane runs (below). |
 
-## Apply and bootstrap
+## Apply and create the gateway token
 
 Apply the release asset, or the files from a checkout:
 
@@ -88,12 +88,26 @@ kubectl -n lumewarp wait --for=condition=complete job/lumewarp-migrate-1 job/lum
 kubectl -n lumewarp rollout status deploy/lumewarp-control-plane
 ```
 
-The control plane creates gateway tokens itself, so a fresh install has none. A token is a
-scope credential, not bound to a gateway; any number of gateway pods may share it:
+The control plane creates the config scope at startup and lets you create gateway tokens,
+so a fresh install has none. A token is a scope credential, not bound to a gateway; any number of
+gateway pods may share it. Port-forward the UI:
+
+```sh
+kubectl -n lumewarp port-forward svc/lumewarp-control-plane 8091:8091
+```
+
+Open <http://127.0.0.1:8091/>, sign in (the initial admin or break-glass; see below), then
+create the token with **Gateways → New gateway token** and copy the `lwg-...` secret. A
+scripted install without the UI gets one from the CLI:
 
 ```sh
 kubectl -n lumewarp exec deploy/lumewarp-control-plane -- \
   python -m lumewarp_control_plane bootstrap --name lumewarp-gateway
+```
+
+Put it in the Secret the gateway reads:
+
+```sh
 kubectl -n lumewarp create secret generic lumewarp-gateway --from-literal=token='lwg-...'
 ```
 
@@ -106,8 +120,7 @@ Installation admins, first login and the break-glass password work as in
 [Deploy with Helm](./helm.md#install): the first verified login whose email matches
 `LUMEWARP_INITIAL_ADMIN_EMAIL` becomes the proxy_admin, so add that variable (and the
 settings of [Control plane settings](./control-plane.md)) to the control plane's `env` ([Customize](#customize)). Team and org
-roles live in OpenFGA ([OpenFGA](./identity.md#openfga)). Reach the UI with
-`kubectl -n lumewarp port-forward svc/lumewarp-control-plane 8091:8091`.
+roles live in OpenFGA ([OpenFGA](./identity.md#openfga)).
 
 ## Customize
 

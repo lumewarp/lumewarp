@@ -23,6 +23,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
+from sqlalchemy.dialects.postgresql import insert
 
 from lumewarp_control_plane import __version__, audit, compiler, migrate, usage
 from lumewarp_control_plane import grpc as grpc_services
@@ -31,7 +32,7 @@ from lumewarp_control_plane.api import router as api_router
 from lumewarp_control_plane.api.openapi import Readiness
 from lumewarp_control_plane.auth.break_glass import LoginLimiter, enabled, validate_credentials
 from lumewarp_control_plane.authz import load_authorizer
-from lumewarp_control_plane.db import create_engine, create_session_factory
+from lumewarp_control_plane.db import SessionFactory, create_engine, create_session_factory
 from lumewarp_control_plane.errors import error_body, install_handlers
 from lumewarp_control_plane.keys.reconciler import run_key_reconciler
 from lumewarp_control_plane.metrics import (
@@ -40,6 +41,7 @@ from lumewarp_control_plane.metrics import (
     run_db_gauges,
     start_metrics_server,
 )
+from lumewarp_control_plane.models import Scope
 from lumewarp_control_plane.settings import Settings, get_settings, split_bind
 
 log = logging.getLogger(__name__)
@@ -157,6 +159,18 @@ async def start_background(app: FastAPI) -> Runtime:
     return runtime
 
 
+async def ensure_scope(factory: SessionFactory, scope: str) -> None:
+    """Create the config scope row if it does not exist yet.
+
+    `bootstrap` used to be the only writer of this row, which made it mandatory before the
+    Admin UI could create its first gateway token. `ON CONFLICT DO NOTHING` leaves an
+    existing row alone, so its `source_revision` is not bumped and no config version is
+    published by the insert itself.
+    """
+    async with factory() as session, session.begin():
+        await session.execute(insert(Scope).values(name=scope).on_conflict_do_nothing())
+
+
 async def stop_background(runtime: Runtime, grace: float = SHUTDOWN_GRACE_SECONDS) -> None:
     """Stop accepting streams, signal loops, and wait for everything within `grace`
     seconds; whatever is still running after that is cancelled.
@@ -188,6 +202,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # An optional backend hook: a misconfigured backend aborts startup here.
         if (start := getattr(app.state.authorizer.backend, "start", None)) is not None:
             await start()
+        # A fresh database has no scope row until `bootstrap` runs. Create it here, before
+        # the compiler and gRPC start, so the Admin UI can create the first gateway token.
+        # `serve` already requires a migrated database for the gRPC server below, so a
+        # failure here is a startup failure and the process restarts.
+        if settings.background_enabled:
+            await ensure_scope(app.state.session_factory, settings.scope)
         runtime = await start_background(app) if settings.background_enabled else Runtime()
         app.state.runtime = runtime
         app.state.tasks = runtime.tasks

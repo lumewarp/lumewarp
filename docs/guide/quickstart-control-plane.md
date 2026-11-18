@@ -18,7 +18,6 @@ uv sync
 (cd ../ui && pnpm install && pnpm check && pnpm build:cp)
 
 uv run lumewarp-control-plane migrate
-uv run lumewarp-control-plane bootstrap --name quickstart   # prints the lwg-... token once
 LUMEWARP_DEV_MODE=true LUMEWARP_BREAK_GLASS_PASSWORD=dev-break-glass \
   LUMEWARP_SESSION_COOKIE_SECURE=false \
   uv run lumewarp-control-plane serve
@@ -28,7 +27,15 @@ The HTTP API/UI listens on `127.0.0.1:8091`; gateway-facing gRPC listens on
 `127.0.0.1:50051`. The dev Postgres from `scripts/dev-db.sh` listens on
 `127.0.0.1:55432`, so it does not collide with a local 5432.
 
-Start the gateway in another terminal:
+Open <http://127.0.0.1:8091/> and use the emergency login with the password
+`dev-break-glass` (a plaintext password needs `LUMEWARP_DEV_MODE=true`; production uses an
+argon2id hash and OIDC, see [Sign-in and authorization](../operations/identity.md)). The
+control plane creates the config scope at startup, so create the gateway token in
+**Gateways → New gateway token** and copy the `lwg-...` secret, which is shown once. For a
+scripted install without the UI, `uv run lumewarp-control-plane bootstrap --name quickstart`
+creates one and prints it.
+
+Start the gateway in another terminal with that token:
 
 ```sh
 cd gateway
@@ -41,10 +48,7 @@ cargo run --release -- --control-plane http://127.0.0.1:50051 \
 The gateway is not ready until it has a first config version (`/v1/*` and the admin
 `/readyz` return 503), and the process never falls back to an open router. The control
 plane publishes an empty version when it starts, so here the gateway is ready at once
-and answers 401 until a key exists. Open <http://127.0.0.1:8091/>, use the emergency login with the
-password `dev-break-glass` (a plaintext password needs `LUMEWARP_DEV_MODE=true`; production
-uses an argon2id hash and OIDC, see the
-[Sign-in and authorization](../operations/identity.md)), then create:
+and answers 401 until a key exists. In the UI, create:
 
 - an upstream for `http://127.0.0.1:9100/v1` (kind `openai_compatible`),
 - a model named `mock-local` using upstream model `mock`,

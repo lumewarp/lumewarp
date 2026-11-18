@@ -40,10 +40,11 @@ has one row per process, connected first and then by id; a disconnected row stay
 and is then deleted. A reconnect of the same process replaces its previous stream.
 
 A gateway token (`lwg-…`) authenticates the config scope, not a gateway id: any number of
-gateways may use one token. It has an optional label and is created by
-`lumewarp-control-plane bootstrap [--name <label>] [--scope <name>]` (which also creates the
-config scope), by **New gateway token** on the Gateways page, or by
-`POST /api/v1/gateway-tokens`. The secret is shown once and only its SHA-256 hash is stored.
+gateways may use one token. It has an optional label and is created by **New gateway token**
+on the Gateways page, by `POST /api/v1/gateway-tokens`, or by
+`lumewarp-control-plane bootstrap [--name <label>] [--scope <name>]` for a scripted install
+without the UI. The control plane creates the config scope at startup, so no `bootstrap` run
+is needed first. The secret is shown once and only its SHA-256 hash is stored.
 Revoking a token closes every config and usage stream that authenticated with it at once;
 each affected gateway keeps serving its last good config and cannot receive a new one until
 it reconnects with a valid token. The revoke response reports `connected_gateways: 0` because

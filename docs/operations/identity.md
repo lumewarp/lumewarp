@@ -16,7 +16,7 @@ Three token types, stored only as SHA-256 hashes, and two kinds of cookie sessio
 | Credential | Prefix | Used by |
 | --- | --- | --- |
 | Personal access token (PAT) | `lwp-` | A user over the admin API/UI; created under My keys in the UI or `POST /api/v1/users/me/tokens`. |
-| Gateway token | `lwg-` | A gateway for the config stream and usage reporting; the first one comes from `bootstrap` (which also creates the scope), later ones from the gateways API/UI. |
+| Gateway token | `lwg-` | A gateway for the config stream and usage reporting; created in the Admin UI (**Gateways → New gateway token**) or with `bootstrap` for a scripted install, any number of tokens per scope. |
 | Virtual API key | `lw-` | Clients calling the gateway; owned by a team member or a service account of a team; the gateway only receives its hash in the snapshot. |
 | OIDC session | cookie | A user logged in through [SSO](#sso-login-oidc). |
 | Emergency session | cookie | The [break-glass](#emergency-access-break-glass) login: an installation admin that is not a user. |

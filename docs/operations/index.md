@@ -67,7 +67,7 @@ control plane's HTTP listener speak plain HTTP (the gRPC listener can use TLS,
 | Setting | Where | Why |
 | --- | --- | --- |
 | `LUMEWARP_DATABASE_URL` | Control plane | PostgreSQL 16+, as a SQLAlchemy async URL. |
-| `migrate`, then `bootstrap --name <label>` | Control plane CLI, once | Creates the schema, the config scope and the first gateway token (`lwg-…`, shown once; `--name` is optional). |
+| `migrate`, then a gateway token | Control plane CLI or Admin UI, once | `migrate` creates the schema and `serve` creates the config scope at startup. Create the first gateway token with **Gateways → New gateway token** in the UI (`lwg-…`, shown once), or `bootstrap --name <label>` without the UI. |
 | Gateway token | Gateway | `--gateway-token-env` names the variable holding the token. The token authenticates the scope, so any number of gateways may share it; each process generates its own id. |
 | A persistent `--state-dir` | Gateway | The last good snapshot, so a restart while the control plane is down still serves. |
 | `LUMEWARP_BREAK_GLASS_PASSWORD_HASH` | Control plane | Emergency login, and the way to sign in before SSO is set up. An argon2id hash from `hash-password`. |

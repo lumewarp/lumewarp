@@ -11,6 +11,9 @@ Control plane
   Metrics:   http://{{ include "lumewarp.controlPlane.name" . }}.{{ .Release.Namespace }}.svc:{{ .Values.controlPlane.service.metricsPort }}/metrics
   {{- end }}
 
+  Port-forward the UI:
+    kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "lumewarp.controlPlane.name" . }} {{ .Values.controlPlane.service.httpPort }}:{{ .Values.controlPlane.service.httpPort }}
+
   Log in at / with SSO. The first verified login matching
   `controlPlane.initialAdminEmail` becomes proxy_admin (then it can assign admins).
   Emergency password login is enabled only when
@@ -41,11 +44,13 @@ Gateway
   {{ .Values.gateway.token.secretName | quote }} key {{ .Values.gateway.token.key | quote }}.
   Every pod is its own gateway (its id is generated at startup); all pods share the token.
   {{- if .Values.controlPlane.enabled }}
-  If the pod is waiting, create the Secret and restart the {{ $kind }}:
+  Create one in the Admin UI after signing in (Gateways -> New gateway token), or without
+  the UI:
     kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "lumewarp.controlPlane.name" . }} -- \
       python -m lumewarp_control_plane bootstrap --name {{ include "lumewarp.gateway.name" . | quote }}
+  If the pod is waiting, create the Secret and restart the {{ $kind }}:
     kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.gateway.token.secretName }} \
-      --from-literal={{ .Values.gateway.token.key }}="<the printed lwg-... token>"
+      --from-literal={{ .Values.gateway.token.key }}="<the lwg-... token>"
     kubectl -n {{ .Release.Namespace }} rollout restart {{ $kubectlKind }}/{{ include "lumewarp.gateway.name" . }}
   {{- else }}
   Create that Secret from a token issued by the external control plane, then restart the

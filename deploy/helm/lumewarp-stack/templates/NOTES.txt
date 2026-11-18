@@ -16,14 +16,19 @@ The database migration runs as Job {{ .Release.Name }}-migrate-{{ .Release.Revis
 becomes ready once it has finished:
   kubectl -n {{ .Release.Namespace }} wait --for=condition=complete job/{{ .Release.Name }}-migrate-{{ .Release.Revision }}
 
+Port-forward the Admin UI and sign in (SSO through lumewarp.controlPlane.oidc.*, or the
+break-glass password; the first login matching lumewarp.controlPlane.initialAdminEmail
+becomes proxy_admin):
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "stack.controlPlaneName" . }} {{ .Values.lumewarp.controlPlane.service.httpPort }}:{{ .Values.lumewarp.controlPlane.service.httpPort }}
+
 Next, the gateway needs a token issued by the control plane (it waits until the Secret
-{{ .Values.lumewarp.gateway.token.secretName | quote }} exists):
+{{ .Values.lumewarp.gateway.token.secretName | quote }} exists). Create one with Gateways ->
+New gateway token, or without the UI:
   kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "stack.controlPlaneName" . }} -- \
     python -m lumewarp_control_plane bootstrap --name {{ .Release.Name }}
+If the gateway pod is waiting, create the Secret and restart it:
   kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.lumewarp.gateway.token.secretName }} \
-    --from-literal={{ .Values.lumewarp.gateway.token.key }}="<the printed lwg-... token>"
+    --from-literal={{ .Values.lumewarp.gateway.token.key }}="<the lwg-... token>"
   kubectl -n {{ .Release.Namespace }} rollout restart {{ ternary "statefulset" "deploy" .Values.lumewarp.gateway.persistence.enabled }}/{{ include "stack.gatewayName" . }}
 
-Log in to the Admin UI over SSO (lumewarp.controlPlane.oidc.*) or the break-glass password;
-the first login matching lumewarp.controlPlane.initialAdminEmail becomes proxy_admin.
 Manual: https://lumewarp.github.io/lumewarp/operations/helm.html

@@ -20,8 +20,8 @@ kubectl -n lumewarp create secret generic lumewarp-encryption \
   --from-literal=encryption-key="$(openssl rand -base64 48)"
 ```
 
-A fresh install has no gateway token, and the control plane creates it. Install with the
-gateway off, bootstrap a token, then turn the gateway on:
+A fresh install has no gateway token; create one from the control plane. Install with the
+gateway off, create a token, then turn the gateway on:
 
 ```sh
 CHART=oci://ghcr.io/lumewarp/charts/lumewarp
@@ -31,6 +31,11 @@ helm install lumewarp "$CHART" --version "$VERSION" -n lumewarp \
   --set global.encryptionKey.secretName=lumewarp-encryption \
   --set gateway.enabled=false
 
+# In another terminal: open the UI, sign in, then Gateways -> New gateway token
+# and copy the lwg-... secret.
+kubectl -n lumewarp port-forward svc/lumewarp-control-plane 8091:8091
+
+# Scripted alternative without the UI:
 kubectl -n lumewarp exec deploy/lumewarp-control-plane -- \
   python -m lumewarp_control_plane bootstrap --name lumewarp-gateway
 kubectl -n lumewarp create secret generic lumewarp-gateway \
@@ -40,8 +45,7 @@ helm upgrade lumewarp "$CHART" --version "$VERSION" -n lumewarp \
   --reuse-values --set gateway.enabled=true
 ```
 
-Reach the UI with `kubectl -n lumewarp port-forward svc/lumewarp-control-plane 8091:8091`
-and probe the gateway with `kubectl -n lumewarp port-forward svc/lumewarp-gateway 4000:4000`
+Probe the gateway with `kubectl -n lumewarp port-forward svc/lumewarp-gateway 4000:4000`
 and `curl localhost:4000/healthz`.
 
 ## More

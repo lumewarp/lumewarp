@@ -58,16 +58,21 @@ curl -s http://127.0.0.1:8091/readyz
 
 `migrate` runs first and exits; the control plane starts when it succeeded, and `/readyz`
 answers `"status":"ready"` once the database, migrations and background tasks are up.
-`migrate` runs again on every `up`, which is harmless at the same version.
+`migrate` runs again on every `up`, which is harmless at the same version. The control
+plane also creates the config scope at startup, so no `bootstrap` run is needed.
 
 ## 3. Create the gateway token and start the gateway
+
+Open <http://127.0.0.1:8091/>, sign in with the break-glass password you hashed, then open
+**Gateways → New gateway token**, name it `gateway`, and copy the `lwg-…` secret (shown
+once). Without the UI, the same token comes from the CLI:
 
 ```sh
 docker compose run --rm control-plane bootstrap --name gateway
 ```
 
-The `lwg-…` token is printed once. Put it in `.env` as `LUMEWARP_GATEWAY_TOKEN`; the gateway
-generates its own id at startup, then:
+Put the secret in `.env` as `LUMEWARP_GATEWAY_TOKEN`; the gateway generates its own id at
+startup, then:
 
 ```sh
 docker compose --profile gateway up -d
@@ -79,11 +84,9 @@ ended` while it reconnects; that is expected. Pass `--profile gateway` to every 
 `docker compose` command, or set `COMPOSE_PROFILES=gateway` in `.env`, so the gateway is
 included.
 
-## 4. First sign-in
+## 4. Create the routing config
 
-Open <http://127.0.0.1:8091/>, enter the password you hashed as the **Break-glass
-password**, and
-create an upstream, a model, an org, a team and a key (the
+In the Admin UI, create an upstream, a model, an org, a team and a key (the
 [control-plane quick start](../guide/quickstart-control-plane.md) walks through it). Each
 change publishes a config version that the gateway applies within seconds; then:
 
@@ -105,7 +108,7 @@ from [Sign-in and authorization](./identity.md) to `.env`, with
 | Task | How |
 | --- | --- |
 | Logs | `docker compose --profile gateway logs -f gateway control-plane` |
-| Another gateway token | `docker compose run --rm control-plane bootstrap --name <label>`, or **Gateways → New gateway token** in the Admin UI |
+| Another gateway token | **Gateways → New gateway token** in the Admin UI, or `docker compose run --rm control-plane bootstrap --name <label>` for a scripted install |
 | MCP and A2A | Set `LUMEWARP_GATEWAY_ID_KEY` (`openssl rand -base64 32`) and `LUMEWARP_GATEWAY_PUBLIC_URL` in `.env` |
 | WASM plugins | Mount a directory into the gateway and set `LUMEWARP_ROUTER_PLUGIN_DIR`, `LUMEWARP_AUTH_PLUGIN_DIR` and `LUMEWARP_A2A_MIDDLEWARE_DIR` ([Gateway plugins](../plugins.md#loading)); plugin secrets are `LUMEWARP_PLUGIN_SECRET_*` variables |
 | Metrics | Scrape `127.0.0.1:9464/metrics` and `127.0.0.1:9465/metrics` ([Metrics, alerts and tracing](./observability.md)) |

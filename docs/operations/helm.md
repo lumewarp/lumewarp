@@ -40,16 +40,23 @@ CHART=oci://ghcr.io/lumewarp/charts/lumewarp
 VERSION=0.1.0
 ```
 
-The control plane creates gateway tokens itself, so a fresh install has no gateway token
-yet. A token is a scope credential with a label, not bound to a gateway id; any number of
-gateway pods may share it. Install the control plane first, bootstrap a token, then enable
-the gateway:
+The control plane creates the config scope at startup and lets you create gateway tokens,
+so a fresh install has no gateway token yet. A token is a scope credential with a label, not
+bound to a gateway id; any number of gateway pods may share it. Install the control plane
+first, create a token, then enable the gateway:
 
 ```sh
 helm install lumewarp "$CHART" --version "$VERSION" -n lumewarp \
   --set gateway.enabled=false
 
-# Optional: the pre-install hook Job ran `migrate`. Create a gateway token:
+# Wait for the pre-install migrate hook and the control plane.
+kubectl -n lumewarp rollout status deploy/lumewarp-control-plane
+
+# In another terminal: open http://127.0.0.1:8091, sign in, then Gateways ->
+# New gateway token and copy the lwg-... secret.
+kubectl -n lumewarp port-forward svc/lumewarp-control-plane 8091:8091
+
+# Scripted alternative without the UI:
 kubectl -n lumewarp exec deploy/lumewarp-control-plane -- \
   python -m lumewarp_control_plane bootstrap --name lumewarp-gateway
 
@@ -71,8 +78,9 @@ is empty, and is the recovery path when the proxy_admin leaves. A user must sign
 once before receiving an installation role (assign/transfer return 409 otherwise), because a new
 identity cannot be linked to an already privileged account. Set
 `controlPlane.breakGlass.passwordHashSecret.name` to an existing Secret holding an argon2id hash
-(`lumewarp-control-plane hash-password`). Neither replaces the first `bootstrap` call: that
-command creates the scope row, and gateway tokens can only be created after the scope exists.
+(`lumewarp-control-plane hash-password`). `bootstrap` is not a required first step: `serve`
+creates the scope row at startup, and `bootstrap` only creates a gateway token without the UI
+(for scripted installs).
 
 `controlPlane.databaseUrl.secretName` defaults to `lumewarp-control-plane` and
 `gateway.token.secretName` to `lumewarp-gateway`; both must exist before the respective
@@ -514,9 +522,9 @@ helm install lumewarp deploy/helm/lumewarp-stack \
 
 The `lumewarp` chart's own migration hook cannot run before the bundled database exists, so
 the stack runs `migrate` as an ordinary Job that waits for PostgreSQL (`migrate.enabled`).
-Bootstrapping the gateway token is the same step as in [Install](#install): the control plane
-has to be running, so the first install keeps the gateway off, then you run `bootstrap`,
-create the `lumewarp-gateway` Secret and upgrade with
+Creating the gateway token is the same step as in [Install](#install): the control plane has
+to be running, so the first install keeps the gateway off, then you create the token in the
+UI (or with `bootstrap`), create the `lumewarp-gateway` Secret and upgrade with
 `--reuse-values --set lumewarp.gateway.enabled=true`.
 
 ### Bundled PostgreSQL caveats

@@ -20,9 +20,10 @@ control-plane mode the gateway follows the control plane's config stream and
 reports usage to the same endpoint:
 
 ```sh
-# Create a gateway token with a label (`bootstrap --name gateway`, or create one
-# in the Admin UI); the token authenticates the scope and stores only its SHA-256
-# hash. Any number of gateways may use it.
+# Create a gateway token with a label (**Gateways → New gateway token** in the
+# Admin UI, or `bootstrap --name gateway` for a scripted install); the token
+# authenticates the scope and stores only its SHA-256 hash. Any number of
+# gateways may use it.
 export LUMEWARP_GATEWAY_TOKEN='lwg-...'
 
 lumewarp \

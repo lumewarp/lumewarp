@@ -43,12 +43,16 @@ it off the public admin ingress.
 
 ## CLI
 
+`serve` creates the `scopes` row for `LUMEWARP_SCOPE` at startup if it is missing, so a
+fresh install can create its first gateway token in the Admin UI without a `bootstrap` run.
+The insert is idempotent and leaves an existing row alone.
+
 | Command | What it does |
 | --- | --- |
 | `serve` | HTTP API + Admin UI (uvicorn, one worker), gRPC servers and background loops. `--http-bind` / `--grpc-bind` override the env settings. |
 | `migrate [REV]` | Apply Alembic migrations up to `REV` (default `head`). `--downgrade REV` exists but every revision after the v0.2.1 baseline refuses it: restore a database backup instead. |
 | `openapi [-o FILE]` | Print the OpenAPI document; builds the app without connecting to the database. |
-| `bootstrap [--name N] [--scope S]` | Create the config scope row and an optionally labeled `lwg-...` gateway token; the secret goes to stdout once. |
+| `bootstrap [--name N] [--scope S]` | Optional: create an optionally labeled `lwg-...` gateway token without the Admin UI, for scripted installs; the secret goes to stdout once. It also creates the config scope if it is missing. |
 | `hash-password` | Read a password from stdin (or prompt for it) and print its argon2id hash for `LUMEWARP_BREAK_GLASS_PASSWORD_HASH`. |
 
 The console script is `lumewarp-control-plane`; `python -m lumewarp_control_plane` is

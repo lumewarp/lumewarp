@@ -42,7 +42,8 @@ lumewarp:
   gateway:
     replicaCount: 1
     token:
-      # Created after bootstrap (see docs/operations/kubernetes.md); the gateway waits for it.
+      # Created after first startup with an Admin UI gateway token (see
+      # docs/operations/kubernetes.md); the gateway waits for it.
       secretName: lumewarp-gateway
       key: token
     persistence:
