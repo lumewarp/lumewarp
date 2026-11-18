@@ -141,6 +141,7 @@ Rejections count in `lumewarp_requests_rejected_total{model,reason}`; calling a 
 | `routers[].sticky` | `none` | `none`, `header` (hash of the `sticky_header` value; requests without the header are not sticky), `team` (the key's team id) or `key` (the key id). Anonymous or team-less callers are not sticky for `team`/`key`. Requires `traffic_split`. |
 | `routers[].sticky_header` | Empty | Request header hashed for `sticky: header`; required there, rejected otherwise. |
 | `routers[].plugin_timeout_ms` | `0` (60 s) | WASM router strategies only: how long one `pick` may run before the gateway cancels it. Built-in strategies ignore it. |
+| `routers[].reasoning_default_level` | Empty | LLM-only: level sent as `reasoning_effort` (`reasoning.effort` on `/v1/responses`) when the client sends none (absent or null), before the serving member's own `reasoning_effort` rule maps, strips or forwards it. Applies to members, split members and fallbacks; an alias of the router inherits it; a client value always wins. Level names match `^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$`. Requires capability `router_reasoning_default`. |
 
 ## Retry and health behavior
 

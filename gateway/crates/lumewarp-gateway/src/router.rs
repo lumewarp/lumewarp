@@ -277,6 +277,9 @@ pub struct Router {
     strategy: CompiledStrategy,
     strategy_headers: Vec<String>,
     pub retry: Option<RetryPolicy>,
+    /// Injected when the client sends no reasoning level (absent or null), before
+    /// the serving member's own `Transform` runs.
+    pub reasoning_default_level: Option<Arc<str>>,
     /// Single-model pools, with `lumewarp_fallbacks_total{router,model}`.
     pub fallbacks: Vec<(Arc<Router>, Counter)>,
     pub budget_exhausted: Counter,
@@ -348,6 +351,7 @@ impl Router {
             strategy: CompiledStrategy::Builtin(Builtin::Weighted),
             strategy_headers: Vec::new(),
             retry: None,
+            reasoning_default_level: None,
             fallbacks: Vec::new(),
             // Never read: only a retry policy can exhaust the budget.
             budget_exhausted: Counter::default(),
@@ -880,6 +884,8 @@ impl RoutingTable {
                 strategy,
                 strategy_headers,
                 retry: r.retry.clone(),
+                reasoning_default_level: (!r.reasoning_default_level.is_empty())
+                    .then(|| Arc::from(r.reasoning_default_level.as_str())),
                 fallbacks: r
                     .fallbacks
                     .iter()

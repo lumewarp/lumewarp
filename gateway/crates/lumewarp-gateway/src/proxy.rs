@@ -21,7 +21,7 @@ use hyper_util::{
     rt::TokioExecutor,
 };
 use lumewarp_proto::{
-    config::v1::{CircuitBreaker, StreamUsageMode},
+    config::v1::{CircuitBreaker, ModelType, StreamUsageMode},
     usage::v1::{RequestOutcome, UsageState},
 };
 use serde::Deserialize;
@@ -577,6 +577,31 @@ pub async fn forward(
                 &model.upstream_model_json,
                 inject.then_some(&include_usage),
             );
+            // The called router's default level goes in before the member's own
+            // transform, so a mapped member maps it, strip removes it and
+            // passthrough forwards it. The client's own value always wins.
+            let rewritten = match router.reasoning_default_level.as_deref() {
+                Some(level)
+                    if crate::endpoint::ENDPOINTS[endpoint].model_type == ModelType::Llm =>
+                {
+                    match crate::transform::inject_reasoning_default(rewritten, endpoint, level) {
+                        Ok(body) => body,
+                        Err(rejected) => {
+                            pending.discard();
+                            routing_table
+                                .runtime
+                                .metrics
+                                .request_rejected(&model.name, rejected.reason);
+                            return error::json(
+                                StatusCode::BAD_REQUEST,
+                                rejected.reason,
+                                &rejected.message,
+                            );
+                        }
+                    }
+                }
+                _ => rewritten,
+            };
             // Per attempt: the model serving it decides its own body rules.
             let rewritten = match &model.transform {
                 None => rewritten,

@@ -49,7 +49,8 @@ These are configured per model and explain behavior that differs between names:
 - **Output limit.** A request asking for more output tokens than the model allows is
   refused with 400 before it reaches the upstream.
 - **Reasoning effort.** `reasoning_effort` may be forwarded, removed, or replaced by the
-  request fields the upstream needs for that level.
+  request fields the upstream needs for that level. A router may also supply a default
+  level when you send none; your own value wins.
 
 ## Headers
 

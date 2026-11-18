@@ -29,6 +29,7 @@ pub const SUPPORTED_CAPABILITIES: &[&str] = &[
     "model_limits",
     "default_body",
     "reasoning_effort",
+    "router_reasoning_default",
     "model_chat_check",
     "model_types",
     "audio_price",
@@ -354,6 +355,18 @@ pub fn validate(snapshot: &Snapshot, supported_caps: &[&str]) -> Result<(), Appl
     for r in &snapshot.routers {
         require(r.retry.is_some(), "retry")?;
         require(!r.fallbacks.is_empty(), "fallbacks")?;
+        require(
+            !r.reasoning_default_level.is_empty(),
+            "router_reasoning_default",
+        )?;
+        if !r.reasoning_default_level.is_empty()
+            && !crate::transform::valid_reasoning_level(&r.reasoning_default_level)
+        {
+            return Err(ApplyError::invalid(format!(
+                "router {:?} has an invalid reasoning_default_level",
+                r.name
+            )));
+        }
         require(
             !r.traffic_split.is_empty() || r.sticky != 0 || !r.sticky_header.is_empty(),
             "traffic_split",
@@ -1074,6 +1087,7 @@ pub(crate) mod tests {
                 "reasoning_effort" => {
                     s.models[0].reasoning_effort = Some(pb::ReasoningEffort::default())
                 }
+                "router_reasoning_default" => r.reasoning_default_level = "low".into(),
                 "mcp" => {
                     s.mcp_servers = vec![pb::McpServer {
                         id: "s1-id".into(),
@@ -1112,6 +1126,26 @@ pub(crate) mod tests {
             );
             s.required_capabilities.push((*cap).into());
             validate(&s, SUPPORTED_CAPABILITIES).unwrap();
+        }
+    }
+
+    #[test]
+    fn router_reasoning_default_requires_its_capability_and_a_valid_level() {
+        let mut s = base();
+        s.routers[0].reasoning_default_level = "low".into();
+        assert_code(
+            validate(&s, SUPPORTED_CAPABILITIES),
+            NackCode::InvalidConfig,
+        );
+        s.required_capabilities
+            .push("router_reasoning_default".into());
+        validate(&s, SUPPORTED_CAPABILITIES).unwrap();
+        for bad in ["has space", "9lives!", "-bad", "a".repeat(33).as_str()] {
+            s.routers[0].reasoning_default_level = bad.into();
+            assert_code(
+                validate(&s, SUPPORTED_CAPABILITIES),
+                NackCode::InvalidConfig,
+            );
         }
     }
 

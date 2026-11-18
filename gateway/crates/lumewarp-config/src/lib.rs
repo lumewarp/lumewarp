@@ -332,6 +332,10 @@ pub struct Router {
     /// WASM strategies: how long one `pick` may run; 0 = 60 s.
     #[serde(default)]
     pub plugin_timeout_ms: u32,
+    /// Level injected as the request's `reasoning_effort` (`reasoning.effort`
+    /// on /v1/responses) when the client sends none; empty = none.
+    #[serde(default)]
+    pub reasoning_default_level: String,
 }
 
 fn default_strategy() -> String {
@@ -1023,6 +1027,7 @@ impl Config {
                 } as i32,
                 sticky_header: r.sticky_header.clone(),
                 plugin_timeout_ms: r.plugin_timeout_ms,
+                reasoning_default_level: r.reasoning_default_level.clone(),
             })
             .collect();
         let teams: Vec<pb::Team> = self
@@ -1190,6 +1195,12 @@ impl Config {
                         "reasoning_effort",
                         self.models.iter().any(|d| d.reasoning_effort.is_some()),
                     ),
+                    (
+                        "router_reasoning_default",
+                        self.routers
+                            .iter()
+                            .any(|r| !r.reasoning_default_level.is_empty()),
+                    ),
                 ] {
                     if used {
                         caps.push(cap.into());
@@ -1242,6 +1253,29 @@ mod tests {
 
     const EXAMPLE: &str = include_str!("../../../config.example.yaml");
     const BENCH: &str = include_str!("../../../../bench/lumewarp/config.yaml");
+
+    #[test]
+    fn router_reasoning_default_yaml_round_trip() {
+        let (_, s) = Config::parse(
+            r#"
+upstreams:
+  - {name: u, kind: vllm, base_url: 'http://localhost/v1'}
+models:
+  - {type: llm, name: d, upstream: u, upstream_model: actual}
+routers:
+  - {name: r, members: [{model: d}], reasoning_default_level: low}
+"#,
+        )
+        .unwrap();
+        assert_eq!(s.routers[0].reasoning_default_level, "low");
+        assert!(s
+            .required_capabilities
+            .contains(&"router_reasoning_default".to_string()));
+        let (_, s) = Config::parse("routers: [{name: r, members: [{model: d}]}]").unwrap();
+        assert!(!s
+            .required_capabilities
+            .contains(&"router_reasoning_default".to_string()));
+    }
 
     #[test]
     fn custom_strategy_yaml_preserves_object_and_emits_capability() {
