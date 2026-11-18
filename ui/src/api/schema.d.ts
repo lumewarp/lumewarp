@@ -4522,6 +4522,11 @@ export interface components {
              */
             plugin_timeout_ms: number;
             /**
+             * Reasoning Default Level
+             * @description Level injected when the client sends no reasoning_effort; every member, split member and fallback must accept it. Null = none.
+             */
+            reasoning_default_level?: string | null;
+            /**
              * Force
              * @description Save although connected gateways lack the plugin; they will NACK.
              */
@@ -4595,6 +4600,16 @@ export interface components {
              */
             plugin_timeout_ms: number;
             /**
+             * Reasoning Default Level
+             * @description Level injected when a request sends no reasoning_effort; null = none.
+             */
+            reasoning_default_level: string | null;
+            /**
+             * Accepted Reasoning Levels
+             * @description Levels every member, split member and fallback accepts; null = any level.
+             */
+            accepted_reasoning_levels: string[] | null;
+            /**
              * Config Invalid
              * @description Stored settings fail the strategy's current schema, or nothing reports it.
              */
@@ -4664,6 +4679,11 @@ export interface components {
              * @description WASM strategy only: how long one pick may run, in ms; 0 = the gateway default (60 s).
              */
             plugin_timeout_ms?: number | null;
+            /**
+             * Reasoning Default Level
+             * @description Level injected when the client sends no reasoning_effort; every member, split member and fallback must accept it. Null = none.
+             */
+            reasoning_default_level?: string | null;
             /**
              * Force
              * @description Save although connected gateways lack the plugin; they will NACK.

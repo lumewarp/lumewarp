@@ -262,7 +262,7 @@ class RouterMember(_message.Message):
     def __init__(self, model: _Optional[str] = ..., weight: _Optional[int] = ..., params_json: _Optional[str] = ...) -> None: ...
 
 class Router(_message.Message):
-    __slots__ = ("name", "members", "strategy", "params_json", "retry", "fallbacks", "traffic_split", "sticky", "sticky_header", "plugin_timeout_ms")
+    __slots__ = ("name", "members", "strategy", "params_json", "retry", "fallbacks", "traffic_split", "sticky", "sticky_header", "plugin_timeout_ms", "reasoning_default_level")
     NAME_FIELD_NUMBER: _ClassVar[int]
     MEMBERS_FIELD_NUMBER: _ClassVar[int]
     STRATEGY_FIELD_NUMBER: _ClassVar[int]
@@ -273,6 +273,7 @@ class Router(_message.Message):
     STICKY_FIELD_NUMBER: _ClassVar[int]
     STICKY_HEADER_FIELD_NUMBER: _ClassVar[int]
     PLUGIN_TIMEOUT_MS_FIELD_NUMBER: _ClassVar[int]
+    REASONING_DEFAULT_LEVEL_FIELD_NUMBER: _ClassVar[int]
     name: str
     members: _containers.RepeatedCompositeFieldContainer[RouterMember]
     strategy: str
@@ -283,7 +284,8 @@ class Router(_message.Message):
     sticky: StickyBy
     sticky_header: str
     plugin_timeout_ms: int
-    def __init__(self, name: _Optional[str] = ..., members: _Optional[_Iterable[_Union[RouterMember, _Mapping]]] = ..., strategy: _Optional[str] = ..., params_json: _Optional[str] = ..., retry: _Optional[_Union[RetryPolicy, _Mapping]] = ..., fallbacks: _Optional[_Iterable[str]] = ..., traffic_split: _Optional[_Iterable[_Union[TrafficSplit, _Mapping]]] = ..., sticky: _Optional[_Union[StickyBy, str]] = ..., sticky_header: _Optional[str] = ..., plugin_timeout_ms: _Optional[int] = ...) -> None: ...
+    reasoning_default_level: str
+    def __init__(self, name: _Optional[str] = ..., members: _Optional[_Iterable[_Union[RouterMember, _Mapping]]] = ..., strategy: _Optional[str] = ..., params_json: _Optional[str] = ..., retry: _Optional[_Union[RetryPolicy, _Mapping]] = ..., fallbacks: _Optional[_Iterable[str]] = ..., traffic_split: _Optional[_Iterable[_Union[TrafficSplit, _Mapping]]] = ..., sticky: _Optional[_Union[StickyBy, str]] = ..., sticky_header: _Optional[str] = ..., plugin_timeout_ms: _Optional[int] = ..., reasoning_default_level: _Optional[str] = ...) -> None: ...
 
 class RetryPolicy(_message.Message):
     __slots__ = ("max_attempts", "retry_on_status", "total_timeout_ms")

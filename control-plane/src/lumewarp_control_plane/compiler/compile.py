@@ -16,10 +16,12 @@ from lumewarp_control_plane.compiler.validate import (
     DEFAULT_BODY_RESERVED_KEYS,
     RESERVED_ALIASES,
     SnapshotInvalid,
+    accepted_reasoning_levels,
     body_object_problem,
     capabilities_used,
     metrics_url_problem,
     reasoning_problem,
+    router_reasoning_problem,
     upstream_url_problem,
     validate_snapshot,
 )
@@ -493,6 +495,8 @@ async def compile_scope(
             snap.models.append(out)
     valid_model_ids = {d.id for d in valid_models}
     model_name = {d.id: d.name for d in valid_models}
+    # For a router's default level: what each emitted model accepts (None = any).
+    model_reasoning = {d.id: (d.reasoning_mode, d.reasoning_fragments) for d in valid_models}
 
     # By name id: what aliases can point at.
     callable_names = dict(model_name)
@@ -575,6 +579,21 @@ async def compile_scope(
                     f"router {r.name!r}: fallback {model_by_id[fallback].name!r} is left out,"
                     " dropped"
                 )
+        # A stored level the gateway would reject, or that a served model no longer accepts,
+        # is left out with a warning instead of failing the compile (the API refuses both).
+        if r.reasoning_default_level:
+            pool = (
+                [m.model_id for sr in router_splits for m in split_members.get(sr.id, [])]
+                if router_splits
+                else [m.model_id for m in members_of_router]
+            ) + [fallback for fallback in fallbacks.get(r.id, []) if fallback in model_name]
+            accepted = accepted_reasoning_levels(
+                model_reasoning[model_id] for model_id in pool if model_id in model_reasoning
+            )
+            if problem := router_reasoning_problem(r.reasoning_default_level, accepted):
+                warnings.append(f"router {r.name!r}: {problem}, left out")
+            else:
+                router.reasoning_default_level = r.reasoning_default_level
         callable_names[r.id] = r.name
         snap.routers.append(router)
 

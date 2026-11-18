@@ -256,5 +256,12 @@ async def test_has_signed_in_follows_the_linked_identity(client, committed) -> N
     committed.add(UserIdentity(user_id=user.id, issuer="test", subject=str(uuid.uuid4())))
     await committed.commit()
     assert client.get(path, headers=ADMIN_AUTH).json()["has_signed_in"] is True
-    listed = client.get("/api/v1/users?limit=500", headers=ADMIN_AUTH).json()["items"]
+    listed: list[dict] = []
+    cursor = None
+    while True:
+        params = {"limit": 500, **({"cursor": cursor} if cursor else {})}
+        page = client.get("/api/v1/users", headers=ADMIN_AUTH, params=params).json()
+        listed += page["items"]
+        if not (cursor := page["next_cursor"]):
+            break
     assert next(row for row in listed if row["id"] == str(user.id))["has_signed_in"] is True

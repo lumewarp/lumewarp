@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -75,6 +75,10 @@ from lumewarp_control_plane.compiler.plugins import (
     params_problem,
     router_problem,
     validate_plugin_params,
+)
+from lumewarp_control_plane.compiler.validate import (
+    accepted_reasoning_levels,
+    router_reasoning_problem,
 )
 from lumewarp_control_plane.errors import ApiError, not_found
 from lumewarp_control_plane.grpc import (
@@ -439,6 +443,7 @@ def _apply_breaker(row: Upstream, breaker: CircuitBreakerIn | None) -> None:
 class RouterSpec:
     """The full desired state of a router (create body, or stored state + PATCH)."""
 
+    name: str | None
     strategy: str
     members: list[RouterMemberIn]
     params: dict[str, Any] = field(default_factory=dict)
@@ -448,11 +453,109 @@ class RouterSpec:
     sticky: StickyBy = StickyBy.NONE
     sticky_header: str | None = None
     plugin_timeout_ms: int = 0
+    reasoning_default_level: str | None = None
+
+
+async def _accepted_levels(
+    session: AsyncSession, model_ids: Iterable[uuid.UUID]
+) -> list[str] | None:
+    """The levels every one of these models accepts; None = any level."""
+    ids = set(model_ids)
+    if not ids:
+        return None
+    rows = (
+        await session.execute(
+            select(Model.reasoning_mode, Model.reasoning_fragments).where(Model.name_id.in_(ids))
+        )
+    ).all()
+    return accepted_reasoning_levels([(mode, fragments) for mode, fragments in rows])
+
+
+async def _router_model_ids(session: AsyncSession, router_id: uuid.UUID) -> list[uuid.UUID]:
+    """Models a router can call: its splits' members (or its members), plus fallbacks."""
+    has_split = await session.scalar(
+        select(func.count()).select_from(RouterSplit).where(RouterSplit.router_id == router_id)
+    )
+    if has_split:
+        member_ids = set(
+            await session.scalars(
+                select(RouterSplitMember.model_id)
+                .join(RouterSplit, RouterSplit.id == RouterSplitMember.split_id)
+                .where(RouterSplit.router_id == router_id)
+            )
+        )
+    else:
+        member_ids = set(
+            await session.scalars(
+                select(RouterMember.model_id).where(RouterMember.router_id == router_id)
+            )
+        )
+    member_ids |= set(
+        await session.scalars(
+            select(RouterFallback.model_id).where(RouterFallback.router_id == router_id)
+        )
+    )
+    return list(member_ids)
+
+
+async def _check_router_level(
+    session: AsyncSession,
+    *,
+    name: str,
+    level: str | None,
+    model_ids: Iterable[uuid.UUID],
+    field_name: str,
+) -> None:
+    """422 unless `level` is a valid level every one of `model_ids` accepts."""
+    if level is None:
+        return
+    accepted = await _accepted_levels(session, model_ids)
+    if problem := router_reasoning_problem(level, accepted):
+        raise validation_error(field_name, f"router {name!r}: {problem}")
+
+
+async def _revalidate_referencing_routers(session: AsyncSession, model_id: uuid.UUID) -> None:
+    """Refuse a model change that no longer lets a referencing router default its level."""
+    router_ids = set(
+        await session.scalars(
+            select(RouterMember.router_id).where(RouterMember.model_id == model_id)
+        )
+    )
+    router_ids |= set(
+        await session.scalars(
+            select(RouterSplit.router_id)
+            .join(RouterSplitMember, RouterSplitMember.split_id == RouterSplit.id)
+            .where(RouterSplitMember.model_id == model_id)
+        )
+    )
+    router_ids |= set(
+        await session.scalars(
+            select(RouterFallback.router_id).where(RouterFallback.model_id == model_id)
+        )
+    )
+    if not router_ids:
+        return
+    rows = (
+        await session.scalars(
+            select(Router)
+            .where(Router.name_id.in_(router_ids), Router.reasoning_default_level.is_not(None))
+            .order_by(Router.name_id)
+        )
+    ).all()
+    for row in rows:
+        await _check_router_level(
+            session,
+            name=row.name,
+            level=row.reasoning_default_level,
+            model_ids=await _router_model_ids(session, row.id),
+            field_name="reasoning",
+        )
 
 
 async def _load_spec(session: AsyncSession, scope: str, row: Router) -> RouterSpec:
     out = await _router_out(session, scope, row)
     return RouterSpec(
+        name=row.name,
         strategy=out.strategy,
         params=out.params,
         members=[RouterMemberIn(**m.model_dump()) for m in out.members],
@@ -462,6 +565,7 @@ async def _load_spec(session: AsyncSession, scope: str, row: Router) -> RouterSp
         sticky=row.sticky,
         sticky_header=row.sticky_header,
         plugin_timeout_ms=row.plugin_timeout_ms,
+        reasoning_default_level=row.reasoning_default_level,
     )
 
 
@@ -471,7 +575,9 @@ def _members_problem(members: list[RouterMemberIn], field_name: str) -> None:
             raise validation_error(field_name, problem)
 
 
-async def _validate_spec(session: AsyncSession, spec: RouterSpec) -> None:
+async def _validate_spec(
+    session: AsyncSession, spec: RouterSpec, *, check_reasoning: bool = True
+) -> None:
     """422 for anything the gateway would reject, and for members that are not models."""
     if problem := router_problem(spec.strategy, spec.params):
         raise validation_error("strategy", problem)
@@ -521,6 +627,14 @@ async def _validate_spec(session: AsyncSession, spec: RouterSpec) -> None:
     if len(kinds) > 1:
         raise validation_error(
             "members", "router members, split members and fallbacks must share one model_type"
+        )
+    if check_reasoning:
+        await _check_router_level(
+            session,
+            name=spec.name or "",
+            level=spec.reasoning_default_level,
+            model_ids=all_ids,
+            field_name="reasoning_default_level",
         )
 
 
@@ -606,6 +720,7 @@ def _apply_scalars(row: Router, spec: RouterSpec) -> None:
     row.sticky = spec.sticky
     row.sticky_header = spec.sticky_header
     row.plugin_timeout_ms = spec.plugin_timeout_ms
+    row.reasoning_default_level = spec.reasoning_default_level
 
 
 def _router_out_problems(
@@ -658,6 +773,35 @@ async def _routers_out(session: AsyncSession, scope: str, rows: list[Router]) ->
     problems = {
         row.id: _router_out_problems(registry, row, members[row.id], splits[row.id]) for row in rows
     }
+    referencing = {
+        model_id
+        for row in rows
+        for model_id in (
+            [m.model_id for m in members[row.id]]
+            + [m.model_id for s in splits[row.id] for m in s.members]
+            + fallbacks[row.id]
+        )
+    }
+    reasoning: dict[uuid.UUID, tuple[str, dict | None]] = {
+        model_id: (mode, fragments)
+        for model_id, mode, fragments in (
+            await session.execute(
+                select(Model.name_id, Model.reasoning_mode, Model.reasoning_fragments).where(
+                    Model.name_id.in_(referencing)
+                )
+            )
+        ).all()
+    }
+    accepted: dict[uuid.UUID, list[str] | None] = {}
+    for row in rows:
+        pool = (
+            [m.model_id for s in splits[row.id] for m in s.members]
+            if splits[row.id]
+            else [m.model_id for m in members[row.id]]
+        )
+        accepted[row.id] = accepted_reasoning_levels(
+            reasoning[model_id] for model_id in pool + fallbacks[row.id] if model_id in reasoning
+        )
     types = await catalog_types(session)
     return [
         RouterOut(
@@ -679,6 +823,8 @@ async def _routers_out(session: AsyncSession, scope: str, rows: list[Router]) ->
             sticky=row.sticky,
             sticky_header=row.sticky_header,
             plugin_timeout_ms=row.plugin_timeout_ms,
+            reasoning_default_level=row.reasoning_default_level,
+            accepted_reasoning_levels=accepted[row.id],
             config_invalid=bool(problems[row.id]),
             config_problems=problems[row.id],
             created_at=row.created_at,
@@ -1316,6 +1462,9 @@ async def update_model(
             validate_model_settings(row)
         except ValueError as exc:
             raise validation_error("model_type", str(exc)) from None
+        # A reasoning change can remove a level a referencing router defaults to.
+        if "reasoning" in body.model_fields_set:
+            await _revalidate_referencing_routers(session, row.id)
         if _model_probed(row) != probed:
             for name, value in _PROBE_CLEARED.items():
                 setattr(row, name, value)
@@ -1599,6 +1748,7 @@ async def create_router(
     """
     await authz.require(Action.ROUTING_MANAGE)
     spec = RouterSpec(
+        name=body.name,
         strategy=body.strategy,
         params=body.params,
         members=list(body.members),
@@ -1608,6 +1758,7 @@ async def create_router(
         sticky=body.sticky,
         sticky_header=body.sticky_header,
         plugin_timeout_ms=body.plugin_timeout_ms,
+        reasoning_default_level=body.reasoning_default_level,
     )
     async with mutation(session):
         await lock_scope(session, settings)
@@ -1700,7 +1851,14 @@ async def update_router(
         # Leaving header stickiness drops the header unless the body names one.
         if spec.sticky is not StickyBy.HEADER and "sticky_header" not in fields:
             spec.sticky_header = None
-        await _validate_spec(session, spec)
+        await _validate_spec(
+            session,
+            spec,
+            check_reasoning=bool(
+                fields
+                & {"reasoning_default_level", "members", "traffic_split", "fallback_model_ids"}
+            ),
+        )
         # Settings already stored stay as they are (`config_invalid`) until they are changed:
         # an upgraded schema must not block a rename or a retry change.
         forced = []

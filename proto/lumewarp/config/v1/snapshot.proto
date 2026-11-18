@@ -266,6 +266,13 @@ message Router {
   // WASM strategies only: how long one `pick` may run before the gateway
   // cancels it. 0 = 60 s.
   uint32 plugin_timeout_ms = 14;
+  // Level sent as the request's reasoning_effort (`reasoning.effort` on
+  // /v1/responses) when the client sends none (absent or null), before the serving
+  // member's own transform runs; a client value always wins. It applies to members,
+  // split members and fallbacks, and an alias of this router carries it. Empty = none.
+  // The control plane only accepts a level every member, split member and fallback
+  // accepts. Capability "router_reasoning_default".
+  string reasoning_default_level = 15;
 }
 
 // Retries happen only before any response byte is sent to the client: on

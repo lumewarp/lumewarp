@@ -175,12 +175,23 @@ is reserved in every kind.
 - `Alias { name, target }`: a second name for a model or a router, one level
   only. It shares the target's pool and has no settings of its own.
 - `Router { name, members, strategy, params_json, retry, fallbacks,
-  traffic_split, sticky, sticky_header }`: a strategy pool.
+  traffic_split, sticky, sticky_header, reasoning_default_level }`: a strategy pool.
   `RouterMember { model, weight, params_json }` holds a model and its weight in
   this router, so one model can have different weights in different routers.
   Members and `fallbacks` are always models, never routers or aliases. With
   `traffic_split`, members live in the splits and `Router.members` is ignored
   and may be empty.
+
+`Router.reasoning_default_level` is added to a request that sends no
+`reasoning_effort` (absent or null; `reasoning.effort` on `/v1/responses`) before the
+serving member's own transform, for members, split members and fallbacks; a client
+value wins, and an alias of the router carries the level. Empty means none. The control
+plane only accepts a level every member, split member and fallback accepts: a
+passthrough or strip model accepts any level, a mapped model exactly its
+`fragments_json` keys, so the router's accepted set is their intersection. The
+control plane leaves a stored level out of the snapshot with a warning when its
+name is invalid or it is no longer accepted by every member, split member and
+fallback. Requires capability `router_reasoning_default`.
 
 `params_json` is empty or a JSON object, at most 16 KiB; empty means `{}`. A
 built-in strategy takes no router params. `Router.strategy` is a name:
@@ -256,7 +267,7 @@ Standalone YAML has no previous-hash field.
 
 The gateway advertises `retry`, `fallbacks`, `health_check`, `circuit_breaker`,
 `traffic_split`, `vllm_load`, `rotation_grace`, `model_chat_check`, `model_types`,
-`audio_price`, `mcp`, `a2a`, `upstream_probe`,
+`audio_price`, `router_reasoning_default`, `mcp`, `a2a`, `upstream_probe`,
 `strategy:<name>`, `auth:<name>` and `a2a_middleware:<name>`: the last three name
 plugins the gateway has (built-ins included), `mcp`/`a2a` gate MCP servers
 and A2A agents, and `upstream_probe` says it can run a saved Test now. Compilers
@@ -274,6 +285,7 @@ add a capability only when it is used:
 | `model_chat_check` | Present `Model.chat_check` |
 | `model_types` | Any `Model.type` other than `MODEL_TYPE_LLM` |
 | `audio_price` | Nonzero `Price.nano_usd_per_audio_second` |
+| `router_reasoning_default` | Nonempty `Router.reasoning_default_level` |
 | `mcp` | Nonempty `Snapshot.mcp_servers` |
 | `a2a` | Nonempty `Snapshot.a2a_agents` |
 | `strategy:<name>` | Any router with `Router.strategy = <name>`, including `strategy:weighted` |

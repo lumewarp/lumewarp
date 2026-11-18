@@ -12,6 +12,7 @@ LUMEWARP_ENCRYPTION_KEY (deployment environment configuration, not snapshot cont
 
 import json
 import re
+from collections.abc import Iterable
 from ipaddress import IPv6Address
 from urllib.parse import urlsplit
 
@@ -44,6 +45,7 @@ SUPPORTED_CAPABILITIES: frozenset[str] = frozenset(
         "model_chat_check",
         "model_types",
         "audio_price",
+        "router_reasoning_default",
         "mcp",
         "a2a",
         *(f"strategy:{name}" for name in BUILTIN_PLUGINS[PluginKind.ROUTER_STRATEGY]),
@@ -261,6 +263,8 @@ def capabilities_used(snap: pb.Snapshot) -> list[str]:
             used.add("fallbacks")
         if r.traffic_split or r.sticky != pb.STICKY_BY_NONE or r.sticky_header:
             used.add("traffic_split")
+        if r.reasoning_default_level:
+            used.add("router_reasoning_default")
         used.add(f"strategy:{r.strategy}")
     if any(k.previous_key_hash for k in snap.api_keys):
         used.add("rotation_grace")
@@ -578,6 +582,17 @@ def validate_snapshot(snap: pb.Snapshot, *, max_bytes: int, max_keys: int) -> No
         if not d.upstream_model:
             raise SnapshotInvalid(f"model {d.name!r} has an empty upstream_model")
 
+    # What each model accepts, for a router's default level (None = any level).
+    reasoning_by_name: dict[str, tuple[str, dict | None]] = {}
+    for d in snap.models:
+        if (
+            d.HasField("reasoning_effort")
+            and d.reasoning_effort.mode == pb.REASONING_EFFORT_MODE_MAPPED
+        ):
+            reasoning_by_name[d.name] = ("mapped", dict(d.reasoning_effort.fragments_json))
+        else:
+            reasoning_by_name[d.name] = ("passthrough", None)
+
     # Models, aliases and routers share one name space.
     names = _unique(
         [
@@ -635,6 +650,18 @@ def validate_snapshot(snap: pb.Snapshot, *, max_bytes: int, max_keys: int) -> No
         # With traffic_split the router's own member list is ignored.
         if not r.traffic_split:
             _validate_members(r, "", r.members, models)
+        if r.reasoning_default_level:
+            pool = (
+                [m.model for s in r.traffic_split for m in s.members]
+                if r.traffic_split
+                else [m.model for m in r.members]
+            )
+            accepted = accepted_reasoning_levels(
+                reasoning_by_name.get(name, ("passthrough", None))
+                for name in pool + list(r.fallbacks)
+            )
+            if problem := router_reasoning_problem(r.reasoning_default_level, accepted):
+                raise SnapshotInvalid(f"router {r.name!r}: {problem}")
 
     validate_targets(snap)
 
@@ -775,6 +802,47 @@ def reasoning_problem(mode: str, fragments: dict | None, default_level: str | No
         return f"{mode} reasoning takes no level mapping"
     if mode == "strip" and default_level is not None:
         return "strip reasoning takes no default_level"
+    return None
+
+
+def reasoning_level_problem(level: str) -> str | None:
+    """A reasoning level name, as `transform.rs` and the write paths accept it."""
+    if not REASONING_LEVEL_NAME.fullmatch(level):
+        return f"invalid reasoning level {level!r}"
+    return None
+
+
+def accepted_reasoning_levels(
+    models: Iterable[tuple[str, object]],
+) -> list[str] | None:
+    """The levels every model accepts, or None when they all accept any level.
+
+    A passthrough or strip model accepts any level; a mapped one accepts exactly its
+    fragment keys. A router's accepted set is the intersection over its members, split
+    members and fallbacks, so every level in the result is safe for whichever of them
+    serves the request.
+    """
+    accepted: set[str] | None = None
+    for mode, fragments in models:
+        if mode != "mapped" or not isinstance(fragments, dict):
+            continue
+        levels = set(fragments)
+        accepted = levels if accepted is None else accepted & levels
+    return None if accepted is None else sorted(accepted)
+
+
+def router_reasoning_problem(level: str | None, accepted: list[str] | None) -> str | None:
+    """A router's default level: valid, and accepted by every model it can call."""
+    if level is None:
+        return None
+    if problem := reasoning_level_problem(level):
+        return problem
+    if accepted is not None and level not in accepted:
+        shown = ", ".join(accepted) if accepted else "none"
+        return (
+            f"reasoning level {level!r} is not accepted by every member, split member"
+            f" and fallback (accepted: {shown})"
+        )
     return None
 
 

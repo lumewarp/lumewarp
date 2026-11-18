@@ -47,7 +47,8 @@ TABLES = (*ENTITY_TABLES, *EDGE_TABLES, *TARGET_TABLES)
 # set no longer matches, so it is refused explicitly rather than half-restored.
 # 5: models carry an explicit model_type and audio pricing.
 # 6: upstreams carry their WASM auth columns (auth_plugin/auth_params/auth_timeout_ms).
-FORMAT_VERSION = 6
+# 7: routers carry `reasoning_default_level`.
+FORMAT_VERSION = 7
 
 
 def _encode(value: Any) -> Any:

@@ -1341,6 +1341,8 @@ Splits = Annotated[list[TrafficSplitIn], AfterValidator(_check_splits)]
 
 
 StrategyName = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{0,62}$")]
+# A reasoning level name: the gateway's `transform.rs` accepts the same pattern.
+ReasoningLevel = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$")]
 
 
 class RouterCreate(ApiModel):
@@ -1360,6 +1362,7 @@ class RouterCreate(ApiModel):
     sticky_header: StickyHeader | None = None
     # WASM strategy only: how long one `pick` may run; 0 = the gateway default (60 s).
     plugin_timeout_ms: int = Field(default=0, ge=0, le=INT32_MAX)
+    reasoning_default_level: ReasoningLevel | None = None
     force: bool = _force_field()
 
     @field_validator("sticky_header")
@@ -1383,6 +1386,7 @@ class RouterUpdate(ApiModel):
     sticky: StickyBy | None = None
     sticky_header: StickyHeader | None = None
     plugin_timeout_ms: int | None = Field(default=None, ge=0, le=INT32_MAX)
+    reasoning_default_level: ReasoningLevel | None = None
     force: bool = _force_field()
 
     @field_validator("sticky_header")
@@ -1405,6 +1409,12 @@ class RouterOut(ReadModel):
     sticky_header: str | None
     plugin_timeout_ms: int = Field(
         description="One strategy call's timeout in ms; 0 = the gateway's 60 s default."
+    )
+    reasoning_default_level: str | None = Field(
+        description="Level injected when a request sends no reasoning_effort; null = none."
+    )
+    accepted_reasoning_levels: list[str] | None = Field(
+        description=("Levels every member, split member and fallback accepts; null = any level.")
     )
     config_invalid: bool = Field(
         description="Stored settings fail the strategy's current schema, or nothing reports it."

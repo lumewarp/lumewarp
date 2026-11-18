@@ -7,6 +7,7 @@ import json
 import logging
 import time
 import uuid
+from collections import defaultdict
 from datetime import UTC, datetime
 
 import httpx
@@ -23,6 +24,7 @@ from starlette.responses import Response, StreamingResponse
 from lumewarp_control_plane.api.common import SessionDep, SettingsDep
 from lumewarp_control_plane.api.keys import _live_team_or_404, _owner_effective
 from lumewarp_control_plane.authz import Action, Authz
+from lumewarp_control_plane.compiler.validate import accepted_reasoning_levels
 from lumewarp_control_plane.errors import ApiError
 from lumewarp_control_plane.models import (
     Alias,
@@ -33,6 +35,11 @@ from lumewarp_control_plane.models import (
     Model,
     Org,
     PlaygroundRequest,
+    Router,
+    RouterFallback,
+    RouterMember,
+    RouterSplit,
+    RouterSplitMember,
     ServiceAccount,
     Team,
 )
@@ -76,38 +83,87 @@ class PlaygroundReasoning(BaseModel):
 class PlaygroundOut(BaseModel):
     enabled: bool
     keys: list[PlaygroundKey]
-    # By callable name: models with mapped reasoning levels and aliases that point at one.
-    # Routers are left out: their members may map different levels.
+    # By callable name: mapped models, routers (their members' intersection) and aliases of
+    # either. A name that accepts any level is offered the standard OpenAI levels.
     reasoning: dict[str, PlaygroundReasoning] = {}
 
 
+# Offered for a name whose accepted set is "any level".
+STANDARD_REASONING_LEVELS = ("minimal", "low", "medium", "high")
+
+
+def _levels(accepted: list[str] | None, default: str | None) -> list[str]:
+    """The levels the picker offers: the intersection, or the standard ones when it is any."""
+    if accepted is not None:
+        return accepted
+    levels = list(STANDARD_REASONING_LEVELS)
+    if default is not None and default not in levels:
+        levels.append(default)
+    return levels
+
+
 async def _reasoning(session) -> dict[str, PlaygroundReasoning]:
-    rows = (
+    models = (
         await session.execute(
             select(
                 Model.name_id,
-                CatalogName.name,
+                Model.reasoning_mode,
                 Model.reasoning_fragments,
                 Model.reasoning_default_level,
             )
-            .join(CatalogName, CatalogName.id == Model.name_id)
-            .where(Model.reasoning_mode == "mapped")
         )
     ).all()
-    by_id = {
+    reasoning_by_id: dict[uuid.UUID, PlaygroundReasoning] = {
         row.name_id: PlaygroundReasoning(
-            levels=list(row.reasoning_fragments or {}), default_level=row.reasoning_default_level
+            levels=sorted(row.reasoning_fragments or {}),
+            default_level=row.reasoning_default_level,
         )
-        for row in rows
+        for row in models
+        if row.reasoning_mode == "mapped"
     }
-    out = {row.name: by_id[row.name_id] for row in rows}
+    reasoning_by_model = {
+        row.name_id: (row.reasoning_mode, row.reasoning_fragments) for row in models
+    }
+    # A router can call its splits' members (its own member list is ignored then) and its
+    # fallbacks; every one of them must accept the level for the router to offer it.
+    pool: dict[uuid.UUID, list[uuid.UUID]] = defaultdict(list)
+    split_routers = set(await session.scalars(select(RouterSplit.router_id)))
+    for router_id, model_id in await session.execute(
+        select(RouterMember.router_id, RouterMember.model_id)
+    ):
+        if router_id not in split_routers:
+            pool[router_id].append(model_id)
+    for router_id, model_id in await session.execute(
+        select(RouterSplit.router_id, RouterSplitMember.model_id).join(
+            RouterSplitMember, RouterSplit.id == RouterSplitMember.split_id
+        )
+    ):
+        pool[router_id].append(model_id)
+    for router_id, model_id in await session.execute(
+        select(RouterFallback.router_id, RouterFallback.model_id)
+    ):
+        pool[router_id].append(model_id)
+    for row in await session.execute(select(Router.name_id, Router.reasoning_default_level)):
+        accepted = accepted_reasoning_levels(
+            reasoning_by_model[model_id]
+            for model_id in pool[row.name_id]
+            if model_id in reasoning_by_model
+        )
+        reasoning_by_id[row.name_id] = PlaygroundReasoning(
+            levels=_levels(accepted, row.reasoning_default_level),
+            default_level=row.reasoning_default_level,
+        )
+    names = {
+        id_: name for id_, name in await session.execute(select(CatalogName.id, CatalogName.name))
+    }
+    out = {names[id_]: item for id_, item in reasoning_by_id.items() if id_ in names}
     aliases = await session.execute(
         select(CatalogName.name, Alias.target_name_id)
         .join(CatalogName, CatalogName.id == Alias.name_id)
-        .where(Alias.target_name_id.in_(by_id))
+        .where(Alias.target_name_id.in_(reasoning_by_id))
     )
     for name, target in aliases.all():
-        out[name] = by_id[target]
+        out[name] = reasoning_by_id[target]
     return out
 
 

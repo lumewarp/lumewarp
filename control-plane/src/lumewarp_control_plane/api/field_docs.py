@@ -133,6 +133,10 @@ BY_NAME: dict[str, str] = {
     "plugin_timeout_ms": (
         "WASM strategy only: how long one pick may run, in ms; 0 = the gateway default (60 s)."
     ),
+    "reasoning_default_level": (
+        "Level injected when the client sends no reasoning_effort; every member, split"
+        " member and fallback must accept it. Null = none."
+    ),
     "target": "Id of a model or a router, not another alias.",
     "params": "Settings the plugin defines, validated against the schema it declares.",
     # MCP and A2A

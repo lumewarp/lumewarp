@@ -3,6 +3,8 @@
 The rows are inserted with raw SQL at 0001, so the test never depends on today's models
 for the old schema. After `upgrade head` they must still be there, every existing key must
 inherit its owner's models, and the compiled key policy must be org ∩ team ∩ owner.
+A second test stops at 0002 and checks the additive 0003 revision: an existing router
+survives with no reasoning default, and the new column is writable.
 """
 
 import hashlib
@@ -191,6 +193,50 @@ async def test_upgrade_from_0001_keeps_rows_and_compiles_the_same_policy() -> No
                     text("UPDATE api_keys SET model_access = 'all' WHERE id = :k"),
                     {"k": ids["user_key"]},
                 )
+    finally:
+        await engine.dispose()
+        await drop_database(url)
+
+
+async def test_upgrade_from_0002_adds_the_router_reasoning_default() -> None:
+    url = await create_database()
+    engine = create_async_engine(url)
+    try:
+        await migrate.upgrade(engine, "0002")
+        router_id = _id()
+        async with engine.begin() as conn:
+            await conn.execute(text("INSERT INTO scopes (name) VALUES (:s)"), {"s": SCOPE})
+            await conn.execute(
+                text("INSERT INTO catalog_names (id, name, kind) VALUES (:id, 'r', 'router')"),
+                {"id": router_id},
+            )
+            await conn.execute(
+                text("INSERT INTO routers (name_id) VALUES (:id)"), {"id": router_id}
+            )
+
+        await migrate.upgrade(engine, "head")
+
+        async with engine.connect() as conn:
+            assert (
+                await conn.scalar(
+                    text("SELECT reasoning_default_level FROM routers WHERE name_id = :id"),
+                    {"id": router_id},
+                )
+                is None
+            )
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("UPDATE routers SET reasoning_default_level = 'high' WHERE name_id = :id"),
+                {"id": router_id},
+            )
+        async with engine.connect() as conn:
+            assert (
+                await conn.scalar(
+                    text("SELECT reasoning_default_level FROM routers WHERE name_id = :id"),
+                    {"id": router_id},
+                )
+                == "high"
+            )
     finally:
         await engine.dispose()
         await drop_database(url)

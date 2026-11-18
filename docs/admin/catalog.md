@@ -101,6 +101,21 @@ name.
 when empty). Every router member, split member and fallback must share one type.
 Changing a referenced model's type returns 409 `model_type_in_use`.
 
+## Router reasoning default
+
+A router's `reasoning_default_level` is added to a request that sends no
+`reasoning_effort` (absent or null; `reasoning.effort` on `/v1/responses`), before the
+serving member's own rule runs; a client value still wins, and an alias of the router
+inherits the level.
+The level must be one every member, traffic-split member and fallback accepts: a
+`passthrough` or `strip` model accepts any level, and a `mapped` model exactly the levels
+it maps. `RouterOut.accepted_reasoning_levels` reports that intersection (`null` = any
+level). A router edit that changes its members, splits or fallbacks, or a model edit that
+changes its reasoning, is refused with 422 naming the router when it would remove the
+router's default level from the intersection. The Playground offers the intersection for
+a router and its aliases, and the standard OpenAI levels (`minimal`, `low`, `medium`,
+`high`) when the router accepts any level.
+
 ## Test now
 
 Without an auth plugin, **Test now** probes the form as it stands from the control plane:

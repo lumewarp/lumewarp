@@ -71,6 +71,7 @@ _TRAFFIC_SPLIT: dict[str, DetailSpec] = {
 _ROUTER_SETTINGS: dict[str, DetailSpec] = {
     "strategy": None,
     "plugin_timeout_ms": None,
+    "reasoning_default_level": None,
     "retry": _RETRY,
     "fallback_model_ids": None,
     "traffic_split": [_TRAFFIC_SPLIT],

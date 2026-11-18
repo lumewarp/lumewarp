@@ -1479,6 +1479,10 @@ class Router(TimestampMixin, Base):
     plugin_timeout_ms: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
     )
+    # Level injected when the client sends no reasoning_effort, before the serving member's
+    # transform (proto Router.reasoning_default_level). It must be a level every member,
+    # split member and fallback accepts; NULL = none.
+    reasoning_default_level: Mapped[str | None] = mapped_column(String(32))
 
     id = synonym("name_id")
 

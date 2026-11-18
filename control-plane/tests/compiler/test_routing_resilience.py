@@ -82,6 +82,7 @@ def test_supported_capabilities_match_gateway() -> None:
         "model_chat_check",
         "model_types",
         "audio_price",
+        "router_reasoning_default",
         "mcp",
         "a2a",
         "strategy:weighted",
@@ -314,6 +315,7 @@ async def test_all_capabilities_together(factory) -> None:
         a.reasoning_mode = "strip"
         a.chat_check_interval_ms = 30000
         a.chat_check_timeout_ms = 5000
+        main.reasoning_default_level = "high"
     snap = (await compile_(factory)).snapshot
     assert list(snap.required_capabilities) == sorted(
         SUPPORTED_CAPABILITIES
@@ -328,6 +330,94 @@ async def test_all_capabilities_together(factory) -> None:
             "a2a",
         }
     )
+    assert router_of(snap, "main").reasoning_default_level == "high"
+
+
+async def test_router_reasoning_default_needs_no_capability_when_unset(factory) -> None:
+    await seed_scope(factory)
+    async with factory() as s, s.begin():
+        await add_router(s, "llama", [("a", None)])
+        a = await _dep(s, "a")
+        a.reasoning_mode = "mapped"
+        a.reasoning_fragments = {"low": {}, "medium": {}}
+    compiled = await compile_(factory)
+    router = router_of(compiled.snapshot, "llama")
+    assert router.reasoning_default_level == ""
+    assert "router_reasoning_default" not in compiled.snapshot.required_capabilities
+
+
+async def test_router_reasoning_default_compiles_through_the_intersection(factory) -> None:
+    await seed_scope(factory)
+    async with factory() as s, s.begin():
+        await add_router(s, "llama", [("a", None), ("b", None)])
+        a = await _dep(s, "a")
+        a.reasoning_mode = "mapped"
+        a.reasoning_fragments = {"low": {}, "medium": {}}
+        b = await _dep(s, "b")
+        b.reasoning_mode = "mapped"
+        b.reasoning_fragments = {"medium": {}, "high": {}}
+        llama = await s.scalar(select(Router).where(Router.name == "llama"))
+        llama.reasoning_default_level = "medium"
+    compiled = await compile_(factory)
+    assert router_of(compiled.snapshot, "llama").reasoning_default_level == "medium"
+    assert "router_reasoning_default" in compiled.snapshot.required_capabilities
+
+
+async def test_router_reasoning_default_outside_the_intersection_is_left_out(factory) -> None:
+    await seed_scope(factory)
+    async with factory() as s, s.begin():
+        await add_router(s, "llama", [("a", None), ("b", None)])
+        a = await _dep(s, "a")
+        a.reasoning_mode = "mapped"
+        a.reasoning_fragments = {"low": {}, "medium": {}}
+        b = await _dep(s, "b")
+        b.reasoning_mode = "mapped"
+        b.reasoning_fragments = {"medium": {}, "high": {}}
+        llama = await s.scalar(select(Router).where(Router.name == "llama"))
+        llama.reasoning_default_level = "low"
+    compiled = await compile_(factory)
+    assert router_of(compiled.snapshot, "llama").reasoning_default_level == ""
+    assert any("not accepted by every member" in w for w in compiled.warnings)
+    assert "router_reasoning_default" not in compiled.snapshot.required_capabilities
+
+
+async def test_router_reasoning_default_with_a_bad_name_is_left_out(factory) -> None:
+    await seed_scope(factory)
+    async with factory() as s, s.begin():
+        await add_router(s, "llama", [("a", None)])
+        llama = await s.scalar(select(Router).where(Router.name == "llama"))
+        llama.reasoning_default_level = "not a level"
+    compiled = await compile_(factory)
+    assert router_of(compiled.snapshot, "llama").reasoning_default_level == ""
+    assert any("invalid reasoning level" in w for w in compiled.warnings)
+    assert "router_reasoning_default" not in compiled.snapshot.required_capabilities
+
+
+async def test_router_reasoning_default_uses_split_members_and_fallbacks(factory) -> None:
+    await seed_scope(factory)
+    async with factory() as s, s.begin():
+        llama = await add_router(s, "llama", [("a", None)])
+        up = await s.scalar(select(Upstream))
+        b = await factories.make_model(s, "b", up)
+        a = await _dep(s, "a")
+        a.reasoning_mode = "mapped"
+        a.reasoning_fragments = {"low": {}, "medium": {}}
+        b.reasoning_mode = "mapped"
+        b.reasoning_fragments = {"medium": {}, "high": {}}
+        # The router's own member list is ignored with a split; the fallback still counts.
+        await _split(s, llama, "only", 1, ["a", "b"], 0)
+        s.add(RouterFallback(router_id=llama.id, model_id=b.id, position=0))
+        llama.retry_enabled = True
+        llama.reasoning_default_level = "medium"
+    compiled = await compile_(factory)
+    assert router_of(compiled.snapshot, "llama").reasoning_default_level == "medium"
+
+    async with factory() as s, s.begin():
+        llama = await s.scalar(select(Router).where(Router.name == "llama"))
+        llama.reasoning_default_level = "low"
+    compiled = await compile_(factory)
+    assert router_of(compiled.snapshot, "llama").reasoning_default_level == ""
+    assert any("not accepted by every member" in w for w in compiled.warnings)
 
 
 # --------------------------------------------------------------------------- validate mirror
@@ -447,6 +537,18 @@ INVALID = {
     "too many splits": lambda s: _split_router(
         s, *(pb.TrafficSplit(name=f"s{i}", weight=1, members=_m("a")) for i in range(17))
     ),
+    "bad reasoning level": lambda s: setattr(
+        s.routers[0], "reasoning_default_level", "not a level"
+    ),
+    "reasoning level outside the members": lambda s: (
+        s.models[0].reasoning_effort.CopyFrom(
+            pb.ReasoningEffort(
+                mode=pb.REASONING_EFFORT_MODE_MAPPED,
+                fragments_json={"low": "{}"},
+            )
+        ),
+        setattr(s.routers[0], "reasoning_default_level", "high"),
+    ),
 }
 
 
@@ -469,6 +571,7 @@ def test_validate_accepts_full_routing_snapshot() -> None:
     )
     r.sticky = pb.STICKY_BY_HEADER
     r.sticky_header = "x-session"
+    r.reasoning_default_level = "none"
     r.retry.CopyFrom(pb.RetryPolicy(max_attempts=5, retry_on_status=[400, 599]))
     r.fallbacks.append("b")
     snap.routers[1].strategy = "vllm_load"
