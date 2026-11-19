@@ -442,12 +442,12 @@ async fn wait_ready(gw: &Gw) {
 }
 
 async fn next_usage_event(cp: &mut usage_cp::FakeCp, what: &str) -> UsageEvent {
-    let (authorization, event) = tokio::time::timeout(Duration::from_secs(10), cp.events.recv())
+    let report = tokio::time::timeout(Duration::from_secs(10), cp.events.recv())
         .await
         .unwrap_or_else(|_| panic!("no usage event for the {what} stream"))
         .expect("fake control plane stopped");
-    assert_eq!(authorization.as_deref(), Some("Bearer gw-token"));
-    event
+    assert_eq!(report.authorization.as_deref(), Some("Bearer gw-token"));
+    report.event
 }
 
 /// I2: a stream is reported when it ends, with the real outcome and duration —

@@ -47,6 +47,9 @@ pub struct StreamConfig {
     pub token: String,
     pub zone: String,
     pub state_dir: PathBuf,
+    /// Shared with the usage reporter: the id the control plane assigns in
+    /// `Welcome`.
+    pub identity: gateway_id::Identity,
     /// `Some` when this gateway shares its limiter through Redis; reported in
     /// `Hello.shared_limits` for the Gateways page.
     pub shared_limits_namespace: Option<String>,
@@ -88,10 +91,16 @@ pub fn spawn(
         .map_err(|_| anyhow::anyhow!("gateway token is not a valid header value"))?;
     let mut bearer = bearer;
     bearer.set_sensitive(true);
-    tracing::info!(gateway_id = gateway_id::gateway_id(), "gateway process");
+    let zone_header: MetadataValue<tonic::metadata::Ascii> = config
+        .zone
+        .as_str()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("zone is not a valid header value"))?;
+    tracing::info!(hostname = %gateway_id::hostname(), zone = %config.zone, "gateway process");
     let client = Client {
         endpoint,
         bearer,
+        zone_header,
         config,
         current: Arc::new(current),
         digest,
@@ -106,6 +115,8 @@ pub fn spawn(
 struct Client {
     endpoint: Endpoint,
     bearer: MetadataValue<tonic::metadata::Ascii>,
+    /// Sent as `x-lumewarp-zone` on every stream.
+    zone_header: MetadataValue<tonic::metadata::Ascii>,
     config: StreamConfig,
     /// The snapshot that is active and durable; base of the next update.
     current: Arc<Snapshot>,
@@ -159,7 +170,6 @@ impl Client {
         let have = self.current.version;
         tx.send(GatewayMessage {
             msg: Some(Msg::Hello(Hello {
-                gateway_id: gateway_id::gateway_id().to_owned(),
                 have_version: have,
                 gateway_version: env!("CARGO_PKG_VERSION").into(),
                 supported_capabilities: snapshot::supported_capabilities(),
@@ -168,13 +178,10 @@ impl Client {
                 } else {
                     Vec::new()
                 },
-                zone: if have > 0 {
-                    self.config.zone.clone()
-                } else {
-                    String::new()
-                },
+                zone: self.config.zone.clone(),
                 plugins: self.plugins.clone(),
                 plugin_abi: lumewarp_plugin_host::ABI,
+                hostname: gateway_id::hostname(),
                 shared_limits: Some(SharedLimits {
                     enabled: self.config.shared_limits_namespace.is_some(),
                     namespace: self
@@ -190,6 +197,9 @@ impl Client {
         request
             .metadata_mut()
             .insert("authorization", self.bearer.clone());
+        request
+            .metadata_mut()
+            .insert("x-lumewarp-zone", self.zone_header.clone());
         let mut inbound = client.stream(request).await?.into_inner();
         self.runtime.metrics.config_stream_connected(true);
         tracing::info!(have_version = have, "config stream connected");
@@ -221,6 +231,13 @@ impl Client {
                     // ProbeResult on the same stream, never ACK/NACK.
                     if let Some(Update::Probe(request)) = &update.update {
                         self.spawn_probe(request.clone(), tx.clone());
+                        continue;
+                    }
+                    // Welcome is not a config version either: it names this
+                    // stream's gateway and is never ACK/NACKed.
+                    if let Some(Update::Welcome(welcome)) = &update.update {
+                        tracing::info!(gateway_id = %welcome.gateway_id, "gateway id assigned");
+                        self.config.identity.assign(welcome.gateway_id.clone());
                         continue;
                     }
                     let reply = self.handle(update).await;
@@ -339,8 +356,8 @@ impl Client {
         let version = match &update.update {
             Some(Update::Full(full)) => full.version,
             Some(Update::Delta(delta)) => delta.version,
-            // Intercepted by the session loop; never applied.
-            Some(Update::Probe(_)) => 0,
+            // Intercepted by the session loop; never applied, never ACK/NACKed.
+            Some(Update::Probe(_)) | Some(Update::Welcome(_)) => 0,
             None => 0,
         };
         let target_digest = update.target_digest.clone();
@@ -429,7 +446,9 @@ mod tests {
     /// reported while the registry is empty.
     mod catalog {
         use super::super::*;
-        use lumewarp_proto::config::v1::{config_update::Update, gateway_message::Msg};
+        use lumewarp_proto::config::v1::{
+            config_update::Update, gateway_message::Msg, Welcome,
+        };
         use std::{
             convert::Infallible,
             net::SocketAddr,
@@ -447,7 +466,12 @@ mod tests {
             Request, Response, Status, Streaming,
         };
 
+        /// The id this fake control plane assigns to every stream.
+        const WELCOME_ID: &str = "fake-host-0123abcd";
+
         struct Conn {
+            authorization: Option<String>,
+            zone: Option<String>,
             inbound: mpsc::UnboundedReceiver<GatewayMessage>,
             outbound: mpsc::UnboundedSender<Result<ConfigUpdate, Status>>,
         }
@@ -504,9 +528,26 @@ mod tests {
             fn call(&mut self, request: Request<Streaming<GatewayMessage>>) -> Self::Future {
                 let conns = self.0.clone();
                 Box::pin(async move {
+                    let authorization = request
+                        .metadata()
+                        .get("authorization")
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_owned);
+                    let zone = request
+                        .metadata()
+                        .get("x-lumewarp-zone")
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_owned);
                     let mut incoming = request.into_inner();
                     let (in_tx, in_rx) = mpsc::unbounded_channel();
                     let (out_tx, out_rx) = mpsc::unbounded_channel();
+                    // Welcome is the first message of every stream.
+                    let _ = out_tx.send(Ok(ConfigUpdate {
+                        update: Some(Update::Welcome(Welcome {
+                            gateway_id: WELCOME_ID.into(),
+                        })),
+                        target_digest: Vec::new(),
+                    }));
                     tokio::spawn(async move {
                         while let Ok(Some(message)) = incoming.message().await {
                             if in_tx.send(message).is_err() {
@@ -515,6 +556,8 @@ mod tests {
                         }
                     });
                     let _ = conns.send(Conn {
+                        authorization,
+                        zone,
                         inbound: in_rx,
                         outbound: out_tx,
                     });
@@ -575,11 +618,13 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let runtime = Runtime::new();
             let slot: server::Snapshot = Arc::new(arc_swap::ArcSwapOption::empty());
+            let identity = crate::gateway_id::Identity::new();
             let config = StreamConfig {
                 url: format!("http://{addr}"),
                 token: "gw-token".into(),
                 zone: "zone-a".into(),
                 state_dir: dir.path().to_owned(),
+                identity: identity.clone(),
                 shared_limits_namespace: None,
             };
             let handle = spawn(
@@ -598,9 +643,20 @@ mod tests {
                 .await
                 .unwrap()
                 .expect("fake control plane accepted no stream");
+            assert_eq!(
+                conn.authorization.as_deref(),
+                Some("Bearer gw-token"),
+                "authorization metadata"
+            );
+            assert_eq!(
+                conn.zone.as_deref(),
+                Some("zone-a"),
+                "x-lumewarp-zone metadata"
+            );
             match conn.recv().await {
                 Msg::Hello(hello) => {
-                    assert_eq!(hello.gateway_id, crate::gateway_id::gateway_id())
+                    assert_eq!(hello.zone, "zone-a", "Hello.zone is always set");
+                    assert_eq!(hello.hostname, crate::gateway_id::hostname());
                 }
                 other => panic!("expected Hello, got {other:?}"),
             }
@@ -609,6 +665,9 @@ mod tests {
                 Msg::Ack(ack) => assert_eq!(ack.version, 1),
                 other => panic!("expected Ack, got {other:?}"),
             }
+            // Welcome is never ACKed: it is not a version, so the only reply
+            // so far is the full's Ack above.
+            assert_eq!(identity.assigned_or_empty(), WELCOME_ID);
 
             // Nothing is reported while nothing was observed.
             let quiet = tokio::time::timeout(Duration::from_millis(300), conn.recv()).await;
@@ -693,6 +752,7 @@ mod tests {
                 token: "gw-token".into(),
                 zone: "zone-a".into(),
                 state_dir: dir.path().to_owned(),
+                identity: crate::gateway_id::Identity::new(),
                 shared_limits_namespace: None,
             };
             let handle = spawn(
@@ -712,7 +772,7 @@ mod tests {
                 .unwrap()
                 .expect("fake control plane accepted no stream");
             match conn.recv().await {
-                Msg::Hello(_) => {}
+                Msg::Hello(hello) => assert_eq!(hello.zone, "zone-a"),
                 other => panic!("expected Hello, got {other:?}"),
             }
 
@@ -823,6 +883,7 @@ mod tests {
                 token: "gw-token".into(),
                 zone: "zone-a".into(),
                 state_dir: dir.path().to_owned(),
+                identity: crate::gateway_id::Identity::new(),
                 shared_limits_namespace: Some("team-ns".into()),
             };
             let handle = spawn(

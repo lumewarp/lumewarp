@@ -692,9 +692,10 @@ fn merge<T>(
 pub fn apply(base: &Snapshot, update: ConfigUpdate) -> Result<Snapshot, ApplyError> {
     match update.update {
         None => Err(ApplyError::invalid("empty config update")),
-        // The config stream intercepts probes before `apply`; reaching here is
-        // a bug in the caller, never a configuration version.
+        // The config stream intercepts probes and Welcome before `apply`;
+        // reaching here is a bug in the caller, never a configuration version.
         Some(Update::Probe(_)) => Err(ApplyError::invalid("probe request is not a config update")),
+        Some(Update::Welcome(_)) => Err(ApplyError::invalid("welcome is not a config update")),
         Some(Update::Full(full)) => {
             if !base.zone.is_empty() && full.zone != base.zone {
                 return Err(ApplyError::invalid("full snapshot is for a different zone"));

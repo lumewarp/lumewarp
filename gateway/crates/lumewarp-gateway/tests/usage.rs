@@ -520,7 +520,20 @@ async fn retried_request_reports_only_final_model_usage() {
     bytes(response).await;
     upstream.received().await;
     upstream.received().await;
-    let event = cp.event().await;
+    let event = {
+        let report = cp.report().await;
+        assert_eq!(
+            report.zone.as_deref(),
+            Some(ZONE),
+            "x-lumewarp-zone metadata"
+        );
+        assert_eq!(
+            report.gateway_id,
+            usage_cp::WELCOME_GATEWAY_ID,
+            "usage carries the id assigned in Welcome"
+        );
+        report.event
+    };
     assert_eq!(event.requested, "public");
     assert_eq!((event.prompt_tokens, event.completion_tokens), (5, 3));
     assert!(["d", "second"].contains(&event.model.as_str()));

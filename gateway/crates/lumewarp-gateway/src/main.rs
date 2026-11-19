@@ -257,6 +257,7 @@ async fn main() -> anyhow::Result<()> {
                 .with_context(|| format!("gateway token variable {env_name} is not set"))?;
             let zone = args.zone.clone().context("--zone")?;
             let state_dir = args.state_dir.clone().context("--state-dir")?;
+            let identity = gateway_id::Identity::new();
             let settings = match &args.local_config {
                 Some(path) => {
                     let yaml = std::fs::read_to_string(path)
@@ -273,6 +274,8 @@ async fn main() -> anyhow::Result<()> {
                 usage::ReporterConfig {
                     endpoint: url.clone(),
                     token: token.clone(),
+                    zone: zone.clone(),
+                    identity: identity.clone(),
                     capacity: usage::ReporterConfig::DEFAULT_CAPACITY,
                     batch_max: usage::ReporterConfig::DEFAULT_BATCH_MAX,
                     flush_interval: usage::ReporterConfig::DEFAULT_FLUSH_INTERVAL,
@@ -321,6 +324,7 @@ async fn main() -> anyhow::Result<()> {
                     token,
                     zone,
                     state_dir,
+                    identity,
                     shared_limits_namespace: shared_limits
                         .as_ref()
                         .map(|config| config.namespace.clone()),
@@ -357,4 +361,57 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Standalone mode is the YAML only. `--config` conflicts with every
+    /// control-plane flag, so a standalone process can never be handed a URL,
+    /// token variable, state directory or zone; the standalone branch above
+    /// therefore has nothing with which to build a config-stream or usage gRPC
+    /// channel.
+    #[test]
+    fn standalone_cannot_reach_a_control_plane() {
+        let args = Args::try_parse_from(["lumewarp", "--config", "gateway.yaml"]).unwrap();
+        assert!(args.control_plane.is_none());
+        assert!(args.gateway_token_env.is_none());
+        assert!(args.state_dir.is_none());
+        assert!(args.zone.is_none());
+
+        let combined = Args::try_parse_from([
+            "lumewarp",
+            "--config",
+            "gateway.yaml",
+            "--control-plane",
+            "http://127.0.0.1:1",
+            "--gateway-token-env",
+            "LUMEWARP_TEST_TOKEN",
+            "--state-dir",
+            "/tmp/lumewarp-test-state",
+            "--zone",
+            "zone-a",
+        ]);
+        assert!(
+            combined.is_err(),
+            "standalone must not accept a control-plane URL"
+        );
+    }
+
+    /// The standalone boot path has neither a config-stream task nor a usage
+    /// reporter: the snapshot is active immediately and the runtime's sink is
+    /// the disabled one.
+    #[test]
+    fn standalone_builds_no_control_plane_clients() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gateway.yaml");
+        std::fs::write(&path, "{}").unwrap();
+        let (_, snapshot, runtime) = standalone(&path, false).unwrap();
+        assert!(
+            snapshot.load_full().is_some(),
+            "the YAML snapshot is active without a stream"
+        );
+        assert!(!runtime.usage.enabled(), "no usage reporter is built");
+    }
 }

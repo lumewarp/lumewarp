@@ -233,25 +233,6 @@ impl Drop for Gw {
     }
 }
 
-/// The generated `<host>-<8 lowercase hex>` id from `Hello.gateway_id`.
-fn assert_generated_gateway_id(id: &str) {
-    assert!(!id.is_empty() && id.len() <= 100, "{id}");
-    assert!(
-        id.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')),
-        "{id}"
-    );
-    let (host, suffix) = id.rsplit_once('-').expect("a host and a suffix");
-    assert!(!host.is_empty(), "{id}");
-    assert_eq!(suffix.len(), 8, "{id}");
-    assert!(
-        suffix
-            .chars()
-            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
-        "{id}"
-    );
-}
-
 async fn hello(conn: &mut Conn) -> lumewarp_proto::config::v1::Hello {
     match conn.recv().await.msg {
         Some(Msg::Hello(hello)) => hello,
@@ -305,11 +286,16 @@ async fn full_then_delta_with_durable_acks() {
     let gw = Gw::spawn(&cp.url(), &env.state, &env.work, "gw-1");
     let mut conn = cp.accept().await;
     assert_eq!(conn.authorization.as_deref(), Some("Bearer gw-token"));
+    assert_eq!(conn.zone.as_deref(), Some(ZONE), "x-lumewarp-zone metadata");
     let hello = hello(&mut conn).await;
-    assert_generated_gateway_id(&hello.gateway_id);
     assert_eq!(hello.have_version, 0);
     assert!(hello.have_digest.is_empty());
-    assert_eq!(hello.zone, "");
+    assert_eq!(hello.zone, ZONE, "Hello.zone is always set");
+    assert_eq!(
+        hello.hostname,
+        std::env::var("HOSTNAME").unwrap_or_default(),
+        "the raw HOSTNAME; the control plane sanitizes it"
+    );
     assert!(!hello.gateway_version.is_empty());
     // The binary links every strategy feature; this test only relies on the
     // built-ins. `tests/strategies.rs` covers the custom entries.
