@@ -30,6 +30,7 @@ from lumewarp_control_plane.models import (
     Alias,
     ApiKey,
     CatalogName,
+    ConfigVersion,
     KeyLifecycle,
     KeyOwnerKind,
     Model,
@@ -180,6 +181,30 @@ async def _llm_names(session: SessionDep) -> set[str]:
     }
 
 
+async def _zone_names(session: AsyncSession, zone: str) -> set[str]:
+    """Names the zone's gateways serve: models, routers and aliases of its latest snapshot.
+
+    The compiler emits a model only where it has a deployment (and a router or alias only
+    when what it calls is there), so this is what a key of the zone can actually call.
+    """
+    from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2
+
+    payload = await session.scalar(
+        select(ConfigVersion.payload)
+        .where(ConfigVersion.zone == zone, ConfigVersion.payload.is_not(None))
+        .order_by(ConfigVersion.version.desc())
+        .limit(1)
+    )
+    if payload is None:
+        return set()
+    snapshot = snapshot_pb2.Snapshot.FromString(payload)
+    return (
+        {model.name for model in snapshot.models}
+        | {router.name for router in snapshot.routers}
+        | {alias.name for alias in snapshot.aliases}
+    )
+
+
 def _session_only(authz: Authz) -> None:
     if authz.principal.kind is not PrincipalKind.SESSION:
         raise HTTPException(401, "a user session is required")
@@ -270,6 +295,7 @@ async def get_playground(authz: Authz, session: SessionDep, settings: SettingsDe
     }
     keys = []
     llm_names = await _llm_names(session)
+    served: dict[str, set[str]] = {}
     for key, account_name, team, org_name in rows:
         if not _usable(key):
             continue
@@ -283,6 +309,8 @@ async def get_playground(authz: Authz, session: SessionDep, settings: SettingsDe
         # What the key itself may call: the owner's set, narrowed by a key `list`.
         key_set = key_models((await _owner_effective(session, team, key)).models, key)
         models = sorted(llm_names) if key_set is None else sorted(key_set)
+        if key.zone not in served:
+            served[key.zone] = await _zone_names(session, key.zone)
         keys.append(
             PlaygroundKey(
                 id=key.id,
@@ -293,7 +321,7 @@ async def get_playground(authz: Authz, session: SessionDep, settings: SettingsDe
                 team_name=team.name,
                 org_id=team.org_id,
                 org_name=org_name,
-                models=sorted(set(models) & llm_names),
+                models=sorted(set(models) & llm_names & served[key.zone]),
                 owner_kind=key.owner_kind,
                 service_account_name=account_name,
             )

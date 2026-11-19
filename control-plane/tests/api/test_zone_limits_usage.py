@@ -18,12 +18,13 @@ from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as pb
 from lumewarp_control_plane._proto.lumewarp.usage.v1 import usage_pb2
 from lumewarp_control_plane.auth import sessions
 from lumewarp_control_plane.compiler import compile_zone
-from lumewarp_control_plane.models import ConfigOutbox, ScopeType, TeamRole, Zone
+from lumewarp_control_plane.models import CatalogName, ConfigOutbox, ScopeType, TeamRole, Zone
 from lumewarp_control_plane.usage import ingest
 from lumewarp_control_plane.windows import month_window
 from tests.api.helpers import (
     ADMIN_AUTH,
     auth,
+    publish_zones,
     put_member_defaults,
     put_zone_limits,
     usage_event,
@@ -34,7 +35,9 @@ from tests.api.test_playground import SSEStream
 from tests.factories import (
     make_key,
     make_member,
+    make_model,
     make_org,
+    make_router,
     make_service_account,
     make_team,
     make_user,
@@ -347,6 +350,40 @@ async def test_playground_offers_and_forwards_only_a_zones_playable_keys(
     )
     assert ok.status_code == 200, ok.text
     assert forwarded["url"] == "http://gw-b:4000/v1/chat/completions"
+
+
+async def test_playground_lists_only_names_served_in_the_keys_zone(
+    client, committed, api_engine
+) -> None:
+    """A key is offered only what its zone's gateways serve: a model deployed in another
+    zone (and a router over it) is not listed for it."""
+    here = await create_zone(
+        client, committed, playground_allowed=True, playground_gateway_url="http://gw-a:4000"
+    )
+    there = await create_zone(
+        client, committed, playground_allowed=True, playground_gateway_url="http://gw-b:4000"
+    )
+    deployed = await make_model(committed, zone=here["id"])
+    router = await make_router(committed, members=[deployed])
+    team = await make_team(committed)
+    user = await make_user(committed)
+    await make_member(committed, team, user, role=TeamRole.ADMIN)
+    key_here = await make_key(committed, team, user, zone=here["id"])
+    key_there = await make_key(committed, team, user, zone=there["id"])
+    cookie = await sessions.create_session(committed, user.id, 3600)
+    await committed.commit()
+    await publish_zones(api_engine, here["id"], there["id"])
+
+    body = client.get("/api/v1/playground", headers=auth("session:" + cookie)).json()
+    models = {key["id"]: set(key["models"]) for key in body["keys"]}
+    names = set(
+        await committed.scalars(
+            select(CatalogName.name).where(CatalogName.id.in_([deployed.name_id, router.name_id]))
+        )
+    )
+    assert len(names) == 2
+    assert names <= models[str(key_here.id)], models
+    assert not names & models[str(key_there.id)], models
 
 
 async def test_team_totals_pagination_is_per_zone(client, committed) -> None:

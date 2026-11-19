@@ -321,3 +321,23 @@ async def report_plugins(
     normalized = normalize_hello(cpb.Hello(plugins=reported))
     await replace_gateway_plugins(session, scope, gateway_id, normalized.plugins, now)
     await session.commit()
+
+
+async def publish_zones(api_engine, *zones: str) -> None:
+    """Compile and store a config version for each zone (every live zone when none is
+    named), as the compiler loop would."""
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+    from lumewarp_control_plane.compiler.publish import publish_pending
+    from lumewarp_control_plane.models import Zone
+    from lumewarp_control_plane.outbox import enqueue_recompile
+
+    async with AsyncSession(api_engine) as session, session.begin():
+        if not zones:
+            zones = tuple(await session.scalars(select(Zone.id).where(Zone.archived_at.is_(None))))
+        for zone in zones:
+            await enqueue_recompile(session, "test", zone)
+    factory = async_sessionmaker(api_engine, expire_on_commit=False)
+    for zone in zones:
+        await publish_pending(factory, zone, require_local_membership=True)

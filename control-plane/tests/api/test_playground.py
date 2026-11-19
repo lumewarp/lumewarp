@@ -26,7 +26,7 @@ from lumewarp_control_plane.models import (
     TeamRole,
 )
 from tests.api.conftest import TEST_ENCRYPTION_KEY
-from tests.api.helpers import auth, set_playground_url, user_with_token
+from tests.api.helpers import auth, publish_zones, set_playground_url, user_with_token
 from tests.factories import (
     make_alias,
     make_key,
@@ -458,7 +458,7 @@ async def test_body_limit_and_unreachable(client, committed, monkeypatch):
     assert not client.app.state.playground_client.is_closed
 
 
-async def test_reasoning_levels_for_mapped_models_and_their_aliases(client, committed):
+async def test_reasoning_levels_for_mapped_models_and_their_aliases(client, committed, api_engine):
     own, _excluded, headers, _pat = await setup_keys(committed)
     fragments = {"low": {"reasoning_effort": "low"}, "xhigh": {"reasoning_effort": "xhigh"}}
     mapped = await make_model(
@@ -471,6 +471,7 @@ async def test_reasoning_levels_for_mapped_models_and_their_aliases(client, comm
     plain = await make_model(committed, f"plain-{uuid.uuid4().hex[:6]}")
     alias = await make_alias(committed, f"alias-{uuid.uuid4().hex[:6]}", mapped)
     await committed.commit()
+    await publish_zones(api_engine, own.zone)
     body = client.get("/api/v1/playground", headers=headers).json()
     names = set(body["keys"][0]["models"])
     reasoning = body["reasoning"]

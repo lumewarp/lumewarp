@@ -14,7 +14,7 @@ from lumewarp_control_plane.auth import sessions
 from lumewarp_control_plane.compiler import compile_zone
 from lumewarp_control_plane.models import CatalogName
 from tests.api.helpers import ADMIN_AUTH as H
-from tests.api.helpers import auth, create_model, suffix, user_with_token
+from tests.api.helpers import auth, create_model, publish_zones, suffix, user_with_token
 from tests.factories import make_alias, make_key, make_member, make_model, make_router, make_team
 
 API = "/api/v1"
@@ -296,7 +296,7 @@ async def test_compiled_snapshot_carries_the_level_and_capability(
     assert "router_reasoning_default" in compiled.snapshot.required_capabilities
 
 
-async def test_playground_lists_routers_and_their_aliases(client, committed) -> None:
+async def test_playground_lists_routers_and_their_aliases(client, committed, api_engine) -> None:
     headers = await _playground_key(committed)
     fragments = {"low": {"reasoning_effort": "low"}, "high": {"reasoning_effort": "high"}}
     mapped = await make_model(
@@ -336,6 +336,7 @@ async def test_playground_lists_routers_and_their_aliases(client, committed) -> 
         plain_name,
         plain_alias_name,
     ) = await names(router, alias, any_router, custom_default, plain, plain_alias)
+    await publish_zones(api_engine)
     body = client.get(f"{API}/playground", headers=headers).json()
     assert {router_name, alias_name, any_router_name, custom_name} <= set(body["keys"][0]["models"])
     reasoning = body["reasoning"]
