@@ -446,9 +446,7 @@ mod tests {
     /// reported while the registry is empty.
     mod catalog {
         use super::super::*;
-        use lumewarp_proto::config::v1::{
-            config_update::Update, gateway_message::Msg, Welcome,
-        };
+        use lumewarp_proto::config::v1::{config_update::Update, gateway_message::Msg, Welcome};
         use std::{
             convert::Infallible,
             net::SocketAddr,

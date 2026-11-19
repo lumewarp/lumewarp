@@ -17,9 +17,7 @@ use std::{
 };
 
 use lumewarp_proto::{
-    config::v1::{
-        config_update::Update, ConfigUpdate, GatewayMessage, Snapshot, Welcome,
-    },
+    config::v1::{config_update::Update, ConfigUpdate, GatewayMessage, Snapshot, Welcome},
     usage::v1::{ReportRequest, ReportResponse, UsageEvent},
 };
 use tokio::{net::TcpListener, sync::mpsc, task::JoinHandle};
