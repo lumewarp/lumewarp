@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 
 import { api, type LeaderboardRow } from "../api";
-import { Badge, fmtNumber as n, fmtUsd } from "./Bits";
+import { Badge, fmtCompact, fmtNumber as n, fmtUsd } from "./Bits";
 import { KeyPill } from "./KeyPill";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
 
@@ -108,7 +108,7 @@ function Board({
                       style={{ width: `${(row.total_tokens / peak) * 100}%` }}
                     />
                   </span>
-                  {n(row.total_tokens)}
+                  <span title={`${n(row.total_tokens)} tokens`}>{fmtCompact(row.total_tokens)}</span>
                 </span>
                 <span />
               </li>

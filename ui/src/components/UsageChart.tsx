@@ -4,7 +4,7 @@ import type { UsageRow } from "../api";
 import { daysBetween } from "../lib/days";
 import { METRIC_LABEL, type UsageMetric } from "../lib/usageMetric";
 import { cn } from "../lib/utils";
-import { fmtNumber, fmtUsd, nanoToUsd } from "./Bits";
+import { fmtCompact, fmtNumber, fmtUsd, nanoToUsd } from "./Bits";
 import { Button } from "./ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "./ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
@@ -167,12 +167,7 @@ const round1 = (value: number) => (Math.round(value * 10) / 10).toString();
  * exponent form where fixed decimals would need more than five (or print the same label twice).
  */
 function tickLabel(value: number, metric: UsageMetric, step: number) {
-  if (metric === "tokens") {
-    if (value >= 1e9) return `${round1(value / 1e9)}B`;
-    if (value >= 1e6) return `${round1(value / 1e6)}M`;
-    if (value >= 1e4) return `${round1(value / 1e3)}k`;
-    return fmtNumber(value);
-  }
+  if (metric === "tokens") return fmtCompact(value);
   if (value === 0) return "$0";
   const usd = nanoToUsd(value) ?? 0;
   if (usd >= 1000) return `$${round1(usd / 1000)}k`;
@@ -190,7 +185,8 @@ function money(nano: number) {
   return Math.abs(usd) < 5e-7 ? `$${usd.toExponential(1)}` : fmtUsd(nano);
 }
 
-const exact = (value: number, metric: UsageMetric) => (metric === "tokens" ? `${fmtNumber(value)} tokens` : money(value));
+/** The tooltip's value: token counts shortened (12.3M tokens); the data table below the chart keeps every digit. */
+const exact = (value: number, metric: UsageMetric) => (metric === "tokens" ? `${fmtCompact(value)} tokens` : money(value));
 /** The same numbers without the unit: a table cell says it in its header. */
 const number = (value: number, metric: UsageMetric) => (metric === "tokens" ? fmtNumber(value) : money(value));
 

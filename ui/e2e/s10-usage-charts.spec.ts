@@ -30,6 +30,18 @@ async function apiRows(request: APIRequestContext, from: string, to: string): Pr
   return ((await response.json()) as { items: ApiRow[] }).items;
 }
 
+/** The chart's shortened token count (`fmtCompact` in components/Bits.tsx). */
+const compact = (value: number) => {
+  const units: [number, string][] = [[1e12, "T"], [1e9, "B"], [1e6, "M"], [1e3, "k"]];
+  if (Math.abs(value) < 1e4) return value.toLocaleString();
+  for (let i = 0; i < units.length; i++) {
+    if (Math.abs(value) < units[i][0]) continue;
+    const short = Number((value / units[i][0]).toPrecision(3));
+    if (Math.abs(short) >= 1000 && i > 0) return `${Number((value / units[i - 1][0]).toPrecision(3))}${units[i - 1][1]}`;
+    return `${short}${units[i][1]}`;
+  }
+  return value.toLocaleString();
+};
 const sumBy = (rows: ApiRow[], key: keyof ApiRow) => rows.reduce((sum, row) => sum + Number(row[key] ?? 0), 0);
 
 /** Answer only the chart's own query (`group_by=day,model`) with crafted rows. */
@@ -168,7 +180,7 @@ test("usage: the chart draws the API's rows, and its table and the page's table 
   await hoverSlot(page, today);
   await expect(tooltip(page)).toBeVisible();
   for (const model of tokens.keys()) await expect(tooltip(page)).toContainText(model);
-  await expect(tooltip(page)).toContainText(`${total.toLocaleString()} tokens`);
+  await expect(tooltip(page)).toContainText(`${compact(total)} tokens`);
 
   // The bars are really drawn: segments, colours and heights that follow the axis; the empty day has none.
   await expectBarGeometry(page, today, tokens);
@@ -293,7 +305,7 @@ test("series: eight hues, and the tail folds into Other with its names in the to
   await expect(tooltip(page).getByTestId("usage-chart-tooltip-name")).toHaveCount(6);
   await expect(tooltip(page).getByTestId("usage-chart-tooltip-more")).toHaveText("3 more in the data table");
   await expect(tooltip(page)).toContainText("fold/m1");
-  await expect(tooltip(page)).toContainText(`${sumBy(await apiRows(request, day, day), "total_tokens").toLocaleString()} tokens`);
+  await expect(tooltip(page)).toContainText(`${compact(sumBy(await apiRows(request, day, day), "total_tokens"))} tokens`);
   // Everything the tooltip left out is in the data table.
   await page.getByTestId("usage-chart-table-toggle").click();
   for (const name of ["fold/m1", "fold/m7", "fold/m8", "Other"]) {
@@ -1001,7 +1013,7 @@ test("tooltip: measured, not estimated, so two-line names stay inside a 390 px p
   await expect(tooltip(page).getByTestId("usage-chart-tooltip-more")).toBeVisible();
   // The total still covers every row, hidden or not.
   const all = names.reduce((sum, _, index) => sum + 100_000_000 + index, 0);
-  await expect(tooltip(page)).toContainText(`${all.toLocaleString()} tokens`);
+  await expect(tooltip(page)).toContainText(`${compact(all)} tokens`);
 
   // Six short names fit, so measuring does not over-cut.
   await page.unroute("**/api/v1/usage?*");
@@ -1100,7 +1112,7 @@ test("tooltip: a refetch that keeps the row count measures the new text", async 
   // Short → long with the same six rows: the text is longer, so the tooltip must measure again and drop rows.
   long = true;
   await refresh();
-  await expect(tip).toContainText("600,000,000 tokens");
+  await expect(tip).toContainText("600M tokens");
   await expect.poll(async () => (await snap()).overflow).toBeLessThanOrEqual(0);
   const wide = await snap();
   expect(wide.hidden).toBeGreaterThan(0);

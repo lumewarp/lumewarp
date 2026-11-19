@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { lazy, Suspense, useEffect, useMemo, useState, type ComponentProps } from "react";
 import { api, type UsageQuery, type UsageRow } from "../api";
-import { Badge, fmtNumber as n, fmtUsd, PageHeader, TypeBadge } from "../components/Bits";
+import { Badge, fmtCompact, fmtNumber as n, fmtUsd, PageHeader, TypeBadge } from "../components/Bits";
 import { FilterBar } from "../components/FilterBar";
 import { SelectField, TextField } from "../components/Form";
 import { UsageChart } from "../components/UsageChart";
@@ -89,11 +89,14 @@ const daysAgo = (count: number) => new Date(today.getTime() - count * 86_400_000
 
 type Row = UsageRow;
 
-export function Stat({ label, value }: { label: string; value: string }) {
+/** A summary tile; `title` carries the exact value when `value` is shortened. */
+export function Stat({ label, value, title }: { label: string; value: string; title?: string }) {
   return (
     <Card className="gap-0 p-3.5">
       <div className="text-muted-foreground">{label}</div>
-      <div className="text-2xl font-bold tabular-nums">{value}</div>
+      <div className="text-2xl font-bold tabular-nums" title={title}>
+        {value}
+      </div>
     </Card>
   );
 }
@@ -419,10 +422,10 @@ function LlmUsage({ range }: { range: RangeProps }) {
         <SelectField label="Group by" value={groupBy} onChange={setGroupBy} options={groupOptions} />
       </FilterBar>
       <div className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3">
-        <Stat label="Requests" value={n(total.requests)} />
+        <Stat label="Requests" value={fmtCompact(total.requests)} title={n(total.requests)} />
         {total.audio > 0 && <Stat label="Audio (seconds)" value={fmtSeconds(total.audio)} />}
-        <Stat label="Total tokens" value={n(total.tokens)} />
-        <Stat label="Prompt / completion" value={`${n(total.prompt)} / ${n(total.completion)}`} />
+        <Stat label="Total tokens" value={fmtCompact(total.tokens)} title={n(total.tokens)} />
+        <Stat label="Prompt / completion" value={`${fmtCompact(total.prompt)} / ${fmtCompact(total.completion)}`} title={`${n(total.prompt)} / ${n(total.completion)}`} />
         <Stat label="Spend" value={fmtUsd(total.cost)} />
       </div>
       {total.unpriced > 0 && <p className="text-muted-foreground">{n(total.unpriced)} request(s) had no price configured and are counted at $0.</p>}
@@ -564,8 +567,8 @@ function TrafficUsage({ kind, range }: { kind: "mcp" | "a2a"; range: RangeProps 
         <SelectField label="Group by" value={groupBy} onChange={setGroupBy} options={groups} />
       </FilterBar>
       <div className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3">
-        <Stat label="Requests" value={n(total.requests)} />
-        <Stat label="Errors" value={n(total.errors)} />
+        <Stat label="Requests" value={fmtCompact(total.requests)} title={n(total.requests)} />
+        <Stat label="Errors" value={fmtCompact(total.errors)} title={n(total.errors)} />
         <Stat label="Error share" value={fmtShare(total.errors, total.requests)} />
         <Stat label="Mean duration" value={fmtDuration(total.requests ? total.duration / total.requests : 0)} />
       </div>
