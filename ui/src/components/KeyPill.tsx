@@ -16,6 +16,12 @@ export type KeyLike = {
   rule_violations?: string[] | null;
 };
 
+const VIOLATION_TEXT: Record<string, string> = {
+  user_keys_allowed: "the zone no longer allows user keys",
+  service_account_keys_allowed: "the zone no longer allows service-account keys",
+};
+const violationText = (code: string) => VIOLATION_TEXT[code] ?? code;
+
 /** A warning badge when a key breaks a rule its zone tightened after it was made; nothing otherwise. */
 export function RuleViolationBadge({ keyRef }: { keyRef: Pick<KeyLike, "rule_violations"> | null | undefined }) {
   const violations = keyRef?.rule_violations ?? [];
@@ -23,13 +29,13 @@ export function RuleViolationBadge({ keyRef }: { keyRef: Pick<KeyLike, "rule_vio
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <Badge variant="warn" tabIndex={0} data-testid="rule-violations" aria-label={`Breaks zone rules: ${violations.join(", ")}`}>
+        <Badge variant="warn" tabIndex={0} data-testid="rule-violations" aria-label={`Breaks zone rules: ${violations.map(violationText).join(", ")}`}>
           <TriangleAlertIcon aria-hidden="true" />
           Breaks zone rules
         </Badge>
       </TooltipTrigger>
       <TooltipContent className="max-w-[min(24rem,calc(100vw-2rem))]">
-        The key keeps working until it expires or is rotated: {violations.join(", ")}.
+        The key keeps working until it expires or is rotated: {violations.map(violationText).join(", ")}.
       </TooltipContent>
     </Tooltip>
   );

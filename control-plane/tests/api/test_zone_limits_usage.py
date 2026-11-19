@@ -267,6 +267,7 @@ async def test_users_me_reports_limits_and_rules_per_zone(client, committed) -> 
         committed,
         name="Dev",
         playground_allowed=False,
+        user_keys_allowed=False,
         key_max_lifetime_seconds=600,
         key_min_creator_role="team_admin",
     )
@@ -285,6 +286,8 @@ async def test_users_me_reports_limits_and_rules_per_zone(client, committed) -> 
     assert dev["name"] == "Dev"
     assert dev["limits"]["rpm_limit"] == 40
     assert dev["key_rules"]["playground_allowed"] is False
+    assert dev["key_rules"]["user_keys_allowed"] is False
+    assert row["by_zone"]["api-test"]["key_rules"]["user_keys_allowed"] is True
     assert dev["key_rules"]["key_max_lifetime_seconds"] == 600
     assert dev["key_rules"]["key_min_creator_role"] == "team_admin"
     assert dev["key_rules"]["key_max_per_member"] is None

@@ -89,6 +89,7 @@ BY_NAME: dict[str, str] = {
         " keys do not count."
     ),
     "service_account_keys_allowed": "Allow creating service-account keys in this zone.",
+    "user_keys_allowed": "Allow creating user-owned keys in this zone.",
     "playground_allowed": "Allow this zone's keys in the Playground.",
     # Tenancy
     "name": "Display name, 1 to 200 characters.",

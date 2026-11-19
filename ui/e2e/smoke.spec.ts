@@ -127,6 +127,7 @@ test("cookie session: CSRF on writes, inline member errors, key owner state, log
             key_max_lifetime_seconds: null,
             key_expiry_required: false,
             key_max_per_member: null,
+            user_keys_allowed: true,
             service_account_keys_allowed: true,
             playground_allowed: true,
           },

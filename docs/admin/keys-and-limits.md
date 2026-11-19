@@ -43,7 +43,7 @@ A key without limits emits no key scope and costs nothing on the request path.
 
 A key is created in the selected zone (`KeyCreate.zone`; omitted by the API means the
 configured default zone). The zone can require an expiry, cap lifetime, set the minimum
-creator role, cap each member's user-key count, and allow or forbid service-account keys.
+creator role, cap each member's user-key count, and allow or forbid user keys and service-account keys.
 The effective member count cap is the lower of the zone and team caps, counted within that
 zone; service-account keys do not count. For a user-owned key, lifetime is capped by the
 lower of the zone and team limits; for a service-account key, the zone limit applies. A key
@@ -51,7 +51,8 @@ without an expiry gets the effective cap as its expiry when one applies. When ex
 required, a missing expiry is rejected.
 
 Creation checks the caller's role against the zone minimum (installation admins may always
-create keys; for service-account keys the caller's role is checked). Creation, rotation,
+create keys; for service-account keys the caller's role is checked). A zone that forbids
+user keys refuses creating, rotating or resuming a user-owned key there for every role. Creation, rotation,
 updates and resume enforce the applicable current zone rules. Tightening a rule does not
 silently revoke an existing key; its `rule_violations` are returned for administrators to
 review. Lowering a count cap only rejects later creates; rotation does not add a key.

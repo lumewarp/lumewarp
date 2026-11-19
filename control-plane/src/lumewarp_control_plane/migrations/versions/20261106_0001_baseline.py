@@ -466,6 +466,7 @@ def upgrade() -> None:
         sa.Column(
             "service_account_keys_allowed", sa.Boolean(), server_default="true", nullable=False
         ),
+        sa.Column("user_keys_allowed", sa.Boolean(), server_default="true", nullable=False),
         sa.Column("playground_allowed", sa.Boolean(), server_default="true", nullable=False),
         sa.Column(
             "created_at",

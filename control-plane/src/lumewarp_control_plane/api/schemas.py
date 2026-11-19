@@ -1725,6 +1725,7 @@ class MeKeyRulesOut(ApiModel):
         description="The effective per-member cap in this zone: min(zone, team); null = none."
     )
     service_account_keys_allowed: bool
+    user_keys_allowed: bool
     playground_allowed: bool
 
 
@@ -2033,6 +2034,7 @@ class ZoneKeyRules(ApiModel):
     key_expiry_required: bool = False
     key_max_per_member: int | None = Field(default=None, gt=0)
     service_account_keys_allowed: bool = True
+    user_keys_allowed: bool = True
     playground_allowed: bool = True
 
 
@@ -2047,6 +2049,7 @@ class ZoneUpdate(ApiModel):
     key_expiry_required: bool | None = None
     key_max_per_member: int | None = Field(default=None, gt=0)
     service_account_keys_allowed: bool | None = None
+    user_keys_allowed: bool | None = None
     playground_allowed: bool | None = None
 
 
@@ -2063,6 +2066,7 @@ class ZoneOut(ReadModel):
     key_expiry_required: bool
     key_max_per_member: int | None
     service_account_keys_allowed: bool
+    user_keys_allowed: bool
     playground_allowed: bool
     token_configured: bool = Field(
         description=(

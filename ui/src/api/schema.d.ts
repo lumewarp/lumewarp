@@ -330,7 +330,8 @@ export interface paths {
          * @description Create a virtual API key (`lw-…`). The secret is in this response only. Without
          *     `service_account_id` the key belongs to the caller, who must belong to or administer the
          *     team, and the team's `max_keys_per_member` and `max_member_key_lifetime_seconds` apply. A
-         *     key for a service account requires a team admin. The key's limits may not exceed its owner's
+         *     key for a service account requires a team admin. A zone may refuse user-owned keys
+         *     (`user_keys_allowed`) or service-account keys. The key's limits may not exceed its owner's
          *     effective limits, and with `model_access` `list` its models must be within the owner's.
          *     Limited to 30 attempts per 60 seconds per caller (429).
          */
@@ -3083,6 +3084,8 @@ export interface components {
             key_max_per_member: number | null;
             /** Service Account Keys Allowed */
             service_account_keys_allowed: boolean;
+            /** User Keys Allowed */
+            user_keys_allowed: boolean;
             /** Playground Allowed */
             playground_allowed: boolean;
         };
@@ -6017,6 +6020,8 @@ export interface components {
             key_max_per_member: number | null;
             /** Service Account Keys Allowed */
             service_account_keys_allowed: boolean;
+            /** User Keys Allowed */
+            user_keys_allowed: boolean;
             /** Playground Allowed */
             playground_allowed: boolean;
             /**
@@ -6067,6 +6072,11 @@ export interface components {
              * @description Allow creating service-account keys in this zone.
              */
             service_account_keys_allowed?: boolean | null;
+            /**
+             * User Keys Allowed
+             * @description Allow creating user-owned keys in this zone.
+             */
+            user_keys_allowed?: boolean | null;
             /**
              * Playground Allowed
              * @description Allow this zone's keys in the Playground.

@@ -86,7 +86,7 @@ export function KeyLimitFields({
 }
 
 /** The rules a zone sets for keys created in it. */
-export type ZoneKeyRules = Pick<Zone, "key_min_creator_role" | "key_max_lifetime_seconds" | "key_expiry_required" | "key_max_per_member" | "service_account_keys_allowed" | "playground_allowed">;
+export type ZoneKeyRules = Pick<Zone, "key_min_creator_role" | "key_max_lifetime_seconds" | "key_expiry_required" | "key_max_per_member" | "user_keys_allowed" | "service_account_keys_allowed" | "playground_allowed">;
 
 const ROLE_RANK = { member: 0, team_admin: 1, org_admin: 2 } as const;
 const MIN_ROLE_TEXT = { member: "a member", team_admin: "a team admin", org_admin: "an org admin" } as const;
@@ -103,6 +103,7 @@ export function keyCreationBlock(
 ): string | null {
   if (!rules) return null;
   const rank = inherited ? 2 : role === "admin" ? 1 : 0;
+  if (!serviceAccount && !rules.user_keys_allowed) return `${zoneLabel} does not allow user keys.`;
   if (serviceAccount && !rules.service_account_keys_allowed) return `${zoneLabel} does not allow service-account keys.`;
   if (rank < ROLE_RANK[rules.key_min_creator_role]) return `Keys in ${zoneLabel} can only be created by ${MIN_ROLE_TEXT[rules.key_min_creator_role]} or above.`;
   return null;

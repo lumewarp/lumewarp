@@ -237,6 +237,66 @@ async def test_service_account_keys_can_be_disallowed(client, committed) -> None
     assert "service-account" in rotate.json()["error"]["message"]
 
 
+async def test_user_keys_can_be_disallowed(client, committed) -> None:
+    zone = await create_zone(client, committed)
+    team, _, admin_token = await team_admin(committed)
+    member, member_token = await user_with_token(committed)
+    await make_member(committed, team, member)
+    account = await make_service_account(committed, team)
+    await committed.commit()
+    created = create_key(client, team, admin_token, zone=zone["id"])
+    assert created.status_code == 201, created.text
+    tightened = client.patch(
+        f"/api/v1/zones/{zone['id']}",
+        json={"user_keys_allowed": False},
+        headers=ADMIN_AUTH,
+    )
+    assert tightened.status_code == 200, tightened.text
+    # A team admin and a plain member are refused alike.
+    for token in (admin_token, member_token):
+        refused = create_key(client, team, token, zone=zone["id"])
+        assert refused.status_code == 422, refused.text
+        assert "does not allow user keys" in refused.json()["error"]["message"]
+    # Service-account keys are still allowed in this zone.
+    service = create_key(
+        client, team, admin_token, zone=zone["id"], service_account_id=str(account.id)
+    )
+    assert service.status_code == 201, service.text
+    # An existing key keeps working until rotation, which the tightened rule refuses.
+    rotate = client.post(f"/api/v1/keys/{created.json()['key']['id']}/rotate", headers=ADMIN_AUTH)
+    assert rotate.status_code == 409, rotate.text
+    assert "does not allow user keys" in rotate.json()["error"]["message"]
+
+
+async def test_tightened_user_rule_flags_the_key_and_it_keeps_working(
+    client, committed, api_engine
+) -> None:
+    zone = await create_zone(client, committed)
+    team, _, token = await team_admin(committed)
+    created = create_key(client, team, token, zone=zone["id"])
+    assert created.status_code == 201, created.text
+    key_id = created.json()["key"]["id"]
+
+    tightened = client.patch(
+        f"/api/v1/zones/{zone['id']}",
+        json={"user_keys_allowed": False},
+        headers=ADMIN_AUTH,
+    )
+    assert tightened.status_code == 200, tightened.text
+
+    rows = client.get(
+        f"/api/v1/teams/{team.id}/keys",
+        params={"zone": zone["id"]},
+        headers=ADMIN_AUTH,
+    ).json()["items"]
+    row = next(item for item in rows if item["id"] == key_id)
+    assert "user_keys_allowed" in row["rule_violations"]
+    assert row["lifecycle"] == "active"
+    # The tightened rule does not remove the key from the snapshot.
+    wire = await compile_key(api_engine, zone["id"], uuid.UUID(key_id))
+    assert wire is not None and wire.status == pb.KEY_STATUS_ACTIVE
+
+
 async def test_tightened_rules_flag_the_key_and_it_keeps_working(
     client, committed, api_engine
 ) -> None:

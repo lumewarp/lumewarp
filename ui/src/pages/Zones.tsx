@@ -41,6 +41,7 @@ interface Values {
   key_max_lifetime_days: number | null;
   key_expiry_required: boolean;
   key_max_per_member: number | null;
+  user_keys_allowed: boolean;
   service_account_keys_allowed: boolean;
   playground_allowed: boolean;
 }
@@ -55,6 +56,7 @@ const from = (z: Zone): Values => ({
   key_max_lifetime_days: z.key_max_lifetime_seconds === null ? null : z.key_max_lifetime_seconds / DAY,
   key_expiry_required: z.key_expiry_required,
   key_max_per_member: z.key_max_per_member,
+  user_keys_allowed: z.user_keys_allowed,
   service_account_keys_allowed: z.service_account_keys_allowed,
   playground_allowed: z.playground_allowed,
 });
@@ -68,6 +70,7 @@ function rules(v: Values) {
     key_max_lifetime_seconds: v.key_max_lifetime_days === null ? null : Math.round(v.key_max_lifetime_days * DAY),
     key_expiry_required: v.key_expiry_required,
     key_max_per_member: v.key_max_per_member,
+    user_keys_allowed: v.user_keys_allowed,
     service_account_keys_allowed: v.service_account_keys_allowed,
     playground_allowed: v.playground_allowed,
   };
@@ -123,6 +126,12 @@ function ZoneEditor({ zone, onClose }: { zone: Zone; onClose: () => void }) {
         hint="Service-account keys do not count."
       />
       <CheckField label="A key needs an expiry" checked={form.values.key_expiry_required} onChange={(value) => form.set("key_expiry_required", value)} />
+      <CheckField
+        label="Allow user keys"
+        checked={form.values.user_keys_allowed}
+        onChange={(value) => form.set("user_keys_allowed", value)}
+        hint="Off refuses creating, rotating and resuming keys owned by users in this zone; existing user keys keep working and are flagged."
+      />
       <CheckField label="Allow service-account keys" checked={form.values.service_account_keys_allowed} onChange={(value) => form.set("service_account_keys_allowed", value)} />
       <CheckField label="Allow the Playground" checked={form.values.playground_allowed} onChange={(value) => form.set("playground_allowed", value)} />
     </FormDialog>
@@ -196,6 +205,7 @@ export function Zones() {
                 {z.key_max_lifetime_seconds !== null && <Badge>max {Math.round((z.key_max_lifetime_seconds / DAY) * 10) / 10} d</Badge>}
                 {z.key_expiry_required && <Badge>expiry required</Badge>}
                 {z.key_max_per_member !== null && <Badge>{z.key_max_per_member} per member</Badge>}
+                {!z.user_keys_allowed && <Badge tone="warn">no user keys</Badge>}
                 {!z.service_account_keys_allowed && <Badge tone="warn">no service-account keys</Badge>}
                 {!z.playground_allowed && <Badge tone="warn">no Playground</Badge>}
               </span>

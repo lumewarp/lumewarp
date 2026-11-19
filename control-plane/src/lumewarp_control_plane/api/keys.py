@@ -510,6 +510,8 @@ def _violations(
     user_key = key.owner_kind is KeyOwnerKind.USER
     if key.owner_kind is KeyOwnerKind.SERVICE_ACCOUNT and not zone.service_account_keys_allowed:
         out.append("service_account_keys_allowed")
+    if key.owner_kind is KeyOwnerKind.USER and not zone.user_keys_allowed:
+        out.append("user_keys_allowed")
     if zone.key_expiry_required and key.expires_at is None:
         out.append("key_expiry_required")
     cap = _lifetime_cap(zone, team, user_key=user_key)
@@ -885,7 +887,8 @@ async def create_key(
     """Create a virtual API key (`lw-…`). The secret is in this response only. Without
     `service_account_id` the key belongs to the caller, who must belong to or administer the
     team, and the team's `max_keys_per_member` and `max_member_key_lifetime_seconds` apply. A
-    key for a service account requires a team admin. The key's limits may not exceed its owner's
+    key for a service account requires a team admin. A zone may refuse user-owned keys
+    (`user_keys_allowed`) or service-account keys. The key's limits may not exceed its owner's
     effective limits, and with `model_access` `list` its models must be within the owner's.
     Limited to 30 attempts per 60 seconds per caller (429).
     """
@@ -902,6 +905,8 @@ async def create_key(
             )
         if body.service_account_id is None:
             await authz.require(Action.KEY_CREATE_OWN, team.id)
+            if not zone.user_keys_allowed:
+                raise validation_error("zone", f"zone {zone.id!r} does not allow user keys")
             user_id = authz.user_id
             if user_id is None or not await _may_own_keys(session, authz, team.id, user_id):
                 raise validation_error("team_id", "not a member or admin of this team")
@@ -1072,6 +1077,8 @@ async def update_key(
                 if zone_row is not None and not zone_row.service_account_keys_allowed:
                     raise conflict(f"zone {row.zone!r} does not allow service-account keys")
             elif zone_row is not None:
+                if not zone_row.user_keys_allowed:
+                    raise conflict(f"zone {row.zone!r} does not allow user keys")
                 team = await _live_team_or_404(session, row.team_id)
                 if zone_row.key_expiry_required and row.expires_at is None:
                     raise conflict(
@@ -1186,6 +1193,8 @@ async def rotate_key(
             and not zone_row.service_account_keys_allowed
         ):
             raise conflict(f"zone {row.zone!r} does not allow service-account keys")
+        if row.owner_kind is KeyOwnerKind.USER and not zone_row.user_keys_allowed:
+            raise conflict(f"zone {row.zone!r} does not allow user keys")
         row.expires_at = _expiry_for_create(
             zone_row,
             team,

@@ -49,11 +49,19 @@ using its token.
 A zone has an immutable lowercase ID (the slug gateways pass as `--zone` and the API uses),
 a name shown in the Admin UI, which can be changed, and a colour. Its settings also define key rules: the minimum creator role, the maximum key
 lifetime, whether expiry is required, the maximum number of user keys per member, whether
-service-account keys are allowed, and whether the Playground is allowed. Empty maximums
+user keys are allowed, whether service-account keys are allowed, and whether the Playground is allowed. Empty maximums
 leave that zone without an additional cap; a team's own key limits still apply. Changing a
 rule does not silently revoke existing keys; keys that no longer satisfy a tightened rule
 are reported as rule violations, and current lifecycle rules are checked when a key is
 created, rotated, changed or resumed.
+
+Turning off user keys makes a zone service-account only, for example a production zone:
+creating a user-owned key there is refused (422 on `zone`) for every role, including team
+admins, org admins and installation admins, and rotating or resuming one is refused with
+409. Existing user keys keep working and are reported with the `user_keys_allowed` rule
+violation; service-account keys are unaffected. My keys and a team's Keys tab explain that
+the zone does not allow user keys instead of offering to create one, and `GET /users/me`
+reports the rule per team and zone.
 
 A zone's Playground gateway URL is configured separately for each zone. The Playground
 uses the URL belonging to the selected key's zone; the zone must also allow Playground use.

@@ -424,6 +424,7 @@ class Zone(Base):
     service_account_keys_allowed: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="true"
     )
+    user_keys_allowed: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
     playground_allowed: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
     created_at: Mapped[datetime] = _now()
 

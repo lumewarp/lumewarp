@@ -56,6 +56,7 @@ def _out(row: Zone, settings: Settings) -> ZoneOut:
         key_expiry_required=row.key_expiry_required,
         key_max_per_member=row.key_max_per_member,
         service_account_keys_allowed=row.service_account_keys_allowed,
+        user_keys_allowed=row.user_keys_allowed,
         playground_allowed=row.playground_allowed,
         token_configured=row.id in settings.gateway_zone_tokens,
     )
@@ -136,6 +137,7 @@ async def update_zone(
         "key_min_creator_role",
         "key_expiry_required",
         "service_account_keys_allowed",
+        "user_keys_allowed",
         "playground_allowed",
     )
     async with mutation(session):

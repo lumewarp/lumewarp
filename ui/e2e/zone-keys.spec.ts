@@ -23,6 +23,7 @@ test.beforeEach(async ({ request }) => {
     key_max_lifetime_seconds: 7 * 86_400,
     key_expiry_required: false,
     key_max_per_member: null,
+    user_keys_allowed: true,
     service_account_keys_allowed: true,
     playground_allowed: false,
     playground_gateway_url: null,
@@ -83,6 +84,51 @@ test("a rule the zone sets blocks creation with the reason", async ({ page, requ
   } finally {
     await request.patch(`/api/v1/zones/${ZONE}`, { headers: admin.headers, data: { key_min_creator_role: "member" } });
   }
+});
+
+test("a zone that refuses user keys blocks creation with the reason, and flags a key made before", async ({ page, request }) => {
+  const team = await admin.ensureTeam("zk-user-rule");
+  await admin.putMember(team.id, VIEWER_EMAIL);
+  await inZone(page, ZONE);
+  await signIn(page, VIEWER, "/my-keys");
+
+  // A key made while the zone allows it.
+  await page.getByTestId("team-zk-user-rule").getByRole("button", { name: "New key" }).click();
+  let form = page.getByRole("dialog", { name: /New key in zk-user-rule/ });
+  await form.getByLabel("Name", { exact: true }).fill("zk-user-old");
+  await form.getByRole("button", { name: "Create key" }).click();
+  await page.getByRole("button", { name: /saved it/ }).click();
+
+  const patched = await request.patch(`/api/v1/zones/${ZONE}`, { headers: admin.headers, data: { user_keys_allowed: false } });
+  expect(patched.status(), await patched.text()).toBe(200);
+  try {
+    await page.reload();
+    await page.getByTestId("team-zk-user-rule").getByRole("button", { name: "New key" }).click();
+    form = page.getByRole("dialog", { name: /New key in zk-user-rule/ });
+    await expect(form.getByTestId("key-blocked")).toContainText(`${LABEL} does not allow user keys.`);
+    await expect(form.getByRole("button", { name: "Create key" })).toBeDisabled();
+    await page.keyboard.press("Escape");
+
+    // The key made before keeps working and says which rule it breaks.
+    const badge = page.getByTestId("my-keys").getByTestId("rule-violations").first();
+    await expect(badge).toBeVisible();
+    await expect(badge).toHaveAttribute("aria-label", /the zone no longer allows user keys/);
+  } finally {
+    await request.patch(`/api/v1/zones/${ZONE}`, { headers: admin.headers, data: { user_keys_allowed: true } });
+  }
+});
+
+test("the zone form switches user keys off and the zone list says so", async ({ page }) => {
+  await adminPage(page);
+  await page.goto("/zones");
+  await page.getByRole("row").filter({ hasText: ZONE }).getByRole("button", { name: "Edit" }).click();
+  const form = dialog(page);
+  await form.getByLabel("Allow user keys").click();
+  await form.getByRole("button", { name: "Save" }).click();
+  await expect(form).toHaveCount(0);
+  await expect(page.getByRole("row").filter({ hasText: ZONE })).toContainText("no user keys");
+  const zones = await admin.get<{ items: { id: string; user_keys_allowed: boolean }[] }>("/zones");
+  expect(zones.items.find((zone) => zone.id === ZONE)?.user_keys_allowed).toBe(false);
 });
 
 test("team limits are edited per zone: a value set in the default zone does not appear in zone B", async ({ page }) => {

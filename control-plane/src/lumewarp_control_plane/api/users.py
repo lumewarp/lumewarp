@@ -417,6 +417,7 @@ async def _team_details(
                         zone_row.key_max_per_member, team.max_keys_per_member
                     ),
                     service_account_keys_allowed=zone_row.service_account_keys_allowed,
+                    user_keys_allowed=zone_row.user_keys_allowed,
                     playground_allowed=zone_row.playground_allowed,
                 ),
                 key_count=key_counts.get((zone, team.id), 0),

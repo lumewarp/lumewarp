@@ -129,6 +129,7 @@ DETAIL_ALLOWLIST: dict[str, dict[str, DetailSpec]] = {
             "key_expiry_required": None,
             "key_max_per_member": None,
             "service_account_keys_allowed": None,
+            "user_keys_allowed": None,
             "playground_allowed": None,
         },
     },
