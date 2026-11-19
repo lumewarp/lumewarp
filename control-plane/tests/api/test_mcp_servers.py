@@ -20,7 +20,6 @@ from lumewarp_control_plane.mcp import discover, hashing
 from lumewarp_control_plane.models import (
     AuditLog,
     GatewaySession,
-    GatewayToken,
     McpDefinition,
     McpDefinitionKind,
     McpDefinitionState,
@@ -84,7 +83,6 @@ async def gateway(committed: AsyncSession, api_scope: str) -> AsyncIterator:
 
     yield report
     await committed.rollback()
-    await committed.execute(delete(GatewayToken).where(GatewayToken.name.like(f"{PREFIX}%")))
     await committed.execute(
         delete(GatewaySession).where(GatewaySession.gateway_id.like(f"{PREFIX}%"))
     )

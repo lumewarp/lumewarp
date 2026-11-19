@@ -27,7 +27,7 @@ OCT = datetime(2026, 10, 15, tzinfo=UTC)
 
 async def seed_scope(factory: SessionFactory, name: str = SCOPE) -> None:
     async with factory() as s, s.begin():
-        s.add(Zone(name=name))
+        s.add(Zone(id=name, name=name))
 
 
 async def touch(factory: SessionFactory, reason: str = "test") -> int:

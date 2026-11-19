@@ -71,7 +71,7 @@ async def test_config_insert_serialization_conflict_retries_fresh_snapshot(
             text("""
             CREATE FUNCTION conflict_on_config_insert() RETURNS trigger LANGUAGE plpgsql AS $$
             BEGIN
-                PERFORM 1 FROM zones WHERE name = NEW.zone FOR UPDATE;
+                PERFORM 1 FROM zones WHERE id = NEW.zone FOR UPDATE;
                 RETURN NEW;
             END $$
         """)

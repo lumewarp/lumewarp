@@ -190,6 +190,7 @@ BY_NAME: dict[str, str] = {
 }
 
 BY_MODEL: dict[tuple[str, str], str] = {
+    ("ZoneUpdate", "name"): "Display name, 1 to 200 characters.",
     ("TeamCreate", "name"): "Team name, unique among live teams.",
     ("TeamUpdate", "name"): "Team name, unique among live teams.",
     ("TeamCreate", "org_id"): "The org the team belongs to. It cannot be changed later.",
@@ -261,7 +262,6 @@ BY_MODEL: dict[tuple[str, str], str] = {
         "How long the previous secret keeps authenticating, at most 86400; 0 replaces it at once."
     ),
     ("TokenCreate", "name"): "A label for the token.",
-    ("GatewayTokenCreate", "name"): "A label for the token.",
     ("RollbackCreate", "version"): "The config version to restore.",
     ("UpstreamCreate", "name"): "Unique upstream name.",
     ("UpstreamUpdate", "name"): "Unique upstream name.",

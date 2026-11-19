@@ -357,7 +357,7 @@ async def compile_zone(
     max_keys = max_snapshot_keys or settings.max_snapshot_keys
     warnings: list[str] = []
 
-    revision = await session.scalar(select(Zone.source_revision).where(Zone.name == zone))
+    revision = await session.scalar(select(Zone.source_revision).where(Zone.id == zone))
     if revision is None:
         raise CompileError(f"unknown config zone {zone!r}")
 

@@ -72,7 +72,7 @@ async def _seed(
     factories.DEFAULT_ZONE = scope_name
     try:
         async with factory() as session, session.begin():
-            session.add(Zone(name=scope_name))
+            session.add(Zone(id=scope_name, name=scope_name))
             team = await factories.make_team(
                 session,
                 name=f"usage-team-{suffix}",
@@ -488,7 +488,7 @@ async def test_monthly_rollover_runs_on_startup(session_factory: SessionFactory,
 
     scope_name = f"rollover-{uuid7().hex}"
     async with session_factory() as session, session.begin():
-        session.add(Zone(name=scope_name))
+        session.add(Zone(id=scope_name, name=scope_name))
     from lumewarp_control_plane.settings import Settings
 
     rolled_over = asyncio.Event()
@@ -711,7 +711,7 @@ async def test_usage_report_metrics_count_committed_events(
     monkeypatch.setattr(
         grpc_module,
         "_identity",
-        lambda: grpc_module.GatewayIdentity(uuid7(), scope_name),
+        lambda: grpc_module.GatewayIdentity(scope_name),
     )
 
     class Aborted(Exception):

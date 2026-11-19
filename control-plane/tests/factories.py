@@ -61,7 +61,7 @@ async def zone(session: AsyncSession, name: str = "default") -> Zone:
     """The zone row, created if absent (another fixture may have committed it)."""
     row = await session.get(Zone, name)
     if row is None:
-        row = Zone(name=name)
+        row = Zone(id=name, name=name)
         session.add(row)
         await session.flush()
     return row
@@ -122,7 +122,7 @@ async def grant(
 async def ensure_zone(session: AsyncSession, name: str) -> None:
     """The zone row, created if the test did not seed it (an upstream/model needs one)."""
     if await session.get(Zone, name) is None:
-        session.add(Zone(name=name))
+        session.add(Zone(id=name, name=name))
         await session.flush()
 
 

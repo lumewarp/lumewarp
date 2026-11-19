@@ -15,12 +15,7 @@ from lumewarp_control_plane import upstream_client
 from lumewarp_control_plane._proto.lumewarp.config.v1 import config_service_pb2 as cpb
 from lumewarp_control_plane.compiler.compile import compile_zone
 from lumewarp_control_plane.grpc import ProbeGatewayGone, ProbeTimeout, ProbeUnavailable
-from lumewarp_control_plane.models import (
-    AuditLog,
-    GatewaySession,
-    GatewayToken,
-    Upstream,
-)
+from lumewarp_control_plane.models import AuditLog, GatewaySession, Upstream
 from tests.api.helpers import ADMIN_AUTH, app_zone, create_model, report_plugins, suffix
 
 H = ADMIN_AUTH
@@ -101,7 +96,6 @@ async def gateway(committed: AsyncSession, api_scope: str) -> AsyncIterator:
 
     yield report
     await committed.rollback()
-    await committed.execute(delete(GatewayToken).where(GatewayToken.name.like(f"{PREFIX}%")))
     await committed.execute(
         delete(GatewaySession).where(GatewaySession.gateway_id.like(f"{PREFIX}%"))
     )

@@ -1,4 +1,4 @@
-"""Zones API: CRUD, validation, permissions and archive rules.
+"""Zones: env-declared startup rows, update/archive rules and permissions.
 
 Self-contained: its own migrated database and app, so it does not share the admin API
 fixtures (and their rows) with other test modules.
@@ -7,6 +7,7 @@ fixtures (and their rows) with other test modules.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import uuid
 from collections.abc import AsyncIterator
 
@@ -15,26 +16,30 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
-from lumewarp_control_plane.app import create_app, ensure_zone
-from lumewarp_control_plane.db import create_session_factory
+from lumewarp_control_plane.app import create_app
 from lumewarp_control_plane.models import (
     ConfigOutbox,
     GatewaySession,
-    GatewayToken,
     PersonalAccessToken,
     Zone,
 )
 from lumewarp_control_plane.security import SecretKind, generate_secret
-from lumewarp_control_plane.settings import Settings
+from lumewarp_control_plane.settings import Settings, gateway_zone_tokens
+from lumewarp_control_plane.zones import ensure_zones
 from tests.conftest import migrated_database
 from tests.factories import make_user
 
 DEFAULT_ZONE = "zone-api-test"
 ADMIN_PASSWORD = "test-zones-password"
+DEFAULT_TOKEN = "z" * 32
 
 
 def _name() -> str:
     return f"zone-{uuid.uuid4().hex[:10]}"
+
+
+def _digest(token: str) -> bytes:
+    return hashlib.sha256(token.encode()).digest()
 
 
 @pytest.fixture(scope="module")
@@ -53,7 +58,7 @@ async def zones_engine(zones_url: str) -> AsyncIterator[AsyncEngine]:
 @pytest.fixture(scope="module")
 async def zones_scope(zones_engine: AsyncEngine) -> None:
     async with AsyncSession(zones_engine) as session, session.begin():
-        session.add(Zone(name=DEFAULT_ZONE))
+        session.add(Zone(id=DEFAULT_ZONE, name=DEFAULT_ZONE))
 
 
 @pytest.fixture(scope="module")
@@ -65,6 +70,7 @@ def zones_settings(zones_url: str, zones_scope: None) -> Settings:
         dev_mode=True,
         session_cookie_secure=False,
         zone=DEFAULT_ZONE,
+        gateway_zone_tokens={DEFAULT_ZONE: _digest(DEFAULT_TOKEN)},
     )
 
 
@@ -95,31 +101,65 @@ def admin(client) -> dict[str, str]:
     return {"X-Lumewarp-CSRF": client.get("/api/v1/session").json()["csrf_token"]}
 
 
-async def test_default_zone_is_created_at_startup(zones_engine: AsyncEngine) -> None:
-    factory = create_session_factory(zones_engine)
+def test_gateway_zone_tokens_are_parsed_and_validated() -> None:
+    parsed = gateway_zone_tokens(
+        {
+            "LUMEWARP_GATEWAY_ZONE_PROD_EU_TOKEN": "p" * 32,
+            "LUMEWARP_GATEWAY_ZONE_DEFAULT_TOKEN": "d" * 32,
+            "UNRELATED": "ignored",
+        }
+    )
+    assert parsed == {"prod-eu": _digest("p" * 32), "default": _digest("d" * 32)}
+    assert all(isinstance(value, bytes) and len(value) == 32 for value in parsed.values())
+
+    with pytest.raises(ValueError, match="zone id"):
+        gateway_zone_tokens({"LUMEWARP_GATEWAY_ZONE_1BAD_TOKEN": "x" * 32})
+    with pytest.raises(ValueError, match="at least 32"):
+        gateway_zone_tokens({"LUMEWARP_GATEWAY_ZONE_SHORT_TOKEN": "x" * 31})
+    with pytest.raises(ValueError, match="both declare"):
+        gateway_zone_tokens(
+            {
+                "LUMEWARP_GATEWAY_ZONE_PROD_TOKEN": "x" * 32,
+                "LUMEWARP_GATEWAY_ZONE_Prod_TOKEN": "y" * 32,
+            }
+        )
+
+
+async def test_env_zones_are_created_at_startup_and_never_unarchived(
+    zones_engine: AsyncEngine,
+) -> None:
+    from lumewarp_control_plane.db import create_session_factory
+
+    session_factory = create_session_factory(zones_engine)
     settings = Settings(
         zone="bootstrap-zone",
         playground_gateway_url="http://gateway.internal:8080",
         background_enabled=False,
+        gateway_zone_tokens={
+            "prod": _digest("p" * 32),
+            "edge-zone": _digest("e" * 32),
+        },
     )
-    await ensure_zone(factory, settings)
-    async with factory() as session:
-        row = await session.get(Zone, "bootstrap-zone")
-        assert row is not None
-        assert row.display_name == "bootstrap-zone"
-        assert row.playground_gateway_url == "http://gateway.internal:8080"
-        assert row.key_min_creator_role.value == "member"
-        assert row.key_expiry_required is False
-        assert row.service_account_keys_allowed is True
-        assert row.playground_allowed is True
-    # Idempotent: an existing row is left alone (its URL is not reset).
-    async with factory() as session, session.begin():
+    await ensure_zones(session_factory, settings)
+    async with session_factory() as session:
+        rows = {row.id: row for row in (await session.scalars(select(Zone))).all()}
+    assert {"bootstrap-zone", "prod", "edge-zone"} <= set(rows)
+    assert rows["bootstrap-zone"].playground_gateway_url == "http://gateway.internal:8080"
+    assert rows["prod"].playground_gateway_url is None
+    assert rows["prod"].key_min_creator_role.value == "member"
+    assert rows["prod"].archived_at is None
+
+    # Idempotent: an existing row is left alone (its URL is not reset), and an archived zone
+    # is never un-archived by a token in the environment.
+    async with session_factory() as session, session.begin():
         (await session.get(Zone, "bootstrap-zone")).playground_gateway_url = "http://other:9000"
-    await ensure_zone(factory, settings)
-    async with factory() as session:
+        (await session.get(Zone, "prod")).archived_at = rows["prod"].created_at
+    await ensure_zones(session_factory, settings)
+    async with session_factory() as session:
         assert (await session.get(Zone, "bootstrap-zone")).playground_gateway_url == (
             "http://other:9000"
         )
+        assert (await session.get(Zone, "prod")).archived_at is not None
 
 
 async def test_any_signed_in_user_lists_zones_but_only_admins_write(
@@ -139,12 +179,18 @@ async def test_any_signed_in_user_lists_zones_but_only_admins_write(
     member = {"Authorization": f"Bearer {generated.secret}"}
     listed = client.get("/api/v1/zones", headers=member)
     assert listed.status_code == 200, listed.text
-    assert DEFAULT_ZONE in {zone["name"] for zone in listed.json()["items"]}
+    zones = {zone["id"]: zone for zone in listed.json()["items"]}
+    assert DEFAULT_ZONE in zones
+    assert zones[DEFAULT_ZONE]["token_configured"] is True
 
     name = _name()
-    body = {"name": name, "display_name": "Nope"}
-    assert client.post("/api/v1/zones", json=body, headers=member).status_code == 403
-    patch = {"display_name": "Nope"}
+    session.add(Zone(id=name, name="Nope"))
+    await session.commit()
+    patch = {"name": "Nope"}
+    assert client.post("/api/v1/zones", json={"id": _name()}, headers=admin).status_code in (
+        404,
+        405,
+    )
     assert (
         client.patch(f"/api/v1/zones/{DEFAULT_ZONE}", json=patch, headers=member).status_code == 403
     )
@@ -154,19 +200,23 @@ async def test_any_signed_in_user_lists_zones_but_only_admins_write(
     assert listed.status_code == 200
     assert all(zone["archived_at"] is None for zone in listed.json()["items"])
     # The admin route works with the break-glass session.
-    assert client.post("/api/v1/zones", json=body, headers=admin).status_code == 201
+    assert client.patch(f"/api/v1/zones/{name}", json=patch, headers=admin).status_code == 200
 
 
-async def test_zone_crud(client, admin: dict[str, str]) -> None:
+async def test_zone_update_and_listing(
+    client, admin: dict[str, str], session: AsyncSession
+) -> None:
     name = _name()
-    created = client.post(
-        "/api/v1/zones",
+    async with AsyncSession(session.bind) as other, other.begin():
+        other.add(Zone(id=name, name="Production"))
+
+    patched = client.patch(
+        f"/api/v1/zones/{name}",
         json={
-            "name": name,
-            "display_name": "Production",
-            "color": "blue",
+            "name": "Prod",
+            "color": "amber",
             "playground_gateway_url": "http://prod-gw:8080",
-            "key_min_creator_role": "team_admin",
+            "key_min_creator_role": "org_admin",
             "key_max_lifetime_seconds": 86400,
             "key_expiry_required": True,
             "key_max_per_member": 3,
@@ -175,79 +225,70 @@ async def test_zone_crud(client, admin: dict[str, str]) -> None:
         },
         headers=admin,
     )
-    assert created.status_code == 201, created.text
-    zone = created.json()
-    assert zone["name"] == name
-    assert zone["display_name"] == "Production"
-    assert zone["color"] == "blue"
-    assert zone["key_min_creator_role"] == "team_admin"
+    assert patched.status_code == 200, patched.text
+    zone = patched.json()
+    assert zone["name"] == "Prod"
+    assert zone["color"] == "amber"
+    assert zone["playground_gateway_url"] == "http://prod-gw:8080"
+    assert zone["key_min_creator_role"] == "org_admin"
     assert zone["key_max_lifetime_seconds"] == 86400
     assert zone["key_expiry_required"] is True
     assert zone["key_max_per_member"] == 3
     assert zone["service_account_keys_allowed"] is False
     assert zone["playground_allowed"] is False
-    assert zone["archived_at"] is None
-
-    duplicate = client.post("/api/v1/zones", json={"name": name}, headers=admin)
-    assert duplicate.status_code == 409
-
-    patched = client.patch(
-        f"/api/v1/zones/{name}",
-        json={
-            "display_name": "Prod",
-            "color": "amber",
-            "playground_gateway_url": None,
-            "key_max_per_member": None,
-            "key_min_creator_role": "org_admin",
-        },
-        headers=admin,
-    )
-    assert patched.status_code == 200, patched.text
-    zone = patched.json()
-    assert zone["display_name"] == "Prod"
-    assert zone["color"] == "amber"
-    assert zone["playground_gateway_url"] is None
-    assert zone["key_max_per_member"] is None
-    assert zone["key_min_creator_role"] == "org_admin"
+    assert zone["token_configured"] is False
 
     listed = client.get("/api/v1/zones", headers=admin)
-    assert name in {item["name"] for item in listed.json()["items"]}
+    zones = {item["id"]: item for item in listed.json()["items"]}
+    assert name in zones
+    assert zones[name]["token_configured"] is False
+    assert zones[DEFAULT_ZONE]["token_configured"] is True
     assert client.patch("/api/v1/zones/no-such-zone", json={}, headers=admin).status_code == 404
 
 
 @pytest.mark.parametrize(
     "body",
     [
-        {"name": "UPPER", "display_name": "x"},
-        {"name": "has_underscore"},
-        {"name": "with space"},
-        {"name": _name(), "color": "pink"},
-        {"name": _name(), "playground_gateway_url": "ftp://gateway"},
-        {"name": _name(), "playground_gateway_url": "http://user:pass@gateway"},
-        {"name": _name(), "key_max_lifetime_seconds": 0},
-        {"name": _name(), "key_max_per_member": 0},
-        {"name": _name(), "key_min_creator_role": "owner"},
+        {"name": "x", "color": "pink"},
+        {"name": "x", "playground_gateway_url": "ftp://gateway"},
+        {"name": "x", "playground_gateway_url": "http://user:pass@gateway"},
+        {"name": "x", "key_max_lifetime_seconds": 0},
+        {"name": "x", "key_max_per_member": 0},
+        {"name": "x", "key_min_creator_role": "owner"},
+        {"name": ""},
     ],
 )
-def test_zone_validation(client, admin: dict[str, str], body: dict) -> None:
-    response = client.post("/api/v1/zones", json=body, headers=admin)
+async def test_zone_update_validation(
+    client, admin: dict[str, str], session: AsyncSession, body: dict
+) -> None:
+    name = _name()
+    async with AsyncSession(session.bind) as other, other.begin():
+        other.add(Zone(id=name, name=name))
+    response = client.patch(f"/api/v1/zones/{name}", json=body, headers=admin)
     assert response.status_code == 422, response.text
 
 
-def test_patch_rejects_null_for_a_required_field(client, admin: dict[str, str]) -> None:
+async def test_patch_rejects_null_for_a_required_field(
+    client, admin: dict[str, str], session: AsyncSession
+) -> None:
     name = _name()
-    assert client.post("/api/v1/zones", json={"name": name}, headers=admin).status_code == 201
-    response = client.patch(f"/api/v1/zones/{name}", json={"display_name": None}, headers=admin)
+    async with AsyncSession(session.bind) as other, other.begin():
+        other.add(Zone(id=name, name=name))
+    response = client.patch(f"/api/v1/zones/{name}", json={"name": None}, headers=admin)
     assert response.status_code == 422
-    assert "display_name" in response.text
+    assert "name" in response.text
 
 
-def test_only_the_default_zone_is_marked_default(client, admin: dict[str, str]) -> None:
+async def test_only_the_default_zone_is_marked_default(
+    client, admin: dict[str, str], session: AsyncSession
+) -> None:
     name = _name()
-    assert client.post("/api/v1/zones", json={"name": name}, headers=admin).status_code == 201
-    zones = {z["name"]: z for z in client.get("/api/v1/zones", headers=admin).json()["items"]}
+    async with AsyncSession(session.bind) as other, other.begin():
+        other.add(Zone(id=name, name=name))
+    zones = {z["id"]: z for z in client.get("/api/v1/zones", headers=admin).json()["items"]}
     assert zones[DEFAULT_ZONE]["is_default"] is True
     assert zones[name]["is_default"] is False
+    assert zones[name]["token_configured"] is False
 
 
 def test_default_zone_cannot_be_archived(client, admin: dict[str, str]) -> None:
@@ -256,26 +297,14 @@ def test_default_zone_cannot_be_archived(client, admin: dict[str, str]) -> None:
     assert "default" in response.text
 
 
-async def test_archive_is_refused_while_a_gateway_is_connected_then_revokes_tokens(
+async def test_archive_is_refused_while_a_gateway_is_connected(
     client, admin: dict[str, str], session: AsyncSession
 ) -> None:
     name = _name()
-    assert client.post("/api/v1/zones", json={"name": name}, headers=admin).status_code == 201
-    created = client.post(
-        "/api/v1/gateway-tokens",
-        json={"name": "prod", "zone": name},
-        headers=admin,
-    )
-    assert created.status_code == 201, created.text
-    token = created.json()["token"]
-    assert token["zone"] == name
-
-    session.add(
-        GatewaySession(
-            zone=name, gateway_id="gw-1", token_id=uuid.UUID(token["id"]), connected=True
-        )
-    )
-    await session.commit()
+    async with AsyncSession(session.bind) as other, other.begin():
+        other.add(Zone(id=name, name=name))
+    async with AsyncSession(session.bind) as other, other.begin():
+        other.add(GatewaySession(zone=name, gateway_id="gw-1", connected=True))
 
     refused = client.delete(f"/api/v1/zones/{name}", headers=admin)
     assert refused.status_code == 409
@@ -289,45 +318,26 @@ async def test_archive_is_refused_while_a_gateway_is_connected_then_revokes_toke
     assert archived.json()["archived_at"] is not None
 
     listed = client.get("/api/v1/zones", headers=admin)
-    assert name not in {item["name"] for item in listed.json()["items"]}
+    assert name not in {item["id"] for item in listed.json()["items"]}
     listed = client.get("/api/v1/zones?include_archived=true", headers=admin)
-    assert name in {item["name"] for item in listed.json()["items"]}
-
-    async with AsyncSession(session.bind, expire_on_commit=False) as check:
-        rows = (await check.scalars(select(GatewayToken).where(GatewayToken.zone == name))).all()
-    assert rows and all(row.revoked_at is not None for row in rows)
+    assert name in {item["id"] for item in listed.json()["items"]}
 
 
-async def test_creating_a_gateway_token_recompiles_only_that_zone(
+async def test_archiving_a_zone_drops_its_pending_outbox(
     client, admin: dict[str, str], session: AsyncSession
 ) -> None:
-    name, other = _name(), _name()
-    for zone in (name, other):
-        assert client.post("/api/v1/zones", json={"name": zone}, headers=admin).status_code == 201
+    name = _name()
+    async with AsyncSession(session.bind) as other, other.begin():
+        other.add(Zone(id=name, name=name))
+    async with AsyncSession(session.bind) as other, other.begin():
+        other.add(ConfigOutbox(zone=name, reason="test", source_revision=1))
+    assert (
+        await session.scalar(select(ConfigOutbox.id).where(ConfigOutbox.zone == name))
+    ) is not None
 
-    response = client.post(
-        "/api/v1/gateway-tokens", json={"name": "prod-token", "zone": name}, headers=admin
-    )
-    assert response.status_code == 201, response.text
-    assert response.json()["token"]["zone"] == name
-
-    async def pending() -> set[str]:
-        async with AsyncSession(session.bind) as check:
-            return set(
-                (
-                    await check.scalars(
-                        select(ConfigOutbox.zone).where(
-                            ConfigOutbox.status == "pending",
-                            ConfigOutbox.zone.in_([name, other]),
-                        )
-                    )
-                ).all()
-            )
-
-    assert await pending() == {name}
-
-    revoke = client.post(
-        f"/api/v1/gateway-tokens/{response.json()['token']['id']}/revoke", headers=admin
-    )
-    assert revoke.status_code == 200, revoke.text
-    assert await pending() == {name}
+    archived = client.delete(f"/api/v1/zones/{name}", headers=admin)
+    assert archived.status_code == 200, archived.text
+    async with AsyncSession(session.bind) as check:
+        assert (
+            await check.scalar(select(ConfigOutbox.id).where(ConfigOutbox.zone == name))
+        ) is None

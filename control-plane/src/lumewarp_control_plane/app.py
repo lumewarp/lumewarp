@@ -23,7 +23,6 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
-from sqlalchemy.dialects.postgresql import insert
 
 from lumewarp_control_plane import __version__, audit, compiler, migrate, usage
 from lumewarp_control_plane import grpc as grpc_services
@@ -32,7 +31,7 @@ from lumewarp_control_plane.api import router as api_router
 from lumewarp_control_plane.api.openapi import Readiness
 from lumewarp_control_plane.auth.break_glass import LoginLimiter, enabled, validate_credentials
 from lumewarp_control_plane.authz import load_authorizer
-from lumewarp_control_plane.db import SessionFactory, create_engine, create_session_factory
+from lumewarp_control_plane.db import create_engine, create_session_factory
 from lumewarp_control_plane.errors import error_body, install_handlers
 from lumewarp_control_plane.keys.reconciler import run_key_reconciler
 from lumewarp_control_plane.metrics import (
@@ -41,8 +40,8 @@ from lumewarp_control_plane.metrics import (
     run_db_gauges,
     start_metrics_server,
 )
-from lumewarp_control_plane.models import Zone
 from lumewarp_control_plane.settings import Settings, get_settings, split_bind
+from lumewarp_control_plane.zones import ensure_zones
 
 log = logging.getLogger(__name__)
 
@@ -158,26 +157,6 @@ async def start_background(app: FastAPI) -> Runtime:
     return runtime
 
 
-async def ensure_zone(factory: SessionFactory, settings: Settings) -> None:
-    """Create the default zone row if it does not exist yet.
-
-    `bootstrap` and the zones API create the other zones. `ON CONFLICT DO NOTHING` leaves
-    an existing row alone, so its URL and key rules are not reset and its `source_revision`
-    is not bumped; no config version is published by the insert itself. The Playground URL
-    is seeded from `LUMEWARP_PLAYGROUND_GATEWAY_URL` on creation only.
-    """
-    async with factory() as session, session.begin():
-        await session.execute(
-            insert(Zone)
-            .values(
-                name=settings.zone,
-                display_name=settings.zone,
-                playground_gateway_url=settings.playground_gateway_url,
-            )
-            .on_conflict_do_nothing()
-        )
-
-
 async def stop_background(runtime: Runtime, grace: float = SHUTDOWN_GRACE_SECONDS) -> None:
     """Stop accepting streams, signal loops, and wait for everything within `grace`
     seconds; whatever is still running after that is cancelled.
@@ -209,12 +188,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # An optional backend hook: a misconfigured backend aborts startup here.
         if (start := getattr(app.state.authorizer.backend, "start", None)) is not None:
             await start()
-        # A fresh database has no zone row. Create the default one here, before the
-        # compiler and gRPC start, so the Admin UI can create the first gateway token.
+        # A fresh database has no zone row. Create the default zone and every zone named by
+        # a `LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN` before the compiler and gRPC start; an
+        # invalid id or a short token already failed when `settings` was built.
         # `serve` already requires a migrated database for the gRPC server below, so a
         # failure here is a startup failure and the process restarts.
         if settings.background_enabled:
-            await ensure_zone(app.state.session_factory, settings)
+            await ensure_zones(app.state.session_factory, settings)
         runtime = await start_background(app) if settings.background_enabled else Runtime()
         app.state.runtime = runtime
         app.state.tasks = runtime.tasks

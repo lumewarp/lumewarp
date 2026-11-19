@@ -56,7 +56,7 @@ async def test_enum_check_constraints_exist(engine) -> None:
         "ck_api_keys_no_all_models",
         "ck_policy_grants_owner_shape",
         "ck_policy_group_grants_owner_shape",
-        "ck_zones_name_slug",
+        "ck_zones_id_slug",
         "ck_zones_key_min_creator_role",
         "ck_zones_key_lifetime_positive",
         "ck_zones_key_max_positive",

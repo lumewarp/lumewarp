@@ -117,13 +117,11 @@ DETAIL_ALLOWLIST: dict[str, dict[str, DetailSpec]] = {
             "card_json": None,
         },
     },
-    "gateway_token.create": {"name": None, "zone": None},
-    "gateway_token.revoke": {"name": None},
-    "zone.create": {"name": None, "display_name": None, "color": None},
+    "gateway.delete": {"zone": None, "gateway_id": None},
     "zone.update": {
-        "name": None,
+        "id": None,
         "changes": {
-            "display_name": None,
+            "name": None,
             "color": None,
             "playground_gateway_url": None,
             "key_min_creator_role": None,
@@ -134,7 +132,7 @@ DETAIL_ALLOWLIST: dict[str, dict[str, DetailSpec]] = {
             "playground_allowed": None,
         },
     },
-    "zone.archive": {"name": None, "revoked_tokens": None},
+    "zone.archive": {"id": None},
     "zone.limits.update": {
         "zone": None,
         "owner": {

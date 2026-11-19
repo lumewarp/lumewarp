@@ -16,7 +16,6 @@ from lumewarp_control_plane.models import (
     GatewayPlugin,
     GatewayQuarantine,
     GatewaySession,
-    GatewayToken,
     McpServer,
     ModelDeployment,
     Upstream,
@@ -37,18 +36,18 @@ async def other_zone(api_engine: AsyncEngine, api_scope: str) -> AsyncIterator[s
     """
     name = f"zone-{suffix()}"
     async with AsyncSession(api_engine) as session, session.begin():
-        session.add(Zone(name=name))
+        session.add(Zone(id=name, name=name))
     yield name
     async with AsyncSession(api_engine) as session, session.begin():
         await session.execute(delete(ModelDeployment).where(ModelDeployment.zone == name))
         await session.execute(delete(Upstream).where(Upstream.zone == name))
         await session.execute(delete(McpServer).where(McpServer.zone == name))
         await session.execute(delete(A2aAgent).where(A2aAgent.zone == name))
-        for table in (GatewayPlugin, GatewaySession, GatewayToken, GatewayQuarantine):
+        for table in (GatewayPlugin, GatewaySession, GatewayQuarantine):
             await session.execute(delete(table).where(table.zone == name))
         await session.execute(delete(ConfigOutbox).where(ConfigOutbox.zone == name))
         await session.execute(delete(ConfigVersion).where(ConfigVersion.zone == name))
-        await session.execute(delete(Zone).where(Zone.name == name))
+        await session.execute(delete(Zone).where(Zone.id == name))
 
 
 def _upstream(client, zone: str | None = None, name: str | None = None):

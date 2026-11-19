@@ -115,7 +115,7 @@ async def enforce_org_budgets(
         audit.record(
             session,
             actor_type=ActorType.SYSTEM,
-            actor_id=f"usage:{gateway_id}",
+            actor_id=f"usage:{gateway_id}" if gateway_id else "usage",
             action="budget.hard_exceeded",
             resource_type=ScopeType.ORG.value,
             resource_id=org_id,

@@ -10,5 +10,5 @@ from tests import factories
 @pytest.fixture(autouse=True)
 async def default_zone(session: AsyncSession) -> None:
     if await session.get(Zone, factories.DEFAULT_ZONE) is None:
-        session.add(Zone(name=factories.DEFAULT_ZONE))
+        session.add(Zone(id=factories.DEFAULT_ZONE, name=factories.DEFAULT_ZONE))
         await session.flush()

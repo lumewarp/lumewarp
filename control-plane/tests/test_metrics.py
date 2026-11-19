@@ -133,7 +133,7 @@ async def test_serve_starts_and_stops_metrics_listener(settings: Settings, engin
 
     settings = settings.model_copy(update={"zone": f"metrics-{uuid.uuid4().hex[:8]}"})
     async with AsyncSession(engine) as session, session.begin():
-        session.add(Zone(name=settings.zone))
+        session.add(Zone(id=settings.zone, name=settings.zone))
     app = create_app(settings.model_copy(update={"metrics_bind": "127.0.0.1:0"}))
     app.state.metrics.outbox_pending.labels(zone=settings.zone).set(-1)
     runtime = await start_background(app)

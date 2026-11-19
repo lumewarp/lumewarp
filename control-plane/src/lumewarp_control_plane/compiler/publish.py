@@ -176,7 +176,7 @@ async def _publish_locked(
     )
     if not pending:
         return None
-    revision = await session.scalar(select(Zone.source_revision).where(Zone.name == zone))
+    revision = await session.scalar(select(Zone.source_revision).where(Zone.id == zone))
     if revision is None:
         return None
     latest = await _latest(session, zone)
@@ -322,9 +322,7 @@ async def rollback_routing(
     # can form between rollback and a rename, delete or upstream change.
     await outbox.lock_hierarchy(session)
     live = (
-        await session.scalars(
-            select(Zone.name).where(Zone.archived_at.is_(None)).order_by(Zone.name)
-        )
+        await session.scalars(select(Zone.id).where(Zone.archived_at.is_(None)).order_by(Zone.id))
     ).all()
     if zone not in live:
         raise LookupError(f"unknown config zone {zone!r}")
@@ -454,7 +452,7 @@ async def _live_zones(session_factory: SessionFactory) -> list[str]:
         return list(
             (
                 await session.scalars(
-                    select(Zone.name).where(Zone.archived_at.is_(None)).order_by(Zone.name)
+                    select(Zone.id).where(Zone.archived_at.is_(None)).order_by(Zone.id)
                 )
             ).all()
         )

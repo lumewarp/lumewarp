@@ -24,13 +24,11 @@ from lumewarp_control_plane.models import (
     ConfigOutbox,
     ConfigVersion,
     GatewaySession,
-    GatewayToken,
     KeyLifecycle,
     Model,
     ModelDeployment,
     Upstream,
 )
-from lumewarp_control_plane.security import SecretKind, generate_secret
 from tests import factories
 from tests.compiler.helpers import (
     OCT,
@@ -45,17 +43,8 @@ from tests.compiler.helpers import (
 
 
 async def _add_gateway(session, gateway_id: str, **values) -> None:
-    """A gateway row with the token its Hello authenticated with."""
-    secret = generate_secret(SecretKind.GATEWAY_TOKEN)
-    token = GatewayToken(
-        zone=SCOPE,
-        name=gateway_id,
-        token_hash=secret.hash,
-        display_prefix=secret.display_prefix,
-    )
-    session.add(token)
-    await session.flush()
-    session.add(GatewaySession(zone=SCOPE, gateway_id=gateway_id, token_id=token.id, **values))
+    """A gateway row, as its stream's Hello leaves it."""
+    session.add(GatewaySession(zone=SCOPE, gateway_id=gateway_id, **values))
 
 
 async def _outbox(factory) -> list[str]:

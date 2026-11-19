@@ -379,17 +379,17 @@ class PolicyMixin:
 
 
 class Zone(Base):
-    """One config zone (prod, dev, ...). The default zone's name is `LUMEWARP_ZONE`.
+    """One config zone (prod, dev, ...). The default zone's id is `LUMEWARP_ZONE`.
 
     `source_revision` is bumped by `outbox.enqueue_recompile` in every mutating transaction;
     the row lock it takes also serializes writers. Compiles record the revision they saw.
-    `name` is immutable: every zone column references it. The key rules are stored and
-    returned here; the key API enforces them.
+    `id` is immutable: every zone column references it; `name` is the display name. The key
+    rules are stored and returned here; the key API enforces them.
     """
 
     __tablename__ = "zones"
     __table_args__ = (
-        CheckConstraint("name ~ '^[a-z][a-z0-9-]{0,62}$'", name="name_slug"),
+        CheckConstraint("id ~ '^[a-z][a-z0-9-]{0,62}$'", name="id_slug"),
         CheckConstraint(
             "key_max_lifetime_seconds IS NULL OR key_max_lifetime_seconds > 0",
             name="key_lifetime_positive",
@@ -399,8 +399,10 @@ class Zone(Base):
         ),
     )
 
-    name: Mapped[str] = mapped_column(String(64), primary_key=True)
-    display_name: Mapped[str] = mapped_column(String(200), nullable=False, server_default="")
+    # The slug gateways, keys and every zone column use; immutable.
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # What people see; renameable.
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
     # A palette name, validated by the API (models has no dependency on the API's list).
     color: Mapped[str] = mapped_column(String(16), nullable=False, server_default="gray")
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -503,7 +505,7 @@ class ZoneLimit(TimestampMixin, Base):
     __table_args__ = (*_zone_limit_owner_args(),)
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
-    zone: Mapped[str] = mapped_column(ForeignKey("zones.name", ondelete="CASCADE"), nullable=False)
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.id", ondelete="CASCADE"), nullable=False)
     org_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("orgs.id", ondelete="CASCADE"))
     team_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"))
     user_id: Mapped[uuid.UUID | None] = mapped_column()
@@ -530,7 +532,7 @@ class ZoneMemberDefaults(Base):
         CheckConstraint("max_parallel IS NULL OR max_parallel > 0", name="parallel_positive"),
     )
 
-    zone: Mapped[str] = mapped_column(ForeignKey("zones.name", ondelete="CASCADE"), nullable=False)
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.id", ondelete="CASCADE"), nullable=False)
     team_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("teams.id", ondelete="CASCADE"), nullable=False
     )
@@ -895,7 +897,7 @@ class ApiKey(TimestampMixin, Base):
         ForeignKey("teams.id", ondelete="RESTRICT"), nullable=False
     )
     # The zone whose snapshots this key is compiled into. Immutable: rotation keeps it.
-    zone: Mapped[str] = mapped_column(ForeignKey("zones.name", ondelete="RESTRICT"), nullable=False)
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.id", ondelete="RESTRICT"), nullable=False)
     owner_kind: Mapped[KeyOwnerKind] = mapped_column(
         _enum(KeyOwnerKind, "key_owner_kind"), nullable=False
     )
@@ -1013,7 +1015,7 @@ class Upstream(TimestampMixin, Base):
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
     # The config zone this upstream belongs to; set on create and never changed (a
     # deployment in another zone could otherwise be left pointing at it).
-    zone: Mapped[str] = mapped_column(ForeignKey("zones.name", ondelete="RESTRICT"), nullable=False)
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.id", ondelete="RESTRICT"), nullable=False)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     kind: Mapped[UpstreamKind] = mapped_column(_enum(UpstreamKind, "upstream_kind"), nullable=False)
     base_url: Mapped[str] = mapped_column(Text, nullable=False)
@@ -1123,7 +1125,7 @@ class McpServer(TimestampMixin, Base):
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
     # The config zone this server belongs to; set on create and never changed.
-    zone: Mapped[str] = mapped_column(ForeignKey("zones.name", ondelete="RESTRICT"), nullable=False)
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.id", ondelete="RESTRICT"), nullable=False)
     name: Mapped[str] = mapped_column(String(63), nullable=False)
     # The Streamable HTTP endpoint; absolute http(s) URL without userinfo (validated in
     # compiler/validate.py, mirrored by the gateway).
@@ -1236,7 +1238,7 @@ class A2aAgent(TimestampMixin, Base):
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
     # The config zone this agent belongs to; set on create and never changed.
-    zone: Mapped[str] = mapped_column(ForeignKey("zones.name", ondelete="RESTRICT"), nullable=False)
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.id", ondelete="RESTRICT"), nullable=False)
     name: Mapped[str] = mapped_column(String(63), nullable=False)
     # The agent's JSON-RPC endpoint; absolute http(s) URL without userinfo.
     url: Mapped[str] = mapped_column(Text, nullable=False)
@@ -1541,7 +1543,7 @@ class ModelDeployment(TimestampMixin, Base):
     name_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("models.name_id", ondelete="CASCADE"), nullable=False
     )
-    zone: Mapped[str] = mapped_column(ForeignKey("zones.name", ondelete="RESTRICT"), nullable=False)
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.id", ondelete="RESTRICT"), nullable=False)
     upstream_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
     upstream_model: Mapped[str] = mapped_column(String(400), nullable=False)
     # Periodic type-specific probe by the gateway; interval NULL = not probed.
@@ -2138,7 +2140,7 @@ class ConfigVersion(Base):
         Index(None, "zone", "source_revision"),
     )
 
-    zone: Mapped[str] = mapped_column(ForeignKey("zones.name", ondelete="RESTRICT"), nullable=False)
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.id", ondelete="RESTRICT"), nullable=False)
     version: Mapped[int] = mapped_column(BigInteger, nullable=False)
     # Serialized lumewarp.config.v1.Snapshot.
     payload: Mapped[bytes | None] = mapped_column(LargeBinary)
@@ -2176,7 +2178,7 @@ class ConfigOutbox(Base):
     )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
-    zone: Mapped[str] = mapped_column(ForeignKey("zones.name", ondelete="RESTRICT"), nullable=False)
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.id", ondelete="RESTRICT"), nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     source_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
     status: Mapped[OutboxStatus] = mapped_column(
@@ -2193,24 +2195,6 @@ class ConfigOutbox(Base):
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
-class GatewayToken(Base):
-    """Gateway credential (`lwg-...`): a zone credential with a label, not bound to a
-    gateway id. Any number of gateways may authenticate with one token. Hash only.
-    """
-
-    __tablename__ = "gateway_tokens"
-    __table_args__ = (_hash32("token_hash"), Index(None, "zone"))
-
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
-    zone: Mapped[str] = mapped_column(ForeignKey("zones.name", ondelete="RESTRICT"), nullable=False)
-    name: Mapped[str] = mapped_column(String(200), nullable=False, server_default="")
-    token_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False, unique=True)
-    display_prefix: Mapped[str] = mapped_column(String(32), nullable=False)
-    created_at: Mapped[datetime] = _now()
-    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-
 class GatewaySession(Base):
     """Last known stream state per gateway process, for status/UI. A gateway is one
     process: a restart is a new gateway id and a new row. Authoritative ACK/pending state
@@ -2221,14 +2205,11 @@ class GatewaySession(Base):
     __tablename__ = "gateway_sessions"
     __table_args__ = (PrimaryKeyConstraint("zone", "gateway_id"),)
 
-    zone: Mapped[str] = mapped_column(ForeignKey("zones.name", ondelete="RESTRICT"), nullable=False)
-    # Hello.gateway_id: this process. `[A-Za-z0-9._-]`, at most 100 characters.
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.id", ondelete="RESTRICT"), nullable=False)
+    # Assigned by the control plane in Welcome: this stream's id. `[A-Za-z0-9._-]`, at most
+    # 100 characters; a reconnect is a new id and a new row.
     gateway_id: Mapped[str] = mapped_column(String(100), nullable=False)
     session_id: Mapped[uuid.UUID | None] = mapped_column()
-    # The token of the latest Hello; revoking it closes this gateway's stream.
-    token_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("gateway_tokens.id", ondelete="CASCADE"), nullable=False
-    )
     connected: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     gateway_version: Mapped[str] = mapped_column(String(100), nullable=False, server_default="")
     capabilities: Mapped[list[str]] = mapped_column(
@@ -2270,7 +2251,7 @@ class GatewayQuarantine(Base):
     __tablename__ = "gateway_quarantines"
     __table_args__ = (PrimaryKeyConstraint("zone"),)
 
-    zone: Mapped[str] = mapped_column(ForeignKey("zones.name", ondelete="RESTRICT"), nullable=False)
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.id", ondelete="RESTRICT"), nullable=False)
     quarantined_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
     updated_at: Mapped[datetime] = _now()
 
@@ -2297,10 +2278,6 @@ class GatewayPlugin(Base):
     name: Mapped[str] = mapped_column(String(63), nullable=False)
     digest: Mapped[str] = mapped_column(String(128), nullable=False)
     descriptor: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    # The report stops counting when this token is revoked.
-    token_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("gateway_tokens.id", ondelete="CASCADE"), nullable=False
-    )
     seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
@@ -2346,7 +2323,9 @@ class UsageEvent(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     request_id: Mapped[uuid.UUID] = mapped_column(nullable=False, unique=True)
-    # The reporting process (ReportRequest.gateway_id), never derived from the token.
+    # The id Welcome assigned to the reporting stream (ReportRequest.gateway_id); empty for
+    # events served before any handshake, attributed to no gateway row. No FK: this is an
+    # append-only log.
     gateway_id: Mapped[str] = mapped_column(String(100), nullable=False)
     # Completion time (UsageEvent.timestamp_unix_ms); budget windows use it.
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -2354,8 +2333,8 @@ class UsageEvent(Base):
     received_at: Mapped[datetime] = _now()
     key_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
     team_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
-    # The zone of the authenticated gateway token (never a gateway claim), stamped at
-    # ingest. No FK: this is an append-only log and a zone row outlives its versions.
+    # The zone of the authenticated zone token (never a gateway claim), stamped at ingest.
+    # No FK: this is an append-only log and a zone row outlives its versions.
     zone: Mapped[str] = mapped_column(String(64), nullable=False)
     # The key's owner at ingest time (user or service account id).
     owner_kind: Mapped[KeyOwnerKind] = mapped_column(
@@ -2443,7 +2422,7 @@ class OrgBudgetWindow(Base):
     __tablename__ = "org_budget_windows"
     __table_args__ = (PrimaryKeyConstraint("zone", "org_id", "window_start"),)
 
-    zone: Mapped[str] = mapped_column(ForeignKey("zones.name", ondelete="CASCADE"), nullable=False)
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.id", ondelete="CASCADE"), nullable=False)
     org_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("orgs.id", ondelete="CASCADE"), nullable=False
     )
@@ -2470,7 +2449,7 @@ class UsageTotal(Base):
         ),
     )
 
-    zone: Mapped[str] = mapped_column(ForeignKey("zones.name", ondelete="CASCADE"), nullable=False)
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.id", ondelete="CASCADE"), nullable=False)
     scope_type: Mapped[ScopeType] = mapped_column(_enum(ScopeType, "scope_type"), nullable=False)
     scope_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
     window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

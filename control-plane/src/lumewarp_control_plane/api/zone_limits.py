@@ -328,17 +328,17 @@ async def put_zone_limits(
             session,
             action="zone.limits.update",
             resource_type="zone",
-            resource_id=zone_row.name,
+            resource_id=zone_row.id,
             principal=authz.principal,
             team_id=team.id if team is not None else None,
             org_id=org.id if org is not None else team.org_id if team is not None else None,
             details={
-                "zone": zone_row.name,
+                "zone": zone_row.id,
                 "owner": _owner_details(owner),
                 "changes": body.model_dump(exclude_unset=True, mode="json"),
             },
         )
-        await enqueue_recompile(session, "api.zone_limits.update", zone_row.name)
+        await enqueue_recompile(session, "api.zone_limits.update", zone_row.id)
     return limits_out(row)
 
 
@@ -417,15 +417,15 @@ async def put_zone_member_defaults(
             session,
             action="zone.member_defaults.update",
             resource_type="zone",
-            resource_id=zone_row.name,
+            resource_id=zone_row.id,
             principal=authz.principal,
             team_id=team.id,
             org_id=team.org_id,
             details={
-                "zone": zone_row.name,
+                "zone": zone_row.id,
                 "team_id": str(team.id),
                 "changes": body.model_dump(exclude_unset=True, mode="json"),
             },
         )
-        await enqueue_recompile(session, "api.zone_member_defaults.update", zone_row.name)
+        await enqueue_recompile(session, "api.zone_member_defaults.update", zone_row.id)
     return member_defaults_out(row)

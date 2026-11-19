@@ -55,7 +55,7 @@ async def _seed(
     factories.DEFAULT_ZONE = scope_name
     try:
         async with factory() as session, session.begin():
-            session.add(Zone(name=scope_name))
+            session.add(Zone(id=scope_name, name=scope_name))
             org = await factories.make_org(
                 session, f"org-{uuid7().hex[-10:]}", budget_nano_usd=budget
             )

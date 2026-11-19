@@ -40,7 +40,6 @@ from lumewarp_control_plane.models import (
     ActorType,
     GatewayPlugin,
     GatewaySession,
-    GatewayToken,
     McpServer,
     PluginKind,
     Router,
@@ -642,7 +641,6 @@ async def replace_gateway_plugins(
     session: AsyncSession,
     zone: str,
     gateway_id: str,
-    token_id: uuid.UUID,
     reported: list[ReportedPlugin],
     now: datetime,
 ) -> None:
@@ -672,7 +670,6 @@ async def replace_gateway_plugins(
                 "name": item.name,
                 "digest": item.digest,
                 "descriptor": item.descriptor,
-                "token_id": token_id,
                 "seen_at": now,
             }
             for item in reported
@@ -689,7 +686,6 @@ async def replace_gateway_plugins(
             set_={
                 "digest": stmt.excluded.digest,
                 "descriptor": stmt.excluded.descriptor,
-                "token_id": stmt.excluded.token_id,
                 "seen_at": stmt.excluded.seen_at,
             },
         )
@@ -782,14 +778,12 @@ class PluginRegistry:
 async def load_plugins(
     session: AsyncSession, zone: str, *, now: datetime | None = None
 ) -> PluginRegistry:
-    """A gateway counts while the token of its latest Hello is unrevoked and it is connected
-    or was seen within 30 days (rows older than 24 h are deleted, so an offline gateway
-    usually disappears sooner); a report counts while its own token is unrevoked. One
-    statement, so this sees one snapshot: never a Hello's capabilities with another Hello's
-    reports. It takes no lock, so any caller's lock order is safe.
+    """A gateway counts while it is connected or was seen within 30 days (rows older than
+    24 h are deleted, so an offline gateway usually disappears sooner); its reports count
+    with it. One statement, so this sees one snapshot: never a Hello's capabilities with
+    another Hello's reports. It takes no lock, so any caller's lock order is safe.
     """
     cutoff = (now or datetime.now(UTC)) - GATEWAY_RETENTION
-    unrevoked = select(GatewayToken.id).where(GatewayToken.revoked_at.is_(None))
     rows = await session.execute(
         select(
             GatewaySession.gateway_id,
@@ -807,12 +801,10 @@ async def load_plugins(
             and_(
                 GatewayPlugin.zone == GatewaySession.zone,
                 GatewayPlugin.gateway_id == GatewaySession.gateway_id,
-                GatewayPlugin.token_id.in_(unrevoked),
             ),
         )
         .where(
             GatewaySession.zone == zone,
-            GatewaySession.token_id.in_(unrevoked),
             or_(GatewaySession.connected, GatewaySession.last_seen_at >= cutoff),
         )
     )

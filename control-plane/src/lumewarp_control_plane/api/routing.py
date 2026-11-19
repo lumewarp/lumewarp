@@ -69,7 +69,7 @@ from lumewarp_control_plane.api.schemas import (
     UpstreamTestIn,
     UpstreamTestOut,
     UpstreamUpdate,
-    ZoneName,
+    ZoneId,
     validate_model_settings,
 )
 from lumewarp_control_plane.authz import Action, Authz
@@ -278,9 +278,7 @@ class _Availability:
 
 async def _availability(session: AsyncSession) -> _Availability:
     zones = tuple(
-        await session.scalars(
-            select(Zone.name).where(Zone.archived_at.is_(None)).order_by(Zone.name)
-        )
+        await session.scalars(select(Zone.id).where(Zone.archived_at.is_(None)).order_by(Zone.id))
     )
     deployed: dict[uuid.UUID, set[str]] = {}
     for name_id, zone in await session.execute(
@@ -1615,7 +1613,7 @@ async def _test_saved_deployment(
 )
 async def test_deployment(
     model_id: uuid.UUID,
-    zone: ZoneName,
+    zone: ZoneId,
     request: Request,
     authz: Authz,
     session: SessionDep,
@@ -1665,7 +1663,7 @@ async def test_saved_model(
 )
 async def put_model_deployment(
     model_id: uuid.UUID,
-    zone: ZoneName,
+    zone: ZoneId,
     body: ModelDeploymentIn,
     authz: Authz,
     session: SessionDep,
@@ -1733,7 +1731,7 @@ async def put_model_deployment(
 )
 async def delete_model_deployment(
     model_id: uuid.UUID,
-    zone: ZoneName,
+    zone: ZoneId,
     authz: Authz,
     session: SessionDep,
     settings: SettingsDep,

@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane.compiler.plugins import (
@@ -19,10 +19,8 @@ from lumewarp_control_plane.models import (
     AuditLog,
     GatewayPlugin,
     GatewaySession,
-    GatewayToken,
     PluginKind,
 )
-from lumewarp_control_plane.security import SecretKind, generate_secret
 from tests.api.helpers import (
     ADMIN_AUTH,
     auth,
@@ -68,7 +66,6 @@ async def report(committed: AsyncSession, api_scope: str) -> AsyncIterator:
 
     yield report_as
     await committed.rollback()
-    await committed.execute(delete(GatewayToken).where(GatewayToken.name.like(f"{PREFIX}%")))
     await committed.execute(
         delete(GatewaySession).where(GatewaySession.gateway_id.like(f"{PREFIX}%"))
     )
@@ -288,19 +285,14 @@ async def test_rolling_upgrade_accepts_only_what_passes_every_connected_schema(c
     assert item["missing_gateways"] == []
 
 
-async def test_revoked_and_long_unseen_gateways_no_longer_count(client, report):
-    revoked, stale, recent = _name("revoked"), _name("stale"), _name("recent")
-    await report("revoked", {revoked: FAILOVER}, revoked=True)
-    # Revoked but its stream not yet closed: it counts neither as support nor as missing.
-    await report("revoked-live", {revoked: FAILOVER}, connected=True, revoked=True)
+async def test_long_unseen_gateways_no_longer_count(client, report):
+    stale, recent = _name("stale"), _name("recent")
     old = datetime.now(UTC) - timedelta(days=31)
     await report("stale", {stale: FAILOVER}, last_seen_at=old)
     edge = datetime.now(UTC) - timedelta(days=29)
     await report("recent", {recent: FAILOVER}, last_seen_at=edge)
 
-    assert _strategy(client, revoked) is None
     assert _strategy(client, stale) is None
-    _422(_create(client, revoked), "no gateway reports")
     _422(_create(client, stale), "no gateway reports")
 
     item = _strategy(client, recent)
@@ -310,60 +302,6 @@ async def test_revoked_and_long_unseen_gateways_no_longer_count(client, report):
     # Offline is enough to edit, and its schema still validates.
     assert _create(client, recent).status_code == 201
     _422(_create(client, recent, params={"limit": 99}), "params.limit")
-
-
-async def test_revoking_the_reporting_token_ends_the_report_whatever_other_tokens_exist(
-    client, report, committed: AsyncSession, api_scope: str
-):
-    name = _name("two_tokens")
-    reporter = await report("two-tokens", {name: FAILOVER})
-    other = generate_secret(SecretKind.GATEWAY_TOKEN)
-    committed.add(
-        GatewayToken(
-            zone=api_scope,
-            name="unused",
-            token_hash=other.hash,
-            display_prefix=other.display_prefix,
-        )
-    )
-    await committed.execute(
-        update(GatewayToken).where(GatewayToken.id == reporter).values(revoked_at=datetime.now(UTC))
-    )
-    await committed.commit()
-    assert _strategy(client, name) is None
-    _422(_create(client, name), "no gateway reports")
-    # A token counts from its own Hello on.
-    await report("two-tokens", {name: FAILOVER})
-    assert _strategy(client, name) is not None
-
-
-async def test_a_report_of_another_token_is_ignored_when_that_token_is_revoked(
-    client, report, committed: AsyncSession, api_scope: str
-):
-    gone = _name("gone")
-    first = await report("handover", {gone: FAILOVER})
-    # A second token's Hello whose reports could not be stored: the old rows stay behind.
-    second = generate_secret(SecretKind.GATEWAY_TOKEN)
-    token = GatewayToken(
-        zone=api_scope,
-        name="second",
-        token_hash=second.hash,
-        display_prefix=second.display_prefix,
-    )
-    committed.add(token)
-    await committed.flush()
-    await committed.execute(
-        update(GatewaySession)
-        .where(GatewaySession.gateway_id == f"{PREFIX}handover")
-        .values(token_id=token.id)
-    )
-    await committed.commit()
-    assert _strategy(client, gone) is not None
-    await committed.execute(
-        update(GatewayToken).where(GatewayToken.id == first).values(revoked_at=datetime.now(UTC))
-    )
-    await committed.commit()
-    assert _strategy(client, gone) is None
 
 
 async def test_capability_only_strategies_share_the_limit_and_name_rules(client, report):

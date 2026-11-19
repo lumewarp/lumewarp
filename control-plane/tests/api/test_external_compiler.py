@@ -18,7 +18,7 @@ async def test_external_member_key_create_compile_and_rollback(
     settings = api_settings.model_copy(
         update={"zone": f"external-{suffix()}", "authz_backend": "external"}
     )
-    committed.add(Zone(name=settings.zone))
+    committed.add(Zone(id=settings.zone, name=settings.zone))
     team = await make_team(
         committed,
         model_access="list",

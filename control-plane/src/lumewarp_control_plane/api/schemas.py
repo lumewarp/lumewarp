@@ -541,7 +541,7 @@ class KeyCreate(ApiModel):
     expires_at: datetime | None = None
     # The zone whose snapshots this key is compiled into and whose key rules apply.
     # Omitted = the default zone; immutable after creation.
-    zone: ZoneName | None = None
+    zone: ZoneId | None = None
     # Omit to create a key owned by the caller.
     service_account_id: uuid.UUID | None = None
     # The key level of the hierarchy: no value here means no extra limiter scope. The
@@ -810,7 +810,7 @@ class UpstreamCreate(ApiModel):
     health_url: str | None = Field(default=None, max_length=2000)
 
     _check_health_url = field_validator("health_url")(_health_url)
-    zone: ZoneName | None = Field(
+    zone: ZoneId | None = Field(
         default=None,
         description=(
             "Config zone the upstream belongs to, set on create and never changed; null ="
@@ -1550,7 +1550,7 @@ class RouterOut(ReadModel):
 
 
 class PluginGatewayOut(ReadModel):
-    gateway_id: str = Field(description="Hello.gateway_id of the gateway that reported it.")
+    gateway_id: str = Field(description="The assigned id of the gateway that reported it.")
     connected: bool
     digest: str | None = Field(description="Null when known only from its capabilities.")
     seen_at: datetime | None
@@ -1732,7 +1732,7 @@ class MeZoneOut(ApiModel):
     """The caller's effective policy in one zone for one team."""
 
     zone: str
-    display_name: str
+    name: str
     color: str
     limits: MeLimitsOut
     key_rules: MeKeyRulesOut
@@ -2015,14 +2015,14 @@ class AuditOut(ReadModel):
 ZoneColor = Literal["gray", "blue", "green", "amber", "red", "violet"]
 
 
-def _zone_name(value: str) -> str:
-    """A zone name: a URL and CLI-safe slug, the gateway's on-disk snapshot key."""
+def _zone_id(value: str) -> str:
+    """A zone id: a URL and CLI-safe slug, the gateway's on-disk snapshot key."""
     if not re.fullmatch(r"[a-z][a-z0-9-]{0,62}", value):
         raise ValueError("must match ^[a-z][a-z0-9-]{0,62}$")
     return value
 
 
-ZoneName = Annotated[str, AfterValidator(_zone_name)]
+ZoneId = Annotated[str, AfterValidator(_zone_id)]
 
 
 class ZoneKeyRules(ApiModel):
@@ -2036,17 +2036,10 @@ class ZoneKeyRules(ApiModel):
     playground_allowed: bool = True
 
 
-class ZoneCreate(ZoneKeyRules):
-    name: ZoneName
-    display_name: str = Field(default="", max_length=200)
-    color: ZoneColor = "gray"
-    playground_gateway_url: str | None = None
-
-
 class ZoneUpdate(ApiModel):
-    """Only the supplied fields change. `name` is immutable."""
+    """Only the supplied fields change. `id` is immutable."""
 
-    display_name: str | None = Field(default=None, max_length=200)
+    name: str | None = Field(default=None, min_length=1, max_length=200)
     color: ZoneColor | None = None
     playground_gateway_url: str | None = None
     key_min_creator_role: KeyMinCreatorRole | None = None
@@ -2058,9 +2051,9 @@ class ZoneUpdate(ApiModel):
 
 
 class ZoneOut(ReadModel):
+    id: str
     name: str
     is_default: bool
-    display_name: str
     color: str
     archived_at: datetime | None
     created_at: datetime
@@ -2071,45 +2064,24 @@ class ZoneOut(ReadModel):
     key_max_per_member: int | None
     service_account_keys_allowed: bool
     playground_allowed: bool
+    token_configured: bool = Field(
+        description=(
+            "The environment has a `LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN` for this zone, so a"
+            " gateway can connect."
+        )
+    )
 
 
 # --------------------------------------------------------------------------- gateways/config
 
 
-class GatewayTokenCreate(ApiModel):
-    name: str = Field(default="", max_length=200)
-    zone: ZoneName | None = None
-
-
-class GatewayTokenRef(ReadModel):
-    """The token a gateway's latest Hello authenticated with: enough to name it in the UI."""
-
-    id: uuid.UUID
-    name: str
-    display_prefix: str
-
-
-class GatewayTokenOut(ReadModel):
-    id: uuid.UUID
-    zone: str
-    name: str
-    display_prefix: str
-    created_at: datetime
-    last_used_at: datetime | None
-    revoked_at: datetime | None
-    connected_gateways: int = Field(description="Gateways connected with this token right now.")
-
-
-class GatewayTokenCreated(ApiModel):
-    token: GatewayTokenOut
-    secret: str
-
-
 class GatewayOut(ApiModel):
-    """One gateway process: its config stream, version and status."""
+    """One gateway stream: its id, version and status."""
 
-    zone: str = Field(description="Config zone this gateway's token serves (`Hello.zone`).")
-    gateway_id: str = Field(description="`Hello.gateway_id`: the process, stable for its lifetime.")
+    zone: str = Field(description="Config zone this gateway serves (`x-lumewarp-zone`).")
+    gateway_id: str = Field(
+        description="The id the control plane assigned in `Welcome`; one stream, one id."
+    )
     connected: bool = Field(description="Its config stream is open.")
     peer: str | None = Field(description="gRPC peer of the stream, as the control plane sees it.")
     gateway_version: str = Field(description="The gateway build it reported in Hello.")
@@ -2139,7 +2111,6 @@ class GatewayOut(ApiModel):
     shared_limits_namespace: str = Field(
         description="`Hello.shared_limits.namespace`; empty while sharing is off."
     )
-    token: GatewayTokenRef = Field(description="The token its latest Hello authenticated with.")
 
 
 class ConfigVersionOut(ApiModel):
@@ -2160,7 +2131,7 @@ class ConfigVersionOut(ApiModel):
 
 class RollbackCreate(ApiModel):
     version: int = Field(gt=0)
-    zone: ZoneName | None = None
+    zone: ZoneId | None = None
     force: bool = _force_field()
 
 
@@ -2262,7 +2233,7 @@ class ModelTestIn(ApiModel):
         default=None,
         description="A saved model; the result is kept on it when the form matches it.",
     )
-    zone: ZoneName | None = Field(
+    zone: ZoneId | None = Field(
         default=None,
         description=(
             "With `model_id`: the deployment whose Test now result this is; null = do not"
@@ -2410,7 +2381,7 @@ class PluginRefIn(ApiModel):
 
 class McpServerCreate(ApiModel):
     name: TargetName
-    zone: ZoneName | None = Field(
+    zone: ZoneId | None = Field(
         default=None, description="Config zone the server belongs to; null = the default zone."
     )
     url: str = Field(min_length=1, max_length=2000)
@@ -2539,7 +2510,7 @@ class McpDiscoverOut(ApiModel):
 
 class A2aAgentCreate(ApiModel):
     name: TargetName
-    zone: ZoneName | None = Field(
+    zone: ZoneId | None = Field(
         default=None, description="Config zone the agent belongs to; null = the default zone."
     )
     url: str = Field(min_length=1, max_length=2000)

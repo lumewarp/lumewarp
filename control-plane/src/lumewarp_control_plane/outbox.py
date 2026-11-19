@@ -40,14 +40,14 @@ async def enqueue_recompile(session: AsyncSession, reason: str, zone: str | None
             update(Zone)
             .where(Zone.archived_at.is_(None))
             .values(source_revision=next_revision.scalar_subquery())
-            .returning(Zone.name, Zone.source_revision)
+            .returning(Zone.id, Zone.source_revision)
         )
     else:
         stmt = (
             update(Zone)
-            .where(Zone.archived_at.is_(None), Zone.name == zone)
+            .where(Zone.archived_at.is_(None), Zone.id == zone)
             .values(source_revision=Zone.source_revision + 1)
-            .returning(Zone.name, Zone.source_revision)
+            .returning(Zone.id, Zone.source_revision)
         )
     rows = (await session.execute(stmt)).all()
     if not rows:

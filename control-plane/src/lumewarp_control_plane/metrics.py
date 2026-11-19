@@ -256,7 +256,7 @@ async def refresh_db_gauges(metrics: Metrics, session_factory: SessionFactory) -
     from lumewarp_control_plane.models import ConfigOutbox, ConfigVersion, OutboxStatus, Zone
 
     async with session_factory() as session:
-        zones = list((await session.scalars(select(Zone.name))).all())
+        zones = list((await session.scalars(select(Zone.id))).all())
         pending = dict(
             (
                 await session.execute(

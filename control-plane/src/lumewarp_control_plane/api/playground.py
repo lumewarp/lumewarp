@@ -260,8 +260,7 @@ async def get_playground(authz: Authz, session: SessionDep, settings: SettingsDe
         )
     ).all()
     zones = {
-        row.name: row
-        for row in await session.scalars(select(Zone).where(Zone.archived_at.is_(None)))
+        row.id: row for row in await session.scalars(select(Zone).where(Zone.archived_at.is_(None)))
     }
     # Only keys in a zone that allows the Playground and has a gateway URL are offered.
     usable_zones = {
@@ -367,12 +366,12 @@ async def chat_completions(
         raise ApiError(403, "playground_not_allowed", "the key's zone is not available")
     if not zone.playground_allowed:
         raise ApiError(
-            403, "playground_not_allowed", f"zone {zone.name!r} does not allow the Playground"
+            403, "playground_not_allowed", f"zone {zone.id!r} does not allow the Playground"
         )
     playground_gateway_url = zone.playground_gateway_url
     if not playground_gateway_url or not settings.encryption_key:
         raise ApiError(
-            503, "playground_disabled", f"Playground is not configured in zone {zone.name!r}"
+            503, "playground_disabled", f"Playground is not configured in zone {zone.id!r}"
         )
     body = bytearray()
     async for chunk in request.stream():

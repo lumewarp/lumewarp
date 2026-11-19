@@ -247,16 +247,14 @@ async def report_plugins(
     *,
     connected: bool = False,
     last_seen_at=None,
-    revoked: bool = False,
     capabilities: list[str] | None = None,
-) -> uuid.UUID:
-    """A gateway as Hello leaves it: a new token, the session and the reports of its Hello.
-    Returns the token.
+) -> None:
+    """A gateway as Hello leaves it: its session row and the reports of its Hello.
 
-    A call with an existing `gateway_id` replaces that gateway's session and reports, as a
-    reconnect does. A key names a router strategy by name, or any plugin by `(kind, name)`;
-    the value is (params schema, member schema), each a dict or the raw text a gateway sends,
-    and the member schema is a router strategy's.
+    A call with an existing `gateway_id` replaces that gateway's session and reports, as
+    another Hello for a gateway does. A key names a router strategy by name, or any plugin
+    by `(kind, name)`; the value is (params schema, member schema), each a dict or the raw
+    text a gateway sends, and the member schema is a router strategy's.
     """
     import hashlib
     import json
@@ -271,8 +269,7 @@ async def report_plugins(
         normalize_hello,
         replace_gateway_plugins,
     )
-    from lumewarp_control_plane.models import GatewaySession, GatewayToken
-    from lumewarp_control_plane.security import SecretKind, generate_secret
+    from lumewarp_control_plane.models import GatewaySession
 
     proto_kind = {
         "router-strategy": cpb.PLUGIN_KIND_ROUTER_STRATEGY,
@@ -291,20 +288,9 @@ async def report_plugins(
             for name in builtin
         ]
         capabilities += [f"{CAPABILITY_PREFIX[kind]}:{name}" for kind, name in named]
-    secret = generate_secret(SecretKind.GATEWAY_TOKEN)
-    token = GatewayToken(
-        zone=scope,
-        name=gateway_id,
-        token_hash=secret.hash,
-        display_prefix=secret.display_prefix,
-        revoked_at=now if revoked else None,
-    )
-    session.add(token)
-    await session.flush()
     values = {
         "connected": connected,
         "capabilities": capabilities,
-        "token_id": token.id,
         "last_seen_at": last_seen_at or now,
         "connected_at": now,
     }
@@ -333,6 +319,5 @@ async def report_plugins(
             )
         )
     normalized = normalize_hello(cpb.Hello(plugins=reported))
-    await replace_gateway_plugins(session, scope, gateway_id, token.id, normalized.plugins, now)
+    await replace_gateway_plugins(session, scope, gateway_id, normalized.plugins, now)
     await session.commit()
-    return token.id

@@ -1,7 +1,7 @@
 """Tiny gateway stand-in: connect to ConfigService, receive the first update, ACK it.
 
     uv run python -m tests.integration.grpc_probe --target 127.0.0.1:50051 \\
-        --gateway-id gw-dev --token "$(cat token)"
+        --zone dev --hostname gw-dev --token "$LUMEWARP_GATEWAY_ZONE_DEV_TOKEN"
 
 Prints the version and key count of the snapshot it received and exits 0, so the control
 plane can be checked end to end without grpcurl. Also used by the integration tests.
@@ -21,15 +21,25 @@ from lumewarp_control_plane._proto.lumewarp.config.v1 import (
 )
 
 
-async def probe(target: str, token: str, gateway_id: str, timeout: float = 10.0) -> tuple[int, int]:
+async def probe(
+    target: str, token: str, zone: str, hostname: str = "probe", timeout: float = 10.0
+) -> tuple[int, int]:
     """Return (version, key count) of the full snapshot the control plane sends first."""
     async with grpc.aio.insecure_channel(target) as channel:
         call = cpb_grpc.ConfigServiceStub(channel).Stream(
-            metadata=(("authorization", f"Bearer {token}"),)
+            metadata=(
+                ("authorization", f"Bearer {token}"),
+                ("x-lumewarp-zone", zone),
+            )
         )
         await call.write(
-            cpb.GatewayMessage(hello=cpb.Hello(gateway_id=gateway_id, gateway_version="probe"))
+            cpb.GatewayMessage(
+                hello=cpb.Hello(zone=zone, hostname=hostname, gateway_version="probe")
+            )
         )
+        welcome = await asyncio.wait_for(call.read(), timeout)
+        if welcome.WhichOneof("update") != "welcome":
+            raise RuntimeError(f"expected Welcome, got {welcome.WhichOneof('update')}")
         update = await asyncio.wait_for(call.read(), timeout)
         if update.WhichOneof("update") != "full":
             raise RuntimeError(f"expected a full snapshot, got {update.WhichOneof('update')}")
@@ -42,11 +52,12 @@ async def probe(target: str, token: str, gateway_id: str, timeout: float = 10.0)
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--target", default="127.0.0.1:50051")
-    parser.add_argument("--gateway-id", required=True)
+    parser.add_argument("--zone", required=True)
+    parser.add_argument("--hostname", default="probe")
     parser.add_argument("--token", required=True)
     args = parser.parse_args()
     try:
-        version, keys = asyncio.run(probe(args.target, args.token, args.gateway_id))
+        version, keys = asyncio.run(probe(args.target, args.token, args.zone, args.hostname))
     except Exception as exc:
         print(f"probe failed: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc

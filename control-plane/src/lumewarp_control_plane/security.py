@@ -3,7 +3,9 @@
 Secret formats (prefix + 43 chars of urlsafe base64 = 256 bits of entropy):
 - `lw-...`  virtual API key, used by clients against the gateway
 - `lwp-...` personal access token, admin API
-- `lwg-...` gateway token, gRPC config/usage streams
+
+Gateway gRPC credentials are fixed per zone in the control plane's environment; they are
+not generated here.
 
 Only sha256(secret) is stored. A slow password hash (argon2/bcrypt) protects low-entropy
 human passwords against offline guessing; these secrets are 256-bit random values, so brute
@@ -36,7 +38,6 @@ from lumewarp_control_plane.settings import Settings
 class SecretKind(StrEnum):
     API_KEY = "lw-"
     PAT = "lwp-"
-    GATEWAY_TOKEN = "lwg-"
 
 
 SECRET_BYTES = 32
@@ -49,8 +50,8 @@ PAT_SCHEME = HTTPBearer(
     bearerFormat="lwp-",
     description=(
         "A personal access token (`lwp-…`), created under My keys in the Admin UI or with "
-        "`POST /api/v1/users/me/tokens`. Virtual API keys (`lw-…`) and gateway tokens "
-        "(`lwg-…`) do not authenticate here."
+        "`POST /api/v1/users/me/tokens`. Virtual API keys (`lw-…`) do not authenticate "
+        "here."
     ),
     auto_error=False,
 )
@@ -92,7 +93,7 @@ def generate_secret(kind: SecretKind) -> NewSecret:
 
 
 def secret_kind(secret: str) -> SecretKind | None:
-    # Longest prefix first: "lwp-"/"lwg-" before "lw-".
+    # Longest prefix first: "lwp-" before "lw-".
     for kind in sorted(SecretKind, key=lambda k: len(k.value), reverse=True):
         if secret.startswith(kind.value):
             return kind

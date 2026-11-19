@@ -7,8 +7,8 @@ Conventions (frozen):
 - Errors are `{error: {code, message}}`: raise `errors.ApiError` (handlers in errors.py).
 - Every mutation writes `audit.record(...)` and, if it changes compiled state,
   `outbox.enqueue_recompile(...)` in the same transaction.
-- Secrets (`lw-` keys, `lwp-` PATs, `lwg-` gateway tokens) are returned once at creation
-  and stored only as sha256 hashes.
+- Secrets (`lw-` keys, `lwp-` PATs) are returned once at creation and stored only as
+  sha256 hashes. Gateway credentials are fixed per zone in the control plane's environment.
 
 Sub-routers are included into `router` here; app.py mounts `router` and nothing else.
 """

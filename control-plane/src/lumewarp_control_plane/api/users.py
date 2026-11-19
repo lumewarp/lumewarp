@@ -235,9 +235,9 @@ async def _team_details(
     org_ids = {team.org_id for team, _, _ in rows}
     orgs = {org.id: org for org in await session.scalars(select(Org).where(Org.id.in_(org_ids)))}
     zones = list(
-        await session.scalars(select(Zone).where(Zone.archived_at.is_(None)).order_by(Zone.name))
+        await session.scalars(select(Zone).where(Zone.archived_at.is_(None)).order_by(Zone.id))
     )
-    zone_names = [zone.name for zone in zones]
+    zone_names = [zone.id for zone in zones]
     # MCP and A2A access resolve to the live targets, like `models` resolves to the catalog.
     mcp_targets = sorted(
         (await session.scalars(select(McpServer.name).where(McpServer.deleted_at.is_(None)))).all()
@@ -350,7 +350,7 @@ async def _team_details(
         by_zone: dict[str, MeZoneOut] = {}
         default_zone_out: MeZoneOut | None = None
         for zone_row in zones:
-            zone = zone_row.name
+            zone = zone_row.id
             org_limits = limits_row(zone, ("org", org.id))
             team_limits = limits_row(zone, ("team", team.id))
             member_limits = limits_row(zone, ("member", team.id, user_id))
@@ -399,7 +399,7 @@ async def _team_details(
                     )
             zone_out = MeZoneOut(
                 zone=zone,
-                display_name=zone_row.display_name or zone_row.name,
+                name=zone_row.name,
                 color=zone_row.color,
                 limits=MeLimitsOut(
                     rpm_limit=effective_limits.rpm_limit,

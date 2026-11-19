@@ -27,7 +27,6 @@ from lumewarp_control_plane.models import (
     GatewayPlugin,
     GatewayQuarantine,
     GatewaySession,
-    GatewayToken,
     McpDefinition,
     McpServer,
     McpServerGrant,
@@ -63,7 +62,7 @@ async def api_engine(api_database_url: str) -> AsyncIterator[AsyncEngine]:
 async def api_scope(api_engine: AsyncEngine) -> str:
     async with AsyncSession(api_engine, expire_on_commit=False) as session:
         if await session.get(Zone, API_SCOPE) is None:
-            session.add(Zone(name=API_SCOPE))
+            session.add(Zone(id=API_SCOPE, name=API_SCOPE))
             await session.commit()
         credential = await session.scalar(
             select(UserSession).where(UserSession.token_hash == hash_secret("test-admin-session"))
@@ -129,11 +128,10 @@ async def clean_gateways(api_engine: AsyncEngine) -> AsyncIterator[None]:
     """
     yield
     async with AsyncSession(api_engine) as session, session.begin():
-        extra = (await session.scalars(select(Zone.name).where(Zone.name != API_SCOPE))).all()
+        extra = (await session.scalars(select(Zone.id).where(Zone.id != API_SCOPE))).all()
         for zone in extra:
             await session.execute(delete(GatewayPlugin).where(GatewayPlugin.zone == zone))
             await session.execute(delete(GatewaySession).where(GatewaySession.zone == zone))
-            await session.execute(delete(GatewayToken).where(GatewayToken.zone == zone))
             await session.execute(delete(GatewayQuarantine).where(GatewayQuarantine.zone == zone))
             await session.execute(delete(ConfigOutbox).where(ConfigOutbox.zone == zone))
             await session.execute(delete(ConfigVersion).where(ConfigVersion.zone == zone))
@@ -144,10 +142,9 @@ async def clean_gateways(api_engine: AsyncEngine) -> AsyncIterator[None]:
             await session.execute(delete(UsageEvent).where(UsageEvent.zone == zone))
             await session.execute(delete(ModelDeployment).where(ModelDeployment.zone == zone))
             await session.execute(delete(Upstream).where(Upstream.zone == zone))
-            await session.execute(delete(Zone).where(Zone.name == zone))
+            await session.execute(delete(Zone).where(Zone.id == zone))
         await session.execute(delete(GatewayPlugin).where(GatewayPlugin.zone == API_SCOPE))
         await session.execute(delete(GatewaySession).where(GatewaySession.zone == API_SCOPE))
-        await session.execute(delete(GatewayToken).where(GatewayToken.zone == API_SCOPE))
         await session.execute(delete(GatewayQuarantine).where(GatewayQuarantine.zone == API_SCOPE))
         await session.execute(delete(ConfigOutbox).where(ConfigOutbox.zone == API_SCOPE))
         await session.execute(delete(ConfigVersion).where(ConfigVersion.zone == API_SCOPE))

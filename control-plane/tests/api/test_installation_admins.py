@@ -74,7 +74,7 @@ async def roles_engine(roles_url: str) -> AsyncIterator[AsyncEngine]:
 @pytest.fixture(scope="module")
 async def roles_scope(roles_engine: AsyncEngine) -> None:
     async with AsyncSession(roles_engine) as session, session.begin():
-        session.add(Zone(name=SCOPE))
+        session.add(Zone(id=SCOPE, name=SCOPE))
 
 
 @pytest.fixture(scope="module")

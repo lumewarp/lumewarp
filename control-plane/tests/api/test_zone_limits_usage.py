@@ -18,7 +18,7 @@ from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as pb
 from lumewarp_control_plane._proto.lumewarp.usage.v1 import usage_pb2
 from lumewarp_control_plane.auth import sessions
 from lumewarp_control_plane.compiler import compile_zone
-from lumewarp_control_plane.models import ConfigOutbox, ScopeType, TeamRole
+from lumewarp_control_plane.models import ConfigOutbox, ScopeType, TeamRole, Zone
 from lumewarp_control_plane.usage import ingest
 from lumewarp_control_plane.windows import month_window
 from tests.api.helpers import (
@@ -47,10 +47,17 @@ WINDOW = {
 }
 
 
-def create_zone(client, **rules) -> dict:
-    name = f"z-{uuid.uuid4().hex[:10]}"
-    response = client.post("/api/v1/zones", json={"name": name, **rules}, headers=ADMIN_AUTH)
-    assert response.status_code == 201, response.text
+async def create_zone(client, committed, **rules) -> dict:
+    """Insert a zone row (zones come from env tokens, not the API) and set its rules."""
+    zone_id = f"z-{uuid.uuid4().hex[:10]}"
+    committed.add(Zone(id=zone_id, name=zone_id))
+    await committed.commit()
+    response = client.patch(
+        f"/api/v1/zones/{zone_id}",
+        json={"name": f"Zone {zone_id.upper()}", **rules},
+        headers=ADMIN_AUTH,
+    )
+    assert response.status_code == 200, response.text
     return response.json()
 
 
@@ -85,7 +92,7 @@ def usage_proto(key, *, cost: int) -> usage_pb2.UsageEvent:
 
 
 async def test_owner_outputs_carry_limits_and_member_defaults_per_zone(client, committed) -> None:
-    zone = create_zone(client)
+    zone = await create_zone(client, committed)
     org = await make_org(committed)
     team = await make_team(committed, org=org)
     user = await make_user(committed)
@@ -94,11 +101,11 @@ async def test_owner_outputs_carry_limits_and_member_defaults_per_zone(client, c
     await committed.commit()
 
     put_zone_limits(client, "api-test", {"org_id": str(org.id)}, rpm_limit=100)
-    put_zone_limits(client, zone["name"], {"org_id": str(org.id)}, rpm_limit=50)
+    put_zone_limits(client, zone["id"], {"org_id": str(org.id)}, rpm_limit=50)
     put_zone_limits(client, "api-test", {"team_id": str(team.id)}, tpm_limit=1_000)
-    put_zone_limits(client, zone["name"], {"team_id": str(team.id)}, tpm_limit=2_000)
+    put_zone_limits(client, zone["id"], {"team_id": str(team.id)}, tpm_limit=2_000)
     put_member_defaults(client, "api-test", str(team.id), rpm_limit=10)
-    put_member_defaults(client, zone["name"], str(team.id), rpm_limit=20)
+    put_member_defaults(client, zone["id"], str(team.id), rpm_limit=20)
     put_zone_limits(
         client,
         "api-test",
@@ -107,42 +114,42 @@ async def test_owner_outputs_carry_limits_and_member_defaults_per_zone(client, c
     )
     put_zone_limits(
         client,
-        zone["name"],
+        zone["id"],
         {"team_id": str(team.id), "service_account_id": str(account.id)},
         budget_nano_usd=1_000,
     )
 
     org_out = client.get(f"/api/v1/orgs/{org.id}", headers=ADMIN_AUTH).json()
     assert org_out["limits_by_zone"]["api-test"]["rpm_limit"] == 100
-    assert org_out["limits_by_zone"][zone["name"]]["rpm_limit"] == 50
+    assert org_out["limits_by_zone"][zone["id"]]["rpm_limit"] == 50
 
     team_out = client.get(f"/api/v1/teams/{team.id}", headers=ADMIN_AUTH).json()
     assert team_out["limits_by_zone"]["api-test"]["tpm_limit"] == 1_000
-    assert team_out["limits_by_zone"][zone["name"]]["tpm_limit"] == 2_000
+    assert team_out["limits_by_zone"][zone["id"]]["tpm_limit"] == 2_000
     assert team_out["member_defaults_by_zone"]["api-test"]["rpm_limit"] == 10
-    assert team_out["member_defaults_by_zone"][zone["name"]]["rpm_limit"] == 20
+    assert team_out["member_defaults_by_zone"][zone["id"]]["rpm_limit"] == 20
 
     rows = client.get(f"/api/v1/teams/{team.id}/members?limit=500", headers=ADMIN_AUTH).json()
     member = next(row for row in rows["items"] if row["user_id"] == str(user.id))
     assert member["limits_by_zone"]["api-test"]["rpm_limit"] == 5
 
     account_out = client.get(f"/api/v1/service-accounts/{account.id}", headers=ADMIN_AUTH).json()
-    assert account_out["limits_by_zone"][zone["name"]]["budget_nano_usd"] == 1_000
+    assert account_out["limits_by_zone"][zone["id"]]["budget_nano_usd"] == 1_000
 
 
 async def test_per_zone_limits_compile_into_that_zones_keys(client, committed, api_engine) -> None:
-    first = create_zone(client)
-    second = create_zone(client)
+    first = await create_zone(client, committed)
+    second = await create_zone(client, committed)
     team = await make_team(committed)
     user = await make_user(committed)
     await make_member(committed, team, user)
-    first_key = await make_key(committed, team, user, zone=first["name"])
-    second_key = await make_key(committed, team, user, zone=second["name"])
+    first_key = await make_key(committed, team, user, zone=first["id"])
+    second_key = await make_key(committed, team, user, zone=second["id"])
     await committed.commit()
-    put_zone_limits(client, first["name"], {"team_id": str(team.id)}, rpm_limit=5)
-    put_zone_limits(client, second["name"], {"team_id": str(team.id)}, rpm_limit=50)
+    put_zone_limits(client, first["id"], {"team_id": str(team.id)}, rpm_limit=5)
+    put_zone_limits(client, second["id"], {"team_id": str(team.id)}, rpm_limit=50)
 
-    one = await compile_zone_snapshot(api_engine, first["name"])
+    one = await compile_zone_snapshot(api_engine, first["id"])
     scopes = {
         scope.id: scope.limit.requests_per_minute
         for scope in wire_key(one, first_key.id).policy.rate_limit_scopes
@@ -150,7 +157,7 @@ async def test_per_zone_limits_compile_into_that_zones_keys(client, committed, a
     assert scopes[f"team:{team.id}"] == 5
     assert wire_key(one, second_key.id) is None
 
-    two = await compile_zone_snapshot(api_engine, second["name"])
+    two = await compile_zone_snapshot(api_engine, second["id"])
     scopes = {
         scope.id: scope.limit.requests_per_minute
         for scope in wire_key(two, second_key.id).policy.rate_limit_scopes
@@ -160,19 +167,19 @@ async def test_per_zone_limits_compile_into_that_zones_keys(client, committed, a
 
 
 async def test_per_zone_budget_flip_blocks_only_that_zone(client, committed, api_engine) -> None:
-    first = create_zone(client)
-    second = create_zone(client)
+    first = await create_zone(client, committed)
+    second = await create_zone(client, committed)
     team = await make_team(committed)
     user = await make_user(committed)
     await make_member(committed, team, user)
-    first_key = await make_key(committed, team, user, zone=first["name"])
-    second_key = await make_key(committed, team, user, zone=second["name"])
+    first_key = await make_key(committed, team, user, zone=first["id"])
+    second_key = await make_key(committed, team, user, zone=second["id"])
     await committed.commit()
-    put_zone_limits(client, first["name"], {"team_id": str(team.id)}, budget_nano_usd=100)
+    put_zone_limits(client, first["id"], {"team_id": str(team.id)}, budget_nano_usd=100)
 
     async with AsyncSession(committed.bind) as session, session.begin():
         assert (
-            await ingest(session, "gw-test", [usage_proto(first_key, cost=150)], zone=first["name"])
+            await ingest(session, "gw-test", [usage_proto(first_key, cost=150)], zone=first["id"])
             == 1
         )
 
@@ -181,7 +188,7 @@ async def test_per_zone_budget_flip_blocks_only_that_zone(client, committed, api
             select(func.count())
             .select_from(ConfigOutbox)
             .where(
-                ConfigOutbox.zone == first["name"],
+                ConfigOutbox.zone == first["id"],
                 ConfigOutbox.reason == "usage budget exceeded",
             )
         )
@@ -191,29 +198,29 @@ async def test_per_zone_budget_flip_blocks_only_that_zone(client, committed, api
                 select(func.count())
                 .select_from(ConfigOutbox)
                 .where(
-                    ConfigOutbox.zone == second["name"],
+                    ConfigOutbox.zone == second["id"],
                     ConfigOutbox.reason == "usage budget exceeded",
                 )
             )
             == 0
         )
 
-    one = await compile_zone_snapshot(api_engine, first["name"])
+    one = await compile_zone_snapshot(api_engine, first["id"])
     assert wire_key(one, first_key.id).status == pb.KEY_STATUS_BUDGET_EXCEEDED
-    two = await compile_zone_snapshot(api_engine, second["name"])
+    two = await compile_zone_snapshot(api_engine, second["id"])
     assert wire_key(two, second_key.id).status == pb.KEY_STATUS_ACTIVE
     assert wire_key(two, first_key.id) is None
 
 
 async def test_usage_leaderboard_requests_and_org_usage_filter_by_zone(client, committed) -> None:
-    first = create_zone(client)
-    second = create_zone(client)
+    first = await create_zone(client, committed)
+    second = await create_zone(client, committed)
     org = await make_org(committed)
     team = await make_team(committed, org=org)
     user = await make_user(committed)
     await make_member(committed, team, user)
-    first_key = await make_key(committed, team, user, zone=first["name"])
-    second_key = await make_key(committed, team, user, zone=second["name"])
+    first_key = await make_key(committed, team, user, zone=first["id"])
+    second_key = await make_key(committed, team, user, zone=second["id"])
     committed.add(usage_event(first_key, ts=TS, requested="alpha"))
     committed.add(usage_event(first_key, ts=TS, requested="alpha"))
     committed.add(usage_event(second_key, ts=TS, requested="beta"))
@@ -221,40 +228,41 @@ async def test_usage_leaderboard_requests_and_org_usage_filter_by_zone(client, c
 
     usage = client.get(
         "/api/v1/usage",
-        params={**WINDOW, "zone": first["name"], "group_by": "team", "team_id": str(team.id)},
+        params={**WINDOW, "zone": first["id"], "group_by": "team", "team_id": str(team.id)},
         headers=ADMIN_AUTH,
     ).json()["items"]
-    assert [(row["zone"], row["requests"]) for row in usage] == [(first["name"], 2)]
+    assert [(row["zone"], row["requests"]) for row in usage] == [(first["id"], 2)]
 
     board = client.get(
         "/api/v1/usage/leaderboard",
-        params={"by": "requested", **WINDOW, "zone": second["name"]},
+        params={"by": "requested", **WINDOW, "zone": second["id"]},
         headers=ADMIN_AUTH,
     ).json()["items"]
     assert {(row["zone"], row["label"], row["requests"]) for row in board} == {
-        (second["name"], "beta", 1)
+        (second["id"], "beta", 1)
     }
 
     requests = client.get(
         "/api/v1/requests",
-        params={"zone": second["name"], **WINDOW},
+        params={"zone": second["id"], **WINDOW},
         headers=ADMIN_AUTH,
     ).json()["items"]
-    assert {row["zone"] for row in requests} == {second["name"]}
+    assert {row["zone"] for row in requests} == {second["id"]}
 
     org_usage = client.get(
         f"/api/v1/orgs/{org.id}/usage",
-        params={"zone": first["name"], **WINDOW},
+        params={"zone": first["id"], **WINDOW},
         headers=ADMIN_AUTH,
     ).json()
-    assert org_usage["zone"] == first["name"]
+    assert org_usage["zone"] == first["id"]
     assert org_usage["requests"] >= 2
 
 
 async def test_users_me_reports_limits_and_rules_per_zone(client, committed) -> None:
-    zone = create_zone(
+    zone = await create_zone(
         client,
-        display_name="Dev",
+        committed,
+        name="Dev",
         playground_allowed=False,
         key_max_lifetime_seconds=600,
         key_min_creator_role="team_admin",
@@ -264,13 +272,14 @@ async def test_users_me_reports_limits_and_rules_per_zone(client, committed) -> 
     await make_member(committed, team, user)
     await committed.commit()
     put_zone_limits(client, "api-test", {"team_id": str(team.id)}, rpm_limit=10)
-    put_zone_limits(client, zone["name"], {"team_id": str(team.id)}, rpm_limit=40)
+    put_zone_limits(client, zone["id"], {"team_id": str(team.id)}, rpm_limit=40)
 
     me = client.get("/api/v1/users/me", headers=auth(token)).json()
     row = next(item for item in me["teams"] if item["team_id"] == str(team.id))
-    assert set(row["by_zone"]) >= {"api-test", zone["name"]}
+    assert set(row["by_zone"]) >= {"api-test", zone["id"]}
     assert row["limits"]["rpm_limit"] == 10
-    dev = row["by_zone"][zone["name"]]
+    dev = row["by_zone"][zone["id"]]
+    assert dev["name"] == "Dev"
     assert dev["limits"]["rpm_limit"] == 40
     assert dev["key_rules"]["playground_allowed"] is False
     assert dev["key_rules"]["key_max_lifetime_seconds"] == 600
@@ -283,19 +292,19 @@ async def test_users_me_reports_limits_and_rules_per_zone(client, committed) -> 
 async def test_playground_offers_and_forwards_only_a_zones_playable_keys(
     client, committed, monkeypatch
 ) -> None:
-    disallowed = create_zone(
-        client, playground_allowed=False, playground_gateway_url="http://gw-a:4000"
+    disallowed = await create_zone(
+        client, committed, playground_allowed=False, playground_gateway_url="http://gw-a:4000"
     )
-    missing_url = create_zone(client, playground_allowed=True)
-    allowed = create_zone(
-        client, playground_allowed=True, playground_gateway_url="http://gw-b:4000"
+    missing_url = await create_zone(client, committed, playground_allowed=True)
+    allowed = await create_zone(
+        client, committed, playground_allowed=True, playground_gateway_url="http://gw-b:4000"
     )
     team = await make_team(committed)
     user = await make_user(committed)
     await make_member(committed, team, user, role=TeamRole.ADMIN)
-    disallowed_key = await make_key(committed, team, user, zone=disallowed["name"])
-    missing_key = await make_key(committed, team, user, zone=missing_url["name"])
-    allowed_key = await make_key(committed, team, user, zone=allowed["name"])
+    disallowed_key = await make_key(committed, team, user, zone=disallowed["id"])
+    missing_key = await make_key(committed, team, user, zone=missing_url["id"])
+    allowed_key = await make_key(committed, team, user, zone=allowed["id"])
     cookie = await sessions.create_session(committed, user.id, 3600)
     await committed.commit()
     headers = auth("session:" + cookie)
@@ -303,7 +312,7 @@ async def test_playground_offers_and_forwards_only_a_zones_playable_keys(
     body = client.get("/api/v1/playground", headers=headers).json()
     by_id = {key["id"]: key for key in body["keys"]}
     assert str(allowed_key.id) in by_id
-    assert by_id[str(allowed_key.id)]["zone"] == allowed["name"]
+    assert by_id[str(allowed_key.id)]["zone"] == allowed["id"]
     assert str(disallowed_key.id) not in by_id
     assert str(missing_key.id) not in by_id
 
@@ -342,16 +351,16 @@ async def test_playground_offers_and_forwards_only_a_zones_playable_keys(
 
 async def test_team_totals_pagination_is_per_zone(client, committed) -> None:
     """The totals fast path groups by zone and team, so its cursor must carry both."""
-    first = create_zone(client)
-    second = create_zone(client)
+    first = await create_zone(client, committed)
+    second = await create_zone(client, committed)
     org = await make_org(committed)
     team = await make_team(committed, org=org)
     start, end = month_window(datetime.now(UTC))
     committed.add(
-        usage_total(ScopeType.TEAM, team.id, window_start=start, requests=3, zone=first["name"])
+        usage_total(ScopeType.TEAM, team.id, window_start=start, requests=3, zone=first["id"])
     )
     committed.add(
-        usage_total(ScopeType.TEAM, team.id, window_start=start, requests=7, zone=second["name"])
+        usage_total(ScopeType.TEAM, team.id, window_start=start, requests=7, zone=second["id"])
     )
     await committed.commit()
     params = {
@@ -362,8 +371,8 @@ async def test_team_totals_pagination_is_per_zone(client, committed) -> None:
     }
     whole = client.get("/api/v1/usage", params=params, headers=ADMIN_AUTH).json()["items"]
     assert {row["zone"]: row["requests"] for row in whole} == {
-        first["name"]: 3,
-        second["name"]: 7,
+        first["id"]: 3,
+        second["id"]: 7,
     }
     page = client.get("/api/v1/usage", params={**params, "limit": 1}, headers=ADMIN_AUTH).json()
     assert page["next_cursor"]

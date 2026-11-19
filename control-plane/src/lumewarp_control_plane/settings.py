@@ -1,6 +1,9 @@
 """Process settings, read from `LUMEWARP_*` environment variables."""
 
+import hashlib
+import os
 import re
+from collections.abc import Mapping
 from functools import lru_cache
 from ipaddress import ip_network
 from typing import Annotated
@@ -11,6 +14,41 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 DEV_DATABASE_URL = "postgresql+asyncpg://lumewarp:lumewarp@127.0.0.1:55432/lumewarp"
 
 MIB = 1024 * 1024
+
+# `LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN`: one fixed gateway credential per zone. `<ID>` is the
+# zone id upper-cased with `-` -> `_` (a bijection: a zone id never contains `_`).
+GATEWAY_ZONE_TOKEN_ENV = re.compile(r"LUMEWARP_GATEWAY_ZONE_(.+)_TOKEN\Z")
+GATEWAY_ZONE_TOKEN_MIN_LENGTH = 32
+_ZONE_ID = re.compile(r"[a-z][a-z0-9-]{0,62}")
+
+
+def gateway_zone_tokens(environ: Mapping[str, str] | None = None) -> dict[str, bytes]:
+    """The gateway tokens of the environment, as zone id -> sha256 digest.
+
+    Called at startup. Every `LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN` declares a zone; an id that
+    is not a zone slug or a token shorter than 32 characters fails startup with the variable
+    name (never the value). Only digests are returned and kept in memory.
+    """
+    environ = os.environ if environ is None else environ
+    tokens: dict[str, bytes] = {}
+    declared_by: dict[str, str] = {}
+    for name, value in environ.items():
+        match = GATEWAY_ZONE_TOKEN_ENV.fullmatch(name)
+        if match is None:
+            continue
+        zone = match.group(1).lower().replace("_", "-")
+        if not _ZONE_ID.fullmatch(zone):
+            raise ValueError(f"{name}: zone id {zone!r} must match ^[a-z][a-z0-9-]{{0,62}}$")
+        if len(value) < GATEWAY_ZONE_TOKEN_MIN_LENGTH:
+            raise ValueError(
+                f"{name}: the gateway zone token must be at least "
+                f"{GATEWAY_ZONE_TOKEN_MIN_LENGTH} characters"
+            )
+        if zone in declared_by:
+            raise ValueError(f"{name} and {declared_by[zone]} both declare zone {zone!r}")
+        declared_by[zone] = name
+        tokens[zone] = hashlib.sha256(value.encode()).digest()
+    return tokens
 
 
 def split_bind(bind: str) -> tuple[str, int]:
@@ -114,8 +152,11 @@ class Settings(BaseSettings):
     # `Secure` on the session cookie. Turn off only for plain-http dev on a non-localhost.
     session_cookie_secure: bool = True
     # Default config zone this control plane publishes (Snapshot.zone) and creates at
-    # startup. Other zones are managed through the zones API.
+    # startup. Other zones are declared by their `LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN`.
     zone: str = "default"
+    # One fixed gateway token per zone, read from the environment at startup; values are
+    # sha256 digests only. A zone is declared here by its token.
+    gateway_zone_tokens: dict[str, bytes] = Field(default_factory=gateway_zone_tokens)
 
     # Limits shared with the gateway, see docs/config-protocol.md.
     max_snapshot_bytes: int = 64 * MIB

@@ -13,9 +13,8 @@ from lumewarp_control_plane._proto.lumewarp.config.v1 import config_service_pb2 
 from lumewarp_control_plane.compiler import publish_pending
 from lumewarp_control_plane.db import SessionFactory
 from lumewarp_control_plane.ids import uuid7
-from lumewarp_control_plane.models import ConfigOutbox, GatewayQuarantine, GatewayToken, Zone
-from lumewarp_control_plane.security import SecretKind, generate_secret
-from tests.grpc.test_config_service import _open_stream, _seed, _start
+from lumewarp_control_plane.models import ConfigOutbox, GatewayQuarantine, Zone
+from tests.grpc.test_config_service import _open_stream, _raw_stream, _seed, _start
 
 
 def _zones() -> tuple[str, str]:
@@ -44,8 +43,8 @@ async def test_each_zone_stream_receives_its_own_snapshot(session_factory: Sessi
         assert dev_update.WhichOneof("update") == "full"
         assert (dev_update.full.zone, dev_update.full.version) == (dev, 2)
 
-        # The same token cannot present another zone's persisted snapshot.
-        crossed = await _open_stream(stub, prod_tokens["gateway-a"], "gw-crossed", zone=dev)
+        # A Hello of another zone cannot ride on this zone's metadata.
+        crossed = await _raw_stream(stub, prod_tokens["gateway-a"], prod, hello_zone=dev)
         with pytest.raises(grpc.aio.AioRpcError) as error:
             await crossed.read()
         assert error.value.code() is grpc.StatusCode.FAILED_PRECONDITION
@@ -122,18 +121,9 @@ async def test_a_global_write_publishes_in_every_zone_and_a_zone_write_in_one(
     assert await publish_pending(session_factory, prod, require_local_membership=True) == 2
     assert await publish_pending(session_factory, dev, require_local_membership=True) == 2
 
-    # A zone-bound write (a gateway token) recompiles only that zone.
+    # A zone-bound write recompiles only that zone.
     async with session_factory() as session, session.begin():
-        generated = generate_secret(SecretKind.GATEWAY_TOKEN)
-        session.add(
-            GatewayToken(
-                zone=prod,
-                name="zone-only",
-                token_hash=generated.hash,
-                display_prefix=generated.display_prefix,
-            )
-        )
-        await outbox.enqueue_recompile(session, "api.gateway_token.create", prod)
+        await outbox.enqueue_recompile(session, "test.zone-only", prod)
     async with session_factory() as session:
         pending = (
             await session.scalars(

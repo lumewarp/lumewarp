@@ -3,12 +3,7 @@
 from __future__ import annotations
 
 from lumewarp_control_plane.app import create_app
-from lumewarp_control_plane.models import (
-    GatewaySession,
-    GatewayToken,
-    Zone,
-)
-from lumewarp_control_plane.security import SecretKind, generate_secret
+from lumewarp_control_plane.models import GatewaySession, Zone
 from lumewarp_control_plane.settings import Settings
 from tests.api.helpers import (
     ADMIN_AUTH,
@@ -83,23 +78,13 @@ def test_weighted_router_needs_positive_total_weight(client) -> None:
 
 async def test_gateways_are_scoped(client, committed, api_scope) -> None:
     other_scope = f"other-{suffix()}"
-    committed.add(Zone(name=other_scope))
+    committed.add(Zone(id=other_scope, name=other_scope))
     await committed.flush()
     foreign_id = f"gw-foreign-{suffix()}"
-    secret = generate_secret(SecretKind.GATEWAY_TOKEN)
-    foreign_token = GatewayToken(
-        zone=other_scope,
-        name="foreign",
-        token_hash=secret.hash,
-        display_prefix=secret.display_prefix,
-    )
-    committed.add(foreign_token)
-    await committed.flush()
     committed.add(
         GatewaySession(
             zone=other_scope,
             gateway_id=foreign_id,
-            token_id=foreign_token.id,
             connected=True,
         )
     )
@@ -107,24 +92,19 @@ async def test_gateways_are_scoped(client, committed, api_scope) -> None:
 
     listed = client.get(f"{API}/gateways?limit=500", headers=ADMIN_AUTH).json()["items"]
     assert foreign_id not in {item["gateway_id"] for item in listed}
-    foreign_tokens = client.get(f"{API}/gateway-tokens?limit=500", headers=ADMIN_AUTH)
-    assert foreign_token.id not in {item["id"] for item in foreign_tokens.json()["items"]}
-    # Revoking by id is installation-wide: the id is not filtered by the default zone.
-    revoke = client.post(f"{API}/gateway-tokens/{foreign_token.id}/revoke", headers=ADMIN_AUTH)
-    assert revoke.status_code == 200, revoke.text
-    assert revoke.json()["revoked_at"] is not None
+    # The other zone is visible with an explicit zone parameter.
+    other = client.get(f"{API}/gateways?limit=500&zone={other_scope}", headers=ADMIN_AUTH).json()[
+        "items"
+    ]
+    assert foreign_id in {item["gateway_id"] for item in other}
 
     # Pagination walks every gateway exactly once, connected first then by gateway id.
     ids = [f"gw-page-{suffix()}" for _ in range(3)]
-    token = client.post(f"{API}/gateway-tokens", json={"name": "paging"}, headers=ADMIN_AUTH)
-    assert token.status_code == 201
-    token_id = token.json()["token"]["id"]
     for gateway_id in ids:
         committed.add(
             GatewaySession(
                 zone=api_scope,
                 gateway_id=gateway_id,
-                token_id=token_id,
                 connected=False,
             )
         )

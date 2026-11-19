@@ -441,7 +441,7 @@ async def _evaluate_budgets(
         audit.record(
             session,
             actor_type=ActorType.SYSTEM,
-            actor_id=f"usage:{gateway_id}",
+            actor_id=f"usage:{gateway_id}" if gateway_id else "usage",
             action="budget.hard_exceeded",
             resource_type=total.scope_type.value,
             resource_id=total.scope_id,
@@ -544,16 +544,18 @@ async def ingest(
     key, a request id reused for different content within the batch or against a stored
     event) is skipped and logged, and never costs the rest of the batch. A duplicate request
     id with an identical payload is accepted without re-counting. Only batch-level problems
-    (an invalid reporting gateway id, batch size) reject the whole batch. Event timestamps,
-    not receipt time, select the UTC month. `zone` is the authenticated gateway token's
-    zone; a key of another zone is rejected (`key_mismatch`) like a hierarchy mismatch.
+    (an invalid reporting gateway id, batch size) reject the whole batch. `gateway_id` is
+    the id Welcome assigned to the reporting stream, empty for events served before any
+    handshake; they are attributed to no gateway row. Event timestamps, not receipt time,
+    select the UTC month. `zone` is the authenticated zone token's zone; a key of another
+    zone is rejected (`key_mismatch`) like a hierarchy mismatch.
 
     If `skipped` is given, skipped events are added to it by bounded reason (`SKIP_REASONS`)
     for the caller to export once the transaction has committed.
     """
     zone = zone or get_settings().zone
-    if not isinstance(gateway_id, str) or not valid_gateway_id(gateway_id):
-        raise InvalidUsageBatch("invalid gateway id: 1..100 of [A-Za-z0-9._-]")
+    if not isinstance(gateway_id, str) or (gateway_id and not valid_gateway_id(gateway_id)):
+        raise InvalidUsageBatch("invalid gateway id: empty or 1..100 of [A-Za-z0-9._-]")
     maximum = (
         get_settings().max_usage_batch_events if max_batch_events is None else max_batch_events
     )
@@ -610,7 +612,7 @@ async def ingest(
         if rejected:
             log.warning(
                 "usage report from gateway %s: skipped %d of %d events: %s",
-                gateway_id,
+                gateway_id or "(unassigned)",
                 rejected.total(),
                 len(events),
                 dict(rejected),

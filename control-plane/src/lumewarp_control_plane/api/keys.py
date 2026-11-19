@@ -531,8 +531,8 @@ async def _violations_for(
     if not keys:
         return {}
     zones = {
-        row.name: row
-        for row in await session.scalars(select(Zone).where(Zone.name.in_({k.zone for k in keys})))
+        row.id: row
+        for row in await session.scalars(select(Zone).where(Zone.id.in_({k.zone for k in keys})))
     }
     counts: dict[tuple[str, uuid.UUID, uuid.UUID], int] = {}
     # The count only matters when some zone or team caps member keys.
@@ -898,7 +898,7 @@ async def create_key(
         if caller_rank < _ROLE_RANK[zone.key_min_creator_role]:
             raise validation_error(
                 "zone",
-                f"creating a key in zone {zone.name!r} requires {zone.key_min_creator_role.value}",
+                f"creating a key in zone {zone.id!r} requires {zone.key_min_creator_role.value}",
             )
         if body.service_account_id is None:
             await authz.require(Action.KEY_CREATE_OWN, team.id)
@@ -908,10 +908,10 @@ async def create_key(
             owner = {"owner_kind": KeyOwnerKind.USER, "user_id": user_id}
             cap = _member_cap(zone, team)
             if cap is not None:
-                owned = await _member_key_count(session, zone.name, team.id, user_id)
+                owned = await _member_key_count(session, zone.id, team.id, user_id)
                 if owned >= cap:
                     raise conflict(
-                        f"member key limit reached ({cap} per member in zone {zone.name!r})"
+                        f"member key limit reached ({cap} per member in zone {zone.id!r})"
                     )
             expires_at = _expiry_for_create(zone, team, user_key=True, expires_at=body.expires_at)
         else:
@@ -922,7 +922,7 @@ async def create_key(
                 raise conflict("the service account is deactivated")
             if not zone.service_account_keys_allowed:
                 raise validation_error(
-                    "zone", f"zone {zone.name!r} does not allow service-account keys"
+                    "zone", f"zone {zone.id!r} does not allow service-account keys"
                 )
             await authz.require(Action.SERVICE_ACCOUNT_MANAGE, team.id)
             owner = {
@@ -933,7 +933,7 @@ async def create_key(
         new = generate_secret(SecretKind.API_KEY)
         row = ApiKey(
             team_id=team.id,
-            zone=zone.name,
+            zone=zone.id,
             name=body.name,
             key_hash=new.hash,
             display_prefix=new.display_prefix,

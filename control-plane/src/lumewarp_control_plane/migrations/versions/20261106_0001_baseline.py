@@ -440,8 +440,8 @@ def upgrade() -> None:
     )
     op.create_table(
         "zones",
-        sa.Column("name", sa.String(length=64), nullable=False),
-        sa.Column("display_name", sa.String(length=200), server_default="", nullable=False),
+        sa.Column("id", sa.String(length=64), nullable=False),
+        sa.Column("name", sa.String(length=200), nullable=False),
         sa.Column("color", sa.String(length=16), server_default="gray", nullable=False),
         sa.Column("archived_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("source_revision", sa.BigInteger(), server_default="0", nullable=False),
@@ -477,7 +477,7 @@ def upgrade() -> None:
             "key_min_creator_role IN ('member', 'team_admin', 'org_admin')",
             name=op.f("ck_zones_key_min_creator_role"),
         ),
-        sa.CheckConstraint("name ~ '^[a-z][a-z0-9-]{0,62}$'", name=op.f("ck_zones_name_slug")),
+        sa.CheckConstraint("id ~ '^[a-z][a-z0-9-]{0,62}$'", name=op.f("ck_zones_id_slug")),
         sa.CheckConstraint(
             "key_max_lifetime_seconds IS NULL OR key_max_lifetime_seconds > 0",
             name=op.f("ck_zones_key_lifetime_positive"),
@@ -486,7 +486,7 @@ def upgrade() -> None:
             "key_max_per_member IS NULL OR key_max_per_member > 0",
             name=op.f("ck_zones_key_max_positive"),
         ),
-        sa.PrimaryKeyConstraint("name", name=op.f("pk_zones")),
+        sa.PrimaryKeyConstraint("id", name=op.f("pk_zones")),
     )
     op.create_table(
         "a2a_agents",
@@ -552,7 +552,7 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint("timeout_ms >= 0", name=op.f("ck_a2a_agents_timeout_nonneg")),
         sa.ForeignKeyConstraint(
-            ["zone"], ["zones.name"], name=op.f("fk_a2a_agents_zone_zones"), ondelete="RESTRICT"
+            ["zone"], ["zones.id"], name=op.f("fk_a2a_agents_zone_zones"), ondelete="RESTRICT"
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_a2a_agents")),
     )
@@ -635,7 +635,7 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint("attempts >= 0", name=op.f("ck_config_outbox_attempts_nonneg")),
         sa.ForeignKeyConstraint(
-            ["zone"], ["zones.name"], name=op.f("fk_config_outbox_zone_zones"), ondelete="RESTRICT"
+            ["zone"], ["zones.id"], name=op.f("fk_config_outbox_zone_zones"), ondelete="RESTRICT"
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_config_outbox")),
     )
@@ -699,7 +699,7 @@ def upgrade() -> None:
         sa.CheckConstraint("version > 0", name=op.f("ck_config_versions_version_positive")),
         sa.ForeignKeyConstraint(
             ["zone"],
-            ["zones.name"],
+            ["zones.id"],
             name=op.f("fk_config_versions_zone_zones"),
             ondelete="RESTRICT",
         ),
@@ -723,37 +723,12 @@ def upgrade() -> None:
         ),
         sa.ForeignKeyConstraint(
             ["zone"],
-            ["zones.name"],
+            ["zones.id"],
             name=op.f("fk_gateway_quarantines_zone_zones"),
             ondelete="RESTRICT",
         ),
         sa.PrimaryKeyConstraint("zone", name=op.f("pk_gateway_quarantines")),
     )
-    op.create_table(
-        "gateway_tokens",
-        sa.Column("id", sa.Uuid(), nullable=False),
-        sa.Column("zone", sa.String(length=64), nullable=False),
-        sa.Column("name", sa.String(length=200), server_default="", nullable=False),
-        sa.Column("token_hash", sa.LargeBinary(), nullable=False),
-        sa.Column("display_prefix", sa.String(length=32), nullable=False),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.Column("last_used_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True),
-        sa.CheckConstraint(
-            "octet_length(token_hash) = 32", name=op.f("ck_gateway_tokens_token_hash_len")
-        ),
-        sa.ForeignKeyConstraint(
-            ["zone"], ["zones.name"], name=op.f("fk_gateway_tokens_zone_zones"), ondelete="RESTRICT"
-        ),
-        sa.PrimaryKeyConstraint("id", name=op.f("pk_gateway_tokens")),
-        sa.UniqueConstraint("token_hash", name=op.f("uq_gateway_tokens_token_hash")),
-    )
-    op.create_index(op.f("ix_gateway_tokens_zone"), "gateway_tokens", ["zone"], unique=False)
     op.create_table(
         "installation_admins",
         sa.Column("user_id", sa.Uuid(), nullable=False),
@@ -866,7 +841,7 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint("timeout_ms >= 0", name=op.f("ck_mcp_servers_timeout_nonneg")),
         sa.ForeignKeyConstraint(
-            ["zone"], ["zones.name"], name=op.f("fk_mcp_servers_zone_zones"), ondelete="RESTRICT"
+            ["zone"], ["zones.id"], name=op.f("fk_mcp_servers_zone_zones"), ondelete="RESTRICT"
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_mcp_servers")),
     )
@@ -1037,7 +1012,7 @@ def upgrade() -> None:
         ),
         sa.ForeignKeyConstraint(
             ["zone"],
-            ["zones.name"],
+            ["zones.id"],
             name=op.f("fk_org_budget_windows_zone_zones"),
             ondelete="CASCADE",
         ),
@@ -1391,7 +1366,7 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint("timeout_ms >= 0", name=op.f("ck_upstreams_timeout_nonneg")),
         sa.ForeignKeyConstraint(
-            ["zone"], ["zones.name"], name=op.f("fk_upstreams_zone_zones"), ondelete="RESTRICT"
+            ["zone"], ["zones.id"], name=op.f("fk_upstreams_zone_zones"), ondelete="RESTRICT"
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_upstreams")),
         sa.UniqueConstraint("id", "zone", name=op.f("uq_upstreams_id_zone")),
@@ -1438,7 +1413,7 @@ def upgrade() -> None:
             name=op.f("ck_usage_totals_nonneg"),
         ),
         sa.ForeignKeyConstraint(
-            ["zone"], ["zones.name"], name=op.f("fk_usage_totals_zone_zones"), ondelete="CASCADE"
+            ["zone"], ["zones.id"], name=op.f("fk_usage_totals_zone_zones"), ondelete="CASCADE"
         ),
         sa.PrimaryKeyConstraint(
             "zone", "scope_type", "scope_id", "window_start", name=op.f("pk_usage_totals")
@@ -1587,7 +1562,6 @@ def upgrade() -> None:
         sa.Column("zone", sa.String(length=64), nullable=False),
         sa.Column("gateway_id", sa.String(length=100), nullable=False),
         sa.Column("session_id", sa.Uuid(), nullable=True),
-        sa.Column("token_id", sa.Uuid(), nullable=False),
         sa.Column("connected", sa.Boolean(), server_default="false", nullable=False),
         sa.Column("gateway_version", sa.String(length=100), server_default="", nullable=False),
         sa.Column(
@@ -1623,14 +1597,8 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.ForeignKeyConstraint(
-            ["token_id"],
-            ["gateway_tokens.id"],
-            name=op.f("fk_gateway_sessions_token_id_gateway_tokens"),
-            ondelete="CASCADE",
-        ),
-        sa.ForeignKeyConstraint(
             ["zone"],
-            ["zones.name"],
+            ["zones.id"],
             name=op.f("fk_gateway_sessions_zone_zones"),
             ondelete="RESTRICT",
         ),
@@ -1937,7 +1905,7 @@ def upgrade() -> None:
         ),
         sa.ForeignKeyConstraint(
             ["zone"],
-            ["zones.name"],
+            ["zones.id"],
             name=op.f("fk_model_deployments_zone_zones"),
             ondelete="RESTRICT",
         ),
@@ -2196,7 +2164,7 @@ def upgrade() -> None:
         ),
         sa.ForeignKeyConstraint(
             ["zone"],
-            ["zones.name"],
+            ["zones.id"],
             name=op.f("fk_zone_member_defaults_zone_zones"),
             ondelete="CASCADE",
         ),
@@ -2333,7 +2301,7 @@ def upgrade() -> None:
             ["user_id"], ["users.id"], name=op.f("fk_api_keys_user_id_users"), ondelete="RESTRICT"
         ),
         sa.ForeignKeyConstraint(
-            ["zone"], ["zones.name"], name=op.f("fk_api_keys_zone_zones"), ondelete="RESTRICT"
+            ["zone"], ["zones.id"], name=op.f("fk_api_keys_zone_zones"), ondelete="RESTRICT"
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_api_keys")),
         sa.UniqueConstraint("key_hash", name=op.f("uq_api_keys_key_hash")),
@@ -2371,17 +2339,10 @@ def upgrade() -> None:
         sa.Column("name", sa.String(length=63), nullable=False),
         sa.Column("digest", sa.String(length=128), nullable=False),
         sa.Column("descriptor", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
-        sa.Column("token_id", sa.Uuid(), nullable=False),
         sa.Column("seen_at", sa.DateTime(timezone=True), nullable=False),
         sa.CheckConstraint(
             "kind IN ('router-strategy', 'upstream-auth', 'a2a-middleware')",
             name=op.f("ck_gateway_plugins_plugin_kind"),
-        ),
-        sa.ForeignKeyConstraint(
-            ["token_id"],
-            ["gateway_tokens.id"],
-            name=op.f("fk_gateway_plugins_token_id_gateway_tokens"),
-            ondelete="CASCADE",
         ),
         sa.ForeignKeyConstraint(
             ["zone", "gateway_id"],
@@ -2490,7 +2451,7 @@ def upgrade() -> None:
             ["team_id"], ["teams.id"], name=op.f("fk_zone_limits_team_id_teams"), ondelete="CASCADE"
         ),
         sa.ForeignKeyConstraint(
-            ["zone"], ["zones.name"], name=op.f("fk_zone_limits_zone_zones"), ondelete="CASCADE"
+            ["zone"], ["zones.id"], name=op.f("fk_zone_limits_zone_zones"), ondelete="CASCADE"
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_zone_limits")),
     )

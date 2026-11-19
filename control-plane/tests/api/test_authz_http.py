@@ -101,13 +101,6 @@ CASES = [
     ("routers.list", "GET", "/routers", None, INSTALLATION),
     ("catalog.list", "GET", "/catalog", None, ANY),
     ("gateways.list", "GET", "/gateways", None, INSTALLATION),
-    (
-        "gateway_tokens.create",
-        "POST",
-        "/gateway-tokens",
-        {"name": "gw-{mark}"},
-        (201, 403, 403, 403, 201),
-    ),
     ("config.list", "GET", "/config/versions", None, INSTALLATION),
     ("usage.read", "GET", "/usage?team_id={team}", None, READ),
     ("audit.read", "GET", "/audit?team_id={team}", None, ADMIN_READ),

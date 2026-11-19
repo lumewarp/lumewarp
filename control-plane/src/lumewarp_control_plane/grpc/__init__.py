@@ -2,15 +2,18 @@
 
 Config/usage wire semantics are normative in ``docs/config-protocol.md``. The registry is
 process-local for coordination; ``gateway_sessions`` is a status mirror, never session truth.
-A gateway is one process, named by ``Hello.gateway_id``; a reconnect of that id replaces its
-old stream. Quarantine is per zone: every gateway receives the same snapshot, so a version
-one gateway rejected is not sent to any gateway in the zone.
+A zone authenticates with one fixed token (``LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN``) plus
+``x-lumewarp-zone`` metadata; every stream is a new gateway whose id the control plane
+assigns in the first ``Welcome``. Quarantine is per zone: every gateway receives the same
+snapshot, so a version one gateway rejected is not sent to any gateway in the zone.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextvars
+import hashlib
+import hmac
 import logging
 import time
 import uuid
@@ -39,25 +42,24 @@ from lumewarp_control_plane.compiler.plugins import (
     replace_gateway_plugins,
 )
 from lumewarp_control_plane.db import SessionFactory
-from lumewarp_control_plane.ids import uuid7, valid_gateway_id
+from lumewarp_control_plane.ids import new_gateway_id, uuid7, valid_gateway_id
 from lumewarp_control_plane.mcp import catalog_ingest
 from lumewarp_control_plane.metrics import DISCARD, Metrics
 from lumewarp_control_plane.models import (
     ConfigVersion,
     GatewayQuarantine,
     GatewaySession,
-    GatewayToken,
+    Zone,
 )
-from lumewarp_control_plane.security import SecretKind, hash_secret, parse_bearer, secret_kind
+from lumewarp_control_plane.security import parse_bearer
 from lumewarp_control_plane.settings import Settings
 from lumewarp_control_plane.usage import InvalidUsageBatch, ingest
+from lumewarp_control_plane.zones import ensure_zones
 
 log = logging.getLogger(__name__)
 # Fallback only: in-process publishes wake streams via SessionRegistry.notify_published.
 # Each poll reads version metadata, never payloads.
 _PUBLISH_POLL_SECONDS = 2.0
-# Bound on how long a revoked token's open stream survives if close_token was not called.
-_TOKEN_RECHECK_SECONDS = 5.0
 _SNAPSHOT_CACHE_ENTRIES = 4
 _UPDATE_CACHE_ENTRIES = 8
 _RETRY_INITIAL_SECONDS = 1.0
@@ -74,31 +76,9 @@ _KEEPALIVE_TIMEOUT_MS = 20_000
 
 @dataclass(frozen=True)
 class GatewayIdentity:
-    """What a gateway token authenticates: its zone, never a gateway id."""
+    """What a zone token authenticates: its zone, never a gateway id."""
 
-    token_id: uuid.UUID
     zone: str
-
-
-async def authenticate_gateway(session: AsyncSession, token: str) -> GatewayIdentity | None:
-    """Resolve a valid gateway token; its zone is the stream's config zone.
-
-    The token is looked up without a zone filter: a token belongs to exactly one zone and
-    the gateway's Hello must name that zone.
-    """
-    if secret_kind(token) is not SecretKind.GATEWAY_TOKEN:
-        return None
-    row = (
-        await session.execute(
-            select(GatewayToken).where(
-                GatewayToken.token_hash == hash_secret(token),
-                GatewayToken.revoked_at.is_(None),
-            )
-        )
-    ).scalar_one_or_none()
-    if row is None:
-        return None
-    return GatewayIdentity(token_id=row.id, zone=row.zone)
 
 
 _identity_var: contextvars.ContextVar[GatewayIdentity | None] = contextvars.ContextVar(
@@ -131,15 +111,28 @@ class _GatewayAuthInterceptor(grpc.aio.ServerInterceptor):
 
     async def _authenticate(self, context) -> GatewayIdentity:
         metadata = context.invocation_metadata() or ()
-        values = [item.value for item in metadata if item.key.lower() == "authorization"]
-        token = parse_bearer(values[0]) if len(values) == 1 else None
-        identity = None
-        if token is not None:
-            async with self.session_factory() as session:
-                identity = await authenticate_gateway(session, token)
-        if identity is None:
+        authorizations = [item.value for item in metadata if item.key.lower() == "authorization"]
+        zones = [item.value for item in metadata if item.key.lower() == "x-lumewarp-zone"]
+        token = parse_bearer(authorizations[0]) if len(authorizations) == 1 else None
+        zone = zones[0] if len(zones) == 1 else None
+        # Unknown zone and wrong token are one answer, so this does not reveal which zones
+        # exist to a caller without a credential.
+        expected = self.settings.gateway_zone_tokens.get(zone) if zone is not None else None
+        if (
+            token is None
+            or expected is None
+            or not hmac.compare_digest(expected, hashlib.sha256(token.encode()).digest())
+        ):
             await context.abort(grpc.StatusCode.PERMISSION_DENIED, "invalid gateway credentials")
-        return identity
+        async with self.session_factory() as session:
+            row = (
+                await session.execute(select(Zone.id, Zone.archived_at).where(Zone.id == zone))
+            ).one_or_none()
+        if row is None:
+            await context.abort(grpc.StatusCode.PERMISSION_DENIED, "invalid gateway credentials")
+        if row.archived_at is not None:
+            await context.abort(grpc.StatusCode.FAILED_PRECONDITION, "zone is archived")
+        return GatewayIdentity(zone=zone)
 
     async def intercept_service(self, continuation, handler_call_details):
         handler = await continuation(handler_call_details)
@@ -232,12 +225,11 @@ _MAX_MODEL_NAME = 400
 @dataclass
 class _StreamState:
     identity: GatewayIdentity
-    # Hello.gateway_id: one process, its own stream and status row.
+    # Assigned by the control plane at handshake: one stream, its own status row.
     gateway_id: str
     session_id: uuid.UUID
     hello_version: int
     hello_digest: bytes
-    hello_zone_matches: bool
     gateway_version: str
     capabilities: list[str]
     peer: str | None
@@ -273,7 +265,7 @@ class _StreamState:
     pending_probes: dict[str, asyncio.Future[config_service_pb2.ProbeResult]] = field(
         default_factory=dict
     )
-    # Set when the stream must end (replaced by a newer connection, token revoked).
+    # Set when the stream must end.
     closed: tuple[grpc.StatusCode, str] | None = None
 
     @property
@@ -296,9 +288,9 @@ _UpdateKey = tuple[str, int, bytes, tuple[int, bytes] | None]
 class SessionRegistry:
     """Track one active ACK/pending state machine per ``(zone, gateway_id)``.
 
-    A new connection with the same gateway id replaces its previous stream. Quarantine is
-    per zone: every gateway receives the same snapshot, so one rejection withholds the
-    version from all of them. It also caches parsed snapshots and built updates keyed by
+    Every stream is a new gateway id, so a key never holds two streams. Quarantine is per
+    zone: every gateway receives the same snapshot, so one rejection withholds the version
+    from all of them. It also caches parsed snapshots and built updates keyed by
     ``(zone, version, digest)`` (plus the delta base), so N gateways moving between the same
     versions cost one payload load and one diff.
     """
@@ -414,19 +406,15 @@ class SessionRegistry:
                 if state.pending_probes.get(request_id) is future:
                     del state.pending_probes[request_id]
 
-    def close_token(self, token_id: uuid.UUID) -> int:
-        """End every live stream authenticated with ``token_id`` (PERMISSION_DENIED).
-
-        Call it after the revocation commits; streams also re-check their token every
-        ``_TOKEN_RECHECK_SECONDS``, so this only makes revocation immediate. Returns the
-        number of streams closed.
-        """
-        closed = 0
-        for state in tuple(self._sessions.values()):
-            if state.identity.token_id == token_id:
-                state.close(grpc.StatusCode.PERMISSION_DENIED, "gateway token revoked")
-                closed += 1
-        return closed
+    async def _assign_gateway_id(self, zone: str, hostname: str) -> str:
+        """A fresh id for one stream, retried if a row of the zone already has it."""
+        while True:
+            candidate = new_gateway_id(hostname)
+            if self.session_factory is None:
+                return candidate
+            async with self.session_factory() as session:
+                if await session.get(GatewaySession, (zone, candidate)) is None:
+                    return candidate
 
     async def _snapshot(
         self,
@@ -538,7 +526,6 @@ class SessionRegistry:
             "zone": state.zone,
             "gateway_id": state.gateway_id,
             "session_id": state.session_id,
-            "token_id": state.identity.token_id,
             "connected": not disconnected,
             "gateway_version": state.gateway_version[:100],
             "capabilities": state.capabilities,
@@ -599,7 +586,6 @@ class SessionRegistry:
                         session,
                         state.zone,
                         state.gateway_id,
-                        state.identity.token_id,
                         reported,
                         now,
                     )
@@ -610,22 +596,20 @@ class SessionRegistry:
                     state.gateway_id,
                 )
 
-    async def _normalize_hello(
-        self, hello: config_service_pb2.Hello, stored_capabilities: list[str]
-    ) -> NormalizedHello:
+    async def _normalize_hello(self, hello: config_service_pb2.Hello) -> NormalizedHello:
         """Off the event loop: its size is up to the gateway. No failure may end the stream;
-        unreadable, it changes nothing about what is known of the gateway.
+        unreadable, the stream keeps no capabilities or plugins from it.
         """
         try:
             normalized = await asyncio.to_thread(normalize_hello, hello)
         except Exception:
             log.exception("could not read a gateway Hello's plugins")
-            return NormalizedHello(capabilities=stored_capabilities, plugins=None)
+            return NormalizedHello(capabilities=[], plugins=None)
         for kind, count in normalized.ignored.items():
             self.metrics.gateway_plugins_ignored.labels(kind).inc(count)
             log.warning(
-                "gateway %s: ignored %d %s entries of its Hello",
-                hello.gateway_id[:200],
+                "gateway from host %s: ignored %d %s entries of its Hello",
+                hello.hostname[:200],
                 count,
                 kind,
             )
@@ -639,24 +623,11 @@ class SessionRegistry:
         peer: str | None,
     ) -> AsyncIterator[_StreamState]:
         quarantine: set[int] = set()
-        last_nack_version = None
-        last_nack_code = None
-        last_nack_reason = None
-        previous_session = None
-        stored_capabilities: list[str] = []
-        gateway_id = hello.gateway_id
         # NACKs this process knows about, even ones whose transaction is not visible to the
         # row read below; merged again under `_lock` when the session registers.
         quarantine.update(self._quarantines.get(identity.zone, ()))
         if self.session_factory is not None:
             async with self.session_factory() as session:
-                previous = await session.get(GatewaySession, (identity.zone, gateway_id))
-                if previous is not None:
-                    last_nack_version = previous.last_nack_version
-                    last_nack_code = previous.last_nack_code
-                    last_nack_reason = previous.last_nack_reason
-                    previous_session = previous.session_id
-                    stored_capabilities = list(previous.capabilities)
                 # Zone-wide: every gateway receives the same snapshot, so one rejection
                 # withholds the version from all of them.
                 quarantined = await session.scalar(
@@ -666,16 +637,16 @@ class SessionRegistry:
                 )
                 if quarantined is not None:
                     quarantine.add(quarantined)
-        # Before anything slow: the id is this connection's place in line.
-        session_id = self._next_session_id(previous_session)
-        normalized = await self._normalize_hello(hello, stored_capabilities)
+        # Every stream is a new gateway, so there is no previous row to resume from.
+        gateway_id = await self._assign_gateway_id(identity.zone, hello.hostname)
+        session_id = self._next_session_id(None)
+        normalized = await self._normalize_hello(hello)
         state = _StreamState(
             identity=identity,
             gateway_id=gateway_id,
             session_id=session_id,
             hello_version=hello.have_version,
             hello_digest=bytes(hello.have_digest),
-            hello_zone_matches=hello.zone == identity.zone,
             gateway_version=hello.gateway_version,
             capabilities=normalized.capabilities,
             peer=peer,
@@ -684,33 +655,18 @@ class SessionRegistry:
             shared_limits_namespace=hello.shared_limits.namespace[:200],
             acked_version=hello.have_version,
             quarantined_versions=quarantine,
-            last_nack_version=last_nack_version,
-            last_nack_code=last_nack_code,
-            last_nack_reason=last_nack_reason,
         )
-        key = state.key
         async with self._lock:
             # A NACK that lands while this Hello is being read (after the row above was
             # loaded, before this session is registered) is not in that row: merge the
             # in-process quarantine here, under the lock that registers the session. Without
             # it this gateway could be sent a version another gateway already rejected.
             state.quarantined_versions.update(self._quarantines.get(state.zone, ()))
-            old = self._sessions.get(key)
-            if old is not None and old.session_id > state.session_id:
-                # A newer connection overtook this one while its Hello was being read.
-                state.close(grpc.StatusCode.UNAVAILABLE, "gateway stream replaced")
-            elif old is not None:
-                # The same gateway id reconnected; this is its new stream.
-                log.warning(
-                    "gateway %s/%s reconnected; replacing its previous stream (peer %s -> %s)",
-                    identity.zone,
-                    gateway_id,
-                    old.peer,
-                    peer,
-                )
-                old.close(grpc.StatusCode.UNAVAILABLE, "gateway stream replaced")
-            if state.closed is None:
-                self._sessions[key] = state
+            # The 32-bit random suffix colliding with a stream only now registering.
+            while state.key in self._sessions:
+                state.gateway_id = new_gateway_id(hello.hostname)
+            key = state.key
+            self._sessions[key] = state
             self._publish_session_gauge()
         try:
             await self._mirror(state, reported=normalized.plugins)
@@ -759,11 +715,7 @@ async def _desired_update(
             # The Hello version is a delta base only if it is this zone's content: same
             # zone, not ahead of us (restore from backup) and the digest we stored for it.
             state.hello_checked = True
-            if (
-                state.hello_zone_matches
-                and 0 < state.hello_version <= version
-                and state.hello_digest
-            ):
+            if 0 < state.hello_version <= version and state.hello_digest:
                 stored = await session.scalar(
                     select(ConfigVersion.digest).where(
                         ConfigVersion.zone == state.zone,
@@ -804,12 +756,6 @@ async def _desired_update(
     return update
 
 
-async def _token_active(session_factory: SessionFactory, token_id: uuid.UUID) -> bool:
-    async with session_factory() as session:
-        token = await session.get(GatewayToken, token_id)
-        return token is not None and token.revoked_at is None
-
-
 class _ConfigService(config_service_pb2_grpc.ConfigServiceServicer):
     def __init__(
         self,
@@ -832,21 +778,18 @@ class _ConfigService(config_service_pb2_grpc.ConfigServiceServicer):
         if first.WhichOneof("msg") != "hello":
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "first message must be Hello")
         hello = first.hello
-        if not valid_gateway_id(hello.gateway_id):
-            await context.abort(
-                grpc.StatusCode.INVALID_ARGUMENT,
-                "Hello.gateway_id is required: 1..100 of [A-Za-z0-9._-]",
-            )
-        # A gateway's persisted snapshot names its zone; a token of another zone must not
-        # send this zone's catalog under a mismatched on-disk label. An empty Hello zone is
-        # a fresh gateway and is always accepted.
-        if hello.zone and hello.zone != identity.zone:
+        # The metadata zone is the credential's zone; a mismatched Hello would serve one
+        # zone's catalog under another on-disk label.
+        if hello.zone != identity.zone:
             await context.abort(
                 grpc.StatusCode.FAILED_PRECONDITION,
-                "Hello.zone does not match the gateway token's zone",
+                "Hello.zone does not match x-lumewarp-zone",
             )
 
         async with self.registry.stream(identity, hello, peer_address(context.peer())) as state:
+            yield config_service_pb2.ConfigUpdate(
+                welcome=config_service_pb2.Welcome(gateway_id=state.gateway_id)
+            )
             update = await _desired_update(
                 state, self.settings, self.session_factory, self.registry
             )
@@ -854,7 +797,6 @@ class _ConfigService(config_service_pb2_grpc.ConfigServiceServicer):
                 yield update
             request_task = asyncio.create_task(anext(request_iterator))
             wake_task = None
-            token_check_at = time.monotonic() + _TOKEN_RECHECK_SECONDS
             try:
                 while True:
                     if state.closed is not None:
@@ -866,7 +808,7 @@ class _ConfigService(config_service_pb2_grpc.ConfigServiceServicer):
                         wake_task = asyncio.create_task(state.wake.wait())
                     pending = state.pending
                     now = time.monotonic()
-                    deadlines = [_PUBLISH_POLL_SECONDS, max(0.0, token_check_at - now)]
+                    deadlines = [_PUBLISH_POLL_SECONDS]
                     if pending is not None:
                         if pending.retry_at is not None:
                             deadlines.append(max(0.0, pending.retry_at - now))
@@ -882,15 +824,8 @@ class _ConfigService(config_service_pb2_grpc.ConfigServiceServicer):
                         timeout=min(deadlines),
                         return_when=asyncio.FIRST_COMPLETED,
                     )
-                    # A replaced or revoked stream must not emit anything after its wake-up.
                     if state.closed is not None:
                         await context.abort(*state.closed)
-                    if time.monotonic() >= token_check_at:
-                        if not await _token_active(self.session_factory, identity.token_id):
-                            await context.abort(
-                                grpc.StatusCode.PERMISSION_DENIED, "gateway token revoked"
-                            )
-                        token_check_at = time.monotonic() + _TOKEN_RECHECK_SECONDS
 
                     if request_task in done:
                         try:
@@ -1063,11 +998,12 @@ class _UsageService(usage_pb2_grpc.UsageServiceServicer):
         identity = _identity()
         if identity is None:
             await context.abort(grpc.StatusCode.PERMISSION_DENIED, "invalid gateway credentials")
-        # The token authenticates the zone; attribution is the reporting process's own id.
-        if not valid_gateway_id(request.gateway_id):
+        # The zone token authenticates; attribution is the id Welcome assigned to the
+        # reporting process, empty for events served before any handshake.
+        if request.gateway_id and not valid_gateway_id(request.gateway_id):
             await context.abort(
                 grpc.StatusCode.INVALID_ARGUMENT,
-                "ReportRequest.gateway_id is required: 1..100 of [A-Za-z0-9._-]",
+                "ReportRequest.gateway_id must be empty or 1..100 of [A-Za-z0-9._-]",
             )
         skipped: Counter[str] = Counter()
         try:
@@ -1142,6 +1078,9 @@ async def serve(
         bound_port = server.add_insecure_port(settings.grpc_bind)
     if bound_port == 0:
         raise OSError(f"could not bind gRPC listener to {settings.grpc_bind}")
+    # Every zone named by an env token has its row before the first handshake can arrive;
+    # the app lifespan also does this, which covers a `serve` embedder (tests included).
+    await ensure_zones(session_factory, settings)
     # One control-plane instance serves every zone. Its process-local registry starts
     # empty, so any connected mirror belongs to a previous process (possibly crashed).
     # Commit before accepting streams; stale mirrors must not pin payloads indefinitely.

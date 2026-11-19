@@ -20,7 +20,7 @@ this API. Clients call models through the gateway, which has its own API documen
 
 Send a personal access token as `Authorization: Bearer lwp-…`, or the browser session cookie.
 A request that writes with the session cookie must also send `X-Lumewarp-CSRF`. Virtual API
-keys (`lw-…`) and gateway tokens (`lwg-…`) are not accepted here.
+keys (`lw-…`) are not accepted here.
 
 ## Authorization
 
@@ -41,8 +41,9 @@ meant for programs, `message` for people. A 422 names the offending field in its
 
 ## Secrets
 
-A key, token or gateway token is returned once, by the operation that creates or rotates it,
-and only its SHA-256 hash is stored. Those responses carry `Cache-Control: no-store`.
+A key or personal access token is returned once, by the operation that creates or rotates
+it, and only its SHA-256 hash is stored. Those responses carry `Cache-Control: no-store`.
+Gateway credentials are fixed per zone in the control plane's environment.
 
 ## Changes reach gateways asynchronously
 
@@ -95,8 +96,12 @@ TAGS = [
     {"name": "playground", "description": "Backs the Admin UI Playground. Session only."},
     {"name": "usage", "description": "Aggregated usage and cost."},
     {"name": "audit", "description": "The audit log of administrative changes."},
-    {"name": "zones", "description": "Config zones: independent catalogs and gateways."},
-    {"name": "gateways", "description": "Connected gateways and their tokens (`lwg-…`)."},
+    {
+        "name": "zones",
+        "description": "Config zones: independent catalogs and gateways, declared by their "
+        "`LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN`.",
+    },
+    {"name": "gateways", "description": "Connected gateways and their lifecycle."},
     {"name": "config", "description": "Compiled config versions and rollback."},
     {"name": "health", "description": "Liveness and readiness. No authentication."},
 ]
