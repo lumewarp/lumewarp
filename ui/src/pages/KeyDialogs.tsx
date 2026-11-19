@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 
 import { api, type Key, type Schemas } from "../api";
@@ -36,6 +37,7 @@ export function KeyEditDialog({
   const initialExpiry = localDayOf(target.expires_at);
   const initial: EditValues = { name: target.name, expires: initialExpiry, models: keyModelsFrom(target), ...keyLimitsFrom(target) };
   const form = useForm<EditValues>(initial, { name: required("Name") });
+  const qc = useQueryClient();
   const update = useMut((values: EditValues) => {
     const { models, ...rest } = values;
     const body: Schemas["KeyUpdate"] = { name: values.name.trim(), ...keyLimitsBody(rest) };
@@ -50,7 +52,14 @@ export function KeyEditDialog({
   };
   const submit = async () => {
     if (!form.validate()) return false;
-    return form.run(() => update.mutateAsync(form.values), { expires_at: "expires", model_access: "models", allowed_models: "models", allowed_groups: "models" });
+    // Close only once the key lists have refetched: reopening Edit right away must show
+    // the saved values, not the row from before the save.
+    const save = async () => {
+      const saved = await update.mutateAsync(form.values);
+      await qc.refetchQueries({ type: "active" });
+      return saved;
+    };
+    return form.run(save, { expires_at: "expires", model_access: "models", allowed_models: "models", allowed_groups: "models" });
   };
   return (
     <FormDialog open title={`Edit “${target.name}” (${target.display_prefix}…)`} submitLabel="Save" onClose={close} onSubmit={submit}>
