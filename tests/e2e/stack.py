@@ -5,6 +5,7 @@ upstream and gateway, all real processes on ephemeral ports.
 import asyncio
 import json
 import os
+import re
 import secrets
 import shutil
 import signal
@@ -81,9 +82,7 @@ def record_secret(value: str | None, kind: str) -> None:
 # `cp_env` names that merely contain a credential word but hold a setting, not a secret.
 # Listed by full name: a suffix would also exclude a credential such as VAULT_SECRET_ID,
 # and a value's length says nothing about whether it is a credential.
-NON_SECRET_ENV_NAMES = frozenset(
-    {"E2E_SECRET_LOG", "E2E_SECRET_SCAN", "E2E_SKIP_SECRET_SCAN"}
-)
+NON_SECRET_ENV_NAMES = frozenset({"E2E_SECRET_LOG", "E2E_SECRET_SCAN", "E2E_SKIP_SECRET_SCAN"})
 
 CREDENTIAL_ENV_PARTS = ("SECRET", "PASSWORD", "TOKEN", "API_KEY")
 
@@ -126,9 +125,7 @@ RESPONSE_SECRET_FIELDS = {
 }
 
 
-def record_response_secrets(
-    payload, source: str = "", *, endpoint: str | None = None
-) -> None:
+def record_response_secrets(payload, source: str = "", *, endpoint: str | None = None) -> None:
     """Record every credential an API response hands back, at the boundary.
 
     Called on the response path (Stack.api/ok and the cookie-session helper) so no test
@@ -160,11 +157,7 @@ def record_response_secrets(
     def walk(node, where: str) -> None:
         if isinstance(node, dict):
             for key, value in node.items():
-                field = (
-                    RESPONSE_SECRET_FIELDS.get(key.lower())
-                    if isinstance(key, str)
-                    else None
-                )
+                field = RESPONSE_SECRET_FIELDS.get(key.lower()) if isinstance(key, str) else None
                 if (
                     isinstance(key, str)
                     and key.lower() == "state"
@@ -193,9 +186,7 @@ def env_path(name: str, default: str) -> Path:
 GATEWAY_BIN = env_path("E2E_GATEWAY_BIN", "gateway/target/debug/lumewarp")
 MOCK_BIN = env_path("E2E_MOCK_BIN", "bench/mock-upstream/target/release/mock-upstream")
 # Server-level DSN (any database on the server, used to create/drop the test database).
-PG_DSN = os.environ.get(
-    "E2E_PG_URL", "postgresql://lumewarp:lumewarp@127.0.0.1:55432/lumewarp"
-)
+PG_DSN = os.environ.get("E2E_PG_URL", "postgresql://lumewarp:lumewarp@127.0.0.1:55432/lumewarp")
 
 
 # Ports this process has handed out. The kernel may return a just-closed ephemeral
@@ -213,9 +204,7 @@ def free_port() -> int:
             return port
 
 
-def wait_for(
-    predicate: Callable[[], object], timeout: float, what: str, interval: float = 0.05
-):
+def wait_for(predicate: Callable[[], object], timeout: float, what: str, interval: float = 0.05):
     deadline = time.monotonic() + timeout
     last: Exception | None = None
     while True:
@@ -244,9 +233,7 @@ def pg(dsn: str, sql: str, *args):
 
 
 class Proc:
-    def __init__(
-        self, name: str, argv: list[str], env: dict[str, str], logdir: Path
-    ) -> None:
+    def __init__(self, name: str, argv: list[str], env: dict[str, str], logdir: Path) -> None:
         self.name = name
         self.argv = argv
         self.env = env
@@ -294,6 +281,12 @@ class Proc:
 
     def text(self) -> str:
         return self.log.read_text(errors="replace") if self.log.exists() else ""
+
+
+# `gateway_id=<id>` in the gateway's "gateway id assigned" log line (plain or JSON), read
+# after stripping the terminal colour codes the log may carry.
+ASSIGNED_ID = re.compile(r'gateway_id"?\s*[=:]\s*"?([A-Za-z0-9._-]+)')
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def gateway_host(env: dict[str, str]) -> str:
@@ -360,36 +353,41 @@ class Gateway:
     def url(self, path: str) -> str:
         return f"http://127.0.0.1:{self.port}{path}"
 
-    def status(self) -> dict | None:
-        """This process's row: the connected one, else its most recent disconnected row."""
-        rows = [
-            row
-            for row in self.stack.gateway_items()
-            if row["gateway_id"].startswith(self.prefix)
+    def assigned_id(self) -> str | None:
+        """The id the control plane assigned to this process's latest stream (its Welcome,
+        logged as "gateway id assigned"), or None before the first one."""
+        ids = [
+            match.group(1)
+            for line in ANSI.sub("", self.proc.text()).splitlines()
+            if "gateway id assigned" in line
+            for match in [ASSIGNED_ID.search(line)]
+            if match
         ]
-        connected = [row for row in rows if row["connected"]]
-        return (
-            max(connected or rows, key=lambda row: row["last_seen_at"] or "")
-            if rows
-            else None
+        return ids[-1] if ids else None
+
+    def status(self) -> dict | None:
+        """This process's row: the one of its latest stream. Other gateways share the host
+        prefix, so the row is found by the exact id from its log, never by prefix."""
+        gateway_id = self.assigned_id()
+        if gateway_id is None:
+            return None
+        return next(
+            (row for row in self.stack.gateway_items() if row["gateway_id"] == gateway_id),
+            None,
         )
 
     def wait_listening(self) -> None:
         def up():
             assert self.proc.alive(), f"gateway exited:\n{self.proc.text()}"
             return (
-                httpx.get(
-                    f"http://127.0.0.1:{self.admin_port}/healthz", timeout=1
-                ).status_code
+                httpx.get(f"http://127.0.0.1:{self.admin_port}/healthz", timeout=1).status_code
                 == 200
             )
 
         wait_for(up, 15, "gateway admin listener")
 
     def readyz(self) -> int:
-        return httpx.get(
-            f"http://127.0.0.1:{self.admin_port}/readyz", timeout=2
-        ).status_code
+        return httpx.get(f"http://127.0.0.1:{self.admin_port}/readyz", timeout=2).status_code
 
     def wait_ready(self, timeout: float = 15) -> None:
         wait_for(lambda: self.readyz() == 200, timeout, "gateway /readyz 200")
@@ -403,16 +401,12 @@ class Gateway:
                 return float(line.split()[1])
         return None
 
-    def chat(
-        self, key: str | None, *, stream: bool = False, model: str = "mock"
-    ) -> httpx.Response:
+    def chat(self, key: str | None, *, stream: bool = False, model: str = "mock") -> httpx.Response:
         headers = {"authorization": f"Bearer {key}"} if key else {}
         body = {"model": model, "messages": [{"role": "user", "content": "hi"}]}
         if stream:
             body["stream"] = True
-        return self.http.post(
-            self.url("/v1/chat/completions"), json=body, headers=headers
-        )
+        return self.http.post(self.url("/v1/chat/completions"), json=body, headers=headers)
 
     def stop(self) -> None:
         self.proc.stop()
@@ -436,9 +430,7 @@ class Stack:
     """One database, control plane, mock upstream; gateways are started by the tests."""
 
     def __init__(self) -> None:
-        self.dir = Path(
-            tempfile.mkdtemp(prefix="lumewarp-e2e-", dir=os.environ.get("E2E_RUN_DIR"))
-        )
+        self.dir = Path(tempfile.mkdtemp(prefix="lumewarp-e2e-", dir=os.environ.get("E2E_RUN_DIR")))
         # The run id in the name is what lets the finalizer find a database whose creator
         # forgot to register it, and tell it apart from another run's databases.
         self.db_name = f"{DB_PREFIX}{run_id()}_{uuid.uuid4().hex[:12]}"
@@ -455,9 +447,7 @@ class Stack:
         self.dsn = f"{base}/{self.db_name}"
         self.sa_url = self.dsn.replace("postgresql://", "postgresql+asyncpg://", 1)
         self.base_env = {
-            k: v
-            for k, v in os.environ.items()
-            if not k.startswith(("LUMEWARP_", "OTEL_"))
+            k: v for k, v in os.environ.items() if not k.startswith(("LUMEWARP_", "OTEL_"))
         }
         self.cp_env = {
             **self.base_env,
@@ -516,10 +506,7 @@ class Stack:
         self.mock.start()
         wait_for(
             lambda: (
-                httpx.get(
-                    f"http://127.0.0.1:{self.mock_port}/health", timeout=1
-                ).status_code
-                == 200
+                httpx.get(f"http://127.0.0.1:{self.mock_port}/health", timeout=1).status_code == 200
             ),
             10,
             "mock upstream",
@@ -545,10 +532,7 @@ class Stack:
         def up():
             assert self.cp.alive(), f"control plane exited:\n{self.cp.text()}"
             return (
-                httpx.get(
-                    f"http://127.0.0.1:{self.http_port}/readyz", timeout=1
-                ).status_code
-                == 200
+                httpx.get(f"http://127.0.0.1:{self.http_port}/readyz", timeout=1).status_code == 200
             )
 
         wait_for(up, 30, "control plane /readyz")
@@ -586,10 +570,7 @@ class Stack:
         self.extra_mocks.append(proc)
         proc.start()
         wait_for(
-            lambda: (
-                httpx.get(f"http://127.0.0.1:{port}/health", timeout=1).status_code
-                == 200
-            ),
+            lambda: httpx.get(f"http://127.0.0.1:{port}/health", timeout=1).status_code == 200,
             10,
             f"mock upstream {tag}",
         )
@@ -677,9 +658,7 @@ class Stack:
 
     # REST --------------------------------------------------------------------------
 
-    def api(
-        self, method: str, path: str, token: str | None = None, **kwargs
-    ) -> httpx.Response:
+    def api(self, method: str, path: str, token: str | None = None, **kwargs) -> httpx.Response:
         response = self.admin.request(
             method,
             self.api_url + path,
@@ -702,15 +681,11 @@ class Stack:
         """
         body = dict(body)
         deployment = {
-            k: body.pop(k)
-            for k in ("upstream_id", "upstream_model", "chat_check")
-            if k in body
+            k: body.pop(k) for k in ("upstream_id", "upstream_model", "chat_check") if k in body
         }
         model = self.ok("POST", "/models", json=body)
         if "upstream_id" in deployment:
-            model["deployment"] = self.deploy_model(
-                model["id"], zone=zone, **deployment
-            )
+            model["deployment"] = self.deploy_model(model["id"], zone=zone, **deployment)
         return model
 
     def deploy_model(self, model_id: str, zone: str = ZONE, **deployment) -> dict:
@@ -773,7 +748,11 @@ class Stack:
                 self.ok(
                     "PUT",
                     f"/zones/{ZONE}/limits",
-                    json={"team_id": team["id"], "user_id": owner_id, "budget_nano_usd": owner_budget},
+                    json={
+                        "team_id": team["id"],
+                        "user_id": owner_id,
+                        "budget_nano_usd": owner_budget,
+                    },
                 )
             key_body = {}
         else:
@@ -851,9 +830,7 @@ class Stack:
         """Publishing is asynchronous (outbox + compiler loop): wait until a version has them."""
         wait_for(
             lambda: (
-                self.ok("GET", "/config/versions", params={"limit": 1})["items"][0][
-                    "key_count"
-                ]
+                self.ok("GET", "/config/versions", params={"limit": 1})["items"][0]["key_count"]
                 == count
             ),
             10,
@@ -861,9 +838,7 @@ class Stack:
         )
 
     def current_version(self) -> int:
-        return self.ok("GET", "/config/versions", params={"limit": 1})["items"][0][
-            "version"
-        ]
+        return self.ok("GET", "/config/versions", params={"limit": 1})["items"][0]["version"]
 
 
 class Key:
