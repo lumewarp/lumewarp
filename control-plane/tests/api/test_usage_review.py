@@ -13,7 +13,7 @@ from tests.factories import make_alias, make_key, make_member, make_model, make_
 from tests.usage.test_catalog_provenance import CREATED, key_for, wire
 
 
-async def test_upstream_model_empty_mixed_and_single_contract(client, committed):
+async def test_upstream_model_empty_mixed_and_single_contract(client, committed, api_scope):
     key = await key_for(committed)
     expected = {}
     for values in (("", ""), ("", "x"), ("x", "x")):
@@ -27,6 +27,7 @@ async def test_upstream_model_empty_mixed_and_single_contract(client, committed)
                 committed,
                 "gateway",
                 [wire(key, model=model.name, upstream_model=value) for value in values],
+                zone=api_scope,
             )
             == 2
         )
@@ -41,7 +42,7 @@ async def test_upstream_model_empty_mixed_and_single_contract(client, committed)
     "group",
     ["day", "requested", "model", "upstream_model", "alias", "router", "team", "owner", "key", ""],
 )
-async def test_rejected_event_under_every_group(client, committed, group):
+async def test_rejected_event_under_every_group(client, committed, api_scope, group):
     key = await key_for(committed)
     rejected = wire(
         key,
@@ -55,7 +56,7 @@ async def test_rejected_event_under_every_group(client, committed, group):
         prompt_tokens=0,
         completion_tokens=0,
     )
-    assert await ingest(committed, "gateway", [rejected]) == 1
+    assert await ingest(committed, "gateway", [rejected], zone=api_scope) == 1
     await committed.commit()
     response = query(client, group_by=group, team_id=str(key.team_id))
     assert response.status_code == 200, response.text
@@ -93,7 +94,7 @@ async def test_routing_ids_and_missing_filters_are_refused_for_a_member(client, 
 
 
 @pytest.mark.parametrize("kind", ["alias", "router"])
-async def test_name_and_missing_filters_are_anded(client, committed, kind):
+async def test_name_and_missing_filters_are_anded(client, committed, api_scope, kind):
     key = await key_for(committed)
     model = await make_model(committed, f"m-{uuid.uuid4().hex}", created_at=CREATED)
     name = f"via-{uuid.uuid4().hex}"
@@ -103,7 +104,12 @@ async def test_name_and_missing_filters_are_anded(client, committed, kind):
     else:
         await make_router(committed, name, created_at=CREATED)
     await committed.flush()
-    assert await ingest(committed, "gateway", [wire(key, model=model.name, **{kind: name})]) == 1
+    assert (
+        await ingest(
+            committed, "gateway", [wire(key, model=model.name, **{kind: name})], zone=api_scope
+        )
+        == 1
+    )
     await committed.commit()
     for missing, count in (("true", 0), ("false", 1)):
         rows = query(

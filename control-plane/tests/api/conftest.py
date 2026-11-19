@@ -21,6 +21,7 @@ from lumewarp_control_plane.auth.sessions import csrf_token
 from lumewarp_control_plane.models import (
     A2aAgent,
     A2aAgentGrant,
+    ApiKey,
     ConfigOutbox,
     ConfigVersion,
     GatewayPlugin,
@@ -30,6 +31,9 @@ from lumewarp_control_plane.models import (
     McpDefinition,
     McpServer,
     McpServerGrant,
+    ModelDeployment,
+    Upstream,
+    UsageEvent,
     UserSession,
     Zone,
 )
@@ -133,6 +137,13 @@ async def clean_gateways(api_engine: AsyncEngine) -> AsyncIterator[None]:
             await session.execute(delete(GatewayQuarantine).where(GatewayQuarantine.zone == zone))
             await session.execute(delete(ConfigOutbox).where(ConfigOutbox.zone == zone))
             await session.execute(delete(ConfigVersion).where(ConfigVersion.zone == zone))
+            # Rows that made the zone's name RESTRICT: keys, deployments and upstreams
+            # (keys are revoked, never deleted, in the product; the tests' zones are
+            # throwaway). Usage rows have no FK and would poison later aggregate asserts.
+            await session.execute(delete(ApiKey).where(ApiKey.zone == zone))
+            await session.execute(delete(UsageEvent).where(UsageEvent.zone == zone))
+            await session.execute(delete(ModelDeployment).where(ModelDeployment.zone == zone))
+            await session.execute(delete(Upstream).where(Upstream.zone == zone))
             await session.execute(delete(Zone).where(Zone.name == zone))
         await session.execute(delete(GatewayPlugin).where(GatewayPlugin.zone == API_SCOPE))
         await session.execute(delete(GatewaySession).where(GatewaySession.zone == API_SCOPE))

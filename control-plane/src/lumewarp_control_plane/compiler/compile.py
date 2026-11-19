@@ -65,6 +65,8 @@ from lumewarp_control_plane.models import (
     UsageTotal,
     User,
     Zone,
+    ZoneLimit,
+    ZoneMemberDefaults,
 )
 from lumewarp_control_plane.quota import (
     key_effective,
@@ -144,16 +146,19 @@ def narrow(parent: ModelSet, mode: ModelAccess, allowed: Sequence[str]) -> Model
     return own if parent is None else parent & own
 
 
-def rate_limit_scope(prefix: str, scope_id: uuid.UUID | str, entity) -> pb.RateLimitScope | None:
-    """One limiter scope for an entity whose *own* limits are set; NULL limits add none."""
-    if entity.rpm_limit is None and entity.tpm_limit is None and entity.max_parallel is None:
+def rate_limit_scope(prefix: str, scope_id: uuid.UUID | str, limits) -> pb.RateLimitScope | None:
+    """One limiter scope for a level whose *own* zone limits are set; NULL adds none."""
+    rpm = getattr(limits, "rpm_limit", None)
+    tpm = getattr(limits, "tpm_limit", None)
+    parallel = getattr(limits, "max_parallel", None)
+    if rpm is None and tpm is None and parallel is None:
         return None
     return pb.RateLimitScope(
         id=f"{prefix}:{scope_id}",
         limit=pb.RateLimit(
-            requests_per_minute=entity.rpm_limit or 0,
-            tokens_per_minute=entity.tpm_limit or 0,
-            max_parallel_requests=entity.max_parallel or 0,
+            requests_per_minute=rpm or 0,
+            tokens_per_minute=tpm or 0,
+            max_parallel_requests=parallel or 0,
         ),
     )
 
@@ -173,9 +178,14 @@ def _owner_scope_limits(
     else:
         raw = (None, None, None)
     if not service_account:
+        eff_defaults = (
+            getattr(member_defaults, "rpm_limit", None),
+            getattr(member_defaults, "tpm_limit", None),
+            getattr(member_defaults, "max_parallel", None),
+        )
         raw = tuple(
             value if value is not None else default
-            for value, default in zip(raw, member_defaults, strict=True)
+            for value, default in zip(raw, eff_defaults, strict=True)
         )
     parents = (team_eff.rpm_limit, team_eff.tpm_limit, team_eff.max_parallel)
     return tuple(
@@ -772,31 +782,55 @@ async def compile_zone(
                 defer(ApiKey.allowed_groups),
                 defer(ApiKey.granted_models),
             )
-            .where(ApiKey.lifecycle != KeyLifecycle.REVOKED)
+            .where(ApiKey.zone == zone, ApiKey.lifecycle != KeyLifecycle.REVOKED)
             .order_by(ApiKey.id)
         )
     ).all()
     if len(keys) > max_keys:
         raise CompileError(f"{len(keys)} keys exceed the limit of {max_keys}")
 
+    # Per-zone limits, budgets and member defaults. One read each for this zone.
+    zone_limit_rows = list(await session.scalars(select(ZoneLimit).where(ZoneLimit.zone == zone)))
+    org_limits = {row.org_id: row for row in zone_limit_rows if row.org_id is not None}
+    team_limits = {
+        row.team_id: row
+        for row in zone_limit_rows
+        if row.team_id is not None
+        and row.org_id is None
+        and row.user_id is None
+        and row.service_account_id is None
+    }
+    member_limits = {
+        (row.team_id, row.user_id): row for row in zone_limit_rows if row.user_id is not None
+    }
+    account_limits = {
+        row.service_account_id: row for row in zone_limit_rows if row.service_account_id is not None
+    }
+    member_defaults_by_team = {
+        row.team_id: row
+        for row in await session.scalars(
+            select(ZoneMemberDefaults).where(ZoneMemberDefaults.zone == zone)
+        )
+    }
     window_start, window_end = month_window(now)
     spent = {
         (row.scope_type, row.scope_id): row.cost_nano_usd
         for row in await session.execute(
             select(UsageTotal.scope_type, UsageTotal.scope_id, UsageTotal.cost_nano_usd).where(
-                UsageTotal.window_start == window_start
+                UsageTotal.zone == zone, UsageTotal.window_start == window_start
             )
         )
     }
     # Org spend is derived: the sum of every team of the org (archived included), so the
-    # org level needs no total row and can never drift from its teams.
+    # org level needs no total row and can never drift from its teams. It is this zone's
+    # spend only.
     org_spent = {org_id: 0 for org_id in orgs}
     for team in all_teams.values():
         if team.org_id in org_spent:
             org_spent[team.org_id] += spent.get((ScopeType.TEAM, team.id), 0)
 
-    def over_budget(level: ScopeType, scope_id: uuid.UUID, entity) -> bool:
-        budget = entity.budget_nano_usd
+    def over_budget(level: ScopeType, scope_id: uuid.UUID, limits) -> bool:
+        budget = getattr(limits, "budget_nano_usd", None)
         if budget is None:
             return False
         used = (
@@ -810,7 +844,11 @@ async def compile_zone(
         snap.teams.append(pb.Team(id=str(t.id), name=t.name))
 
     team_effective_policies = {
-        team_id: team_effective(org_effective(orgs[team.org_id]), team)
+        team_id: team_effective(
+            org_effective(orgs[team.org_id], org_limits.get(team.org_id)),
+            team,
+            team_limits.get(team_id),
+        )
         for team_id, team in teams.items()
         if team.org_id in orgs
     }
@@ -823,11 +861,7 @@ async def compile_zone(
             continue
         org = orgs[team.org_id]
         team_eff = team_effective_policies[team.id]
-        member_defaults = (
-            team.member_rpm_default,
-            team.member_tpm_default,
-            team.member_max_parallel_default,
-        )
+        defaults = member_defaults_by_team.get(team.id)
         owner_gone = False
         if k.owner_kind is KeyOwnerKind.USER:
             member = members.get((k.team_id, k.user_id))
@@ -849,7 +883,7 @@ async def compile_zone(
             service_account = True
         owner_eff = owner_effective(
             team_eff,
-            team,
+            defaults,
             policy_of(owner_policy) if owner_policy is not None else None,
             service_account=service_account,
         )
@@ -876,16 +910,19 @@ async def compile_zone(
             allowed_agents=sorted(name for name in (owner_eff.agents or ()) if name in agent_names),
         )
         scopes: list[pb.RateLimitScope] = []
-        if (rl := rate_limit_scope("org", org.id, org)) is not None:
+        if (rl := rate_limit_scope("org", org.id, org_limits.get(org.id))) is not None:
             scopes.append(rl)
-        if (rl := rate_limit_scope("team", team.id, team)) is not None:
+        if (rl := rate_limit_scope("team", team.id, team_limits.get(team.id))) is not None:
             scopes.append(rl)
         if k.owner_kind is KeyOwnerKind.USER:
             # The member level's values are the exception, else the team's defaults,
             # even without a membership row (external authz backend). Emit the clamped
             # effective value so the scope matches /users/me.
             limits = _owner_scope_limits(
-                owner_policy, member_defaults, team_eff, service_account=False
+                member_limits.get((k.team_id, k.user_id)),
+                defaults,
+                team_eff,
+                service_account=False,
             )
             if any(value is not None for value in limits):
                 scopes.append(
@@ -900,7 +937,10 @@ async def compile_zone(
                 )
         else:
             limits = _owner_scope_limits(
-                owner_policy, member_defaults, team_eff, service_account=True
+                account_limits.get(k.service_account_id),
+                defaults,
+                team_eff,
+                service_account=True,
             )
             # A service account with no limit of its own adds no scope: the team's
             # scope already enforces the same effective value.
@@ -922,9 +962,17 @@ async def compile_zone(
         if k.lifecycle is KeyLifecycle.SUSPENDED or owner_gone:
             status = pb.KEY_STATUS_SUSPENDED
         elif (
-            over_budget(ScopeType.ORG, org.id, org)
-            or over_budget(ScopeType.TEAM, team.id, team)
-            or (owner_policy is not None and over_budget(*k.owner_scope, owner_policy))
+            over_budget(ScopeType.ORG, org.id, org_limits.get(org.id))
+            or over_budget(ScopeType.TEAM, team.id, team_limits.get(team.id))
+            or (
+                owner_policy is not None
+                and over_budget(
+                    *k.owner_scope,
+                    account_limits.get(k.service_account_id)
+                    if k.owner_kind is KeyOwnerKind.SERVICE_ACCOUNT
+                    else member_limits.get((k.team_id, k.user_id)),
+                )
+            )
         ):
             status = pb.KEY_STATUS_BUDGET_EXCEEDED
             key_policy.budget_window_end_unix_ms = _ms(window_end)

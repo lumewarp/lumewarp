@@ -25,7 +25,7 @@ from lumewarp_control_plane.models import (
     ModelDeployment,
     OutboxStatus,
     Router,
-    Team,
+    ZoneLimit,
 )
 from lumewarp_control_plane.security import SecretKind, generate_secret
 from tests.compiler.helpers import (
@@ -94,7 +94,7 @@ async def test_publish_basic(factory) -> None:
 
     r2 = await touch(factory)
     async with factory() as s, s.begin():
-        await s.execute(update(Team).values(rpm_limit=17))
+        s.add(ZoneLimit(zone=SCOPE, team_id=t.id, rpm_limit=17))
     r3 = await touch(factory)
     assert await publish(factory) == 2
     assert [r[:2] for r in await outbox_rows(factory)] == [
@@ -280,7 +280,7 @@ async def test_diff_roundtrip_over_published_versions(factory) -> None:
             .where(ApiKey.id == k1.id)
             .values(lifecycle=KeyLifecycle.REVOKED, revoked_at=datetime.now(UTC))
         )
-        await s.execute(update(Team).where(Team.id == t.id).values(rpm_limit=5))
+        s.add(ZoneLimit(zone=SCOPE, team_id=t.id, rpm_limit=5))
         await add_router(s, "qwen", [("qwen-a", None)], upstream="openai")
         t2, u2 = await add_hierarchy(s, name="beta")
         await add_key(s, t2, u2)

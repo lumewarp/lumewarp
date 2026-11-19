@@ -24,10 +24,6 @@ async def grant_names(session) -> None:
     [
         ({"model_access": "list", "allowed_models": ["c"]}, "allowed_models"),
         ({"model_access": "all"}, "model_access"),
-        ({"rpm_limit": 101}, "rpm_limit"),
-        ({"tpm_limit": 1001}, "tpm_limit"),
-        ({"max_parallel": 11}, "max_parallel"),
-        ({"budget_nano_usd": 1001}, "budget_nano_usd"),
     ],
 )
 async def test_owner_cannot_widen_team(client, committed, owner, policy, field) -> None:
@@ -66,6 +62,46 @@ async def test_owner_cannot_widen_team(client, committed, owner, policy, field) 
 
 
 @pytest.mark.parametrize("owner", ["member", "service_account"])
+@pytest.mark.parametrize(
+    "field, value, parent_value",
+    [
+        ("rpm_limit", 101, 100),
+        ("tpm_limit", 1001, 1000),
+        ("max_parallel", 11, 10),
+        ("budget_nano_usd", 1001, 1000),
+    ],
+)
+async def test_owner_limits_cannot_widen_team(
+    client, committed, api_scope, owner, field, value, parent_value
+) -> None:
+    """Limits live in `zone_limits` now; a child's own value still may not exceed the team's."""
+    team = await make_team(
+        committed,
+        rpm_limit=100,
+        tpm_limit=1000,
+        max_parallel=10,
+        budget_nano_usd=1000,
+    )
+    user = await make_user(committed)
+    await committed.commit()
+    if owner == "member":
+        await make_member(committed, team, user)
+        await committed.commit()
+        reference = {"team_id": str(team.id), "user_id": str(user.id)}
+    else:
+        account = await make_service_account(committed, team)
+        await committed.commit()
+        reference = {"team_id": str(team.id), "service_account_id": str(account.id)}
+    path = f"/api/v1/zones/{api_scope}/limits"
+    bad = client.put(path, json={**reference, field: value}, headers=ADMIN_AUTH)
+    assert bad.status_code == 422, bad.text
+    assert field in bad.json()["error"]["message"]
+    good = client.put(path, json={**reference, field: parent_value}, headers=ADMIN_AUTH)
+    assert good.status_code == 200, good.text
+    assert good.json()[field] == parent_value
+
+
+@pytest.mark.parametrize("owner", ["member", "service_account"])
 async def test_parent_decrease_succeeds_and_effective_values_clamp(
     client, committed, owner, api_engine
 ) -> None:
@@ -87,15 +123,39 @@ async def test_parent_decrease_succeeds_and_effective_values_clamp(
         path = f"/api/v1/service-accounts/{row.id}"
         key = await make_key(committed, team, row)
     await committed.commit()
-    response = client.patch(f"/api/v1/teams/{team.id}", json={"rpm_limit": 40}, headers=ADMIN_AUTH)
+    response = client.put(
+        "/api/v1/zones/api-test/limits",
+        json={"team_id": str(team.id), "rpm_limit": 40},
+        headers=ADMIN_AUTH,
+    )
     assert response.status_code == 200, response.text
     assert response.json()["rpm_limit"] == 40
     # The child kept its stored setting, as the compiler's minimum expects.
-    stored = client.get(path, headers=ADMIN_AUTH) if owner == "service_account" else None
-    if stored is not None:
-        assert stored.json()["rpm_limit"] == 50
+    if owner == "service_account":
+        stored = client.get(path, headers=ADMIN_AUTH).json()
+    else:
+        stored = next(
+            item
+            for item in client.get(
+                f"/api/v1/teams/{team.id}/members?limit=500", headers=ADMIN_AUTH
+            ).json()["items"]
+            if item["user_id"] == str(row.user_id)
+        )
+    assert stored["rpm_limit"] == 50
     # An unrelated child edit still succeeds although the stored 50 exceeds the team's 40.
-    assert client.patch(path, json={"rpm_limit": 50}, headers=ADMIN_AUTH).status_code == 200
+    reference = (
+        {"team_id": str(team.id), "service_account_id": str(row.id)}
+        if owner == "service_account"
+        else {"team_id": str(team.id), "user_id": str(row.user_id)}
+    )
+    assert (
+        client.put(
+            "/api/v1/zones/api-test/limits",
+            json={**reference, "rpm_limit": 50},
+            headers=ADMIN_AUTH,
+        ).status_code
+        == 200
+    )
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -161,7 +221,19 @@ async def test_team_narrowing_keeps_owner_models_and_effective_is_intersection(
     )
     assert stored["allowed_models"] == ["a", "b"]
     # Saving unrelated fields does not force the owner to re-narrow.
-    assert client.patch(path, json={"rpm_limit": 5}, headers=ADMIN_AUTH).status_code == 200
+    owner = (
+        {"team_id": str(team.id), "service_account_id": str(row.id)}
+        if owner == "service_account"
+        else {"team_id": str(team.id), "user_id": str(row.user_id)}
+    )
+    assert (
+        client.put(
+            "/api/v1/zones/api-test/limits",
+            json={**owner, "rpm_limit": 5},
+            headers=ADMIN_AUTH,
+        ).status_code
+        == 200
+    )
     # A list that changes must be inside the team's scope.
     widened = client.patch(path, json={"allowed_models": ["b"]}, headers=ADMIN_AUTH)
     assert widened.status_code == 422
@@ -169,25 +241,29 @@ async def test_team_narrowing_keeps_owner_models_and_effective_is_intersection(
 
 
 async def test_team_locks_scope_before_validation(client, committed, monkeypatch) -> None:
-    from lumewarp_control_plane.api import teams
+    from lumewarp_control_plane.api import zone_limits
 
     team = await make_team(committed, rpm_limit=100)
     await committed.commit()
-    original_lock = teams.lock_hierarchy
-    original_validate = teams.validate_team_policy
+    original_lock = zone_limits.lock_hierarchy
+    original_validate = zone_limits.check_narrowing
     calls = []
 
     async def lock(session):
         await original_lock(session)
         calls.append("locked")
 
-    async def validate(session, row, proposed, base):
+    def validate(parent, proposed, **kwargs):
         assert calls == ["locked"]
         calls.append("validate")
-        await original_validate(session, row, proposed, base)
+        return original_validate(parent, proposed, **kwargs)
 
-    monkeypatch.setattr(teams, "lock_hierarchy", lock)
-    monkeypatch.setattr(teams, "validate_team_policy", validate)
-    response = client.patch(f"/api/v1/teams/{team.id}", json={"rpm_limit": 10}, headers=ADMIN_AUTH)
+    monkeypatch.setattr(zone_limits, "lock_hierarchy", lock)
+    monkeypatch.setattr(zone_limits, "check_narrowing", validate)
+    response = client.put(
+        "/api/v1/zones/api-test/limits",
+        json={"team_id": str(team.id), "rpm_limit": 10},
+        headers=ADMIN_AUTH,
+    )
     assert response.status_code == 200, response.text
     assert calls == ["locked", "validate"]

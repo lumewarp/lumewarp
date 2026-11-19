@@ -33,7 +33,14 @@ from lumewarp_control_plane.api.schemas import (
 from lumewarp_control_plane.authz import Action, Authz
 from lumewarp_control_plane.compiler.validate import metrics_url_problem
 from lumewarp_control_plane.errors import not_found
-from lumewarp_control_plane.models import ConfigOutbox, GatewaySession, GatewayToken, Zone
+from lumewarp_control_plane.models import (
+    ApiKey,
+    ConfigOutbox,
+    GatewaySession,
+    GatewayToken,
+    KeyLifecycle,
+    Zone,
+)
 from lumewarp_control_plane.settings import Settings
 
 router = APIRouter(tags=["zones"])
@@ -72,8 +79,8 @@ async def zone_archive_blockers(session: AsyncSession, zone: str) -> list[str]:
     """Why the zone cannot be archived right now; empty means it can.
 
     A gateway still streaming this zone's config would have no control plane to talk to
-    afterwards, so it must disconnect first. The key API extends this with the zone's live
-    keys once keys carry a zone.
+    afterwards, so it must disconnect first; a key that is not revoked would disappear from
+    every snapshot, so it must be revoked or left for later.
     """
     reasons: list[str] = []
     connected = await session.scalar(
@@ -81,6 +88,11 @@ async def zone_archive_blockers(session: AsyncSession, zone: str) -> list[str]:
     )
     if connected:
         reasons.append(f"{connected} gateway session(s) are connected")
+    live_keys = await session.scalar(
+        select(func.count()).where(ApiKey.zone == zone, ApiKey.lifecycle != KeyLifecycle.REVOKED)
+    )
+    if live_keys:
+        reasons.append(f"{live_keys} key(s) are not revoked")
     return reasons
 
 
@@ -199,9 +211,8 @@ async def archive_zone(
     name: str, authz: Authz, session: SessionDep, settings: SettingsDep
 ) -> ZoneOut:
     """Archive a zone: revoke its gateway tokens and stop compiling it. Requires an
-    installation admin. Refused (409) for the default zone (`LUMEWARP_ZONE`) and while a
-    gateway session is still connected; a zone with a live key is refused too once keys
-    carry a zone.
+    installation admin. Refused (409) for the default zone (`LUMEWARP_ZONE`), while a
+    gateway session is still connected, and while a key of the zone is not revoked.
     """
     await authz.require(Action.ZONE_MANAGE)
     async with mutation(session):

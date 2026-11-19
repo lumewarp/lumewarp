@@ -750,27 +750,45 @@ class Stack:
             "/routers",
             json={"name": "mock", "members": [{"model_id": dep["id"]}]},
         )
-        body = {"name": "ml", "model_access": "all"}
+        team = self.ok(
+            "POST",
+            "/teams",
+            json={"name": "ml", "model_access": "all", "org_id": self.org_id},
+        )
         if team_budget is not None:
-            body["budget_nano_usd"] = team_budget
-        body["org_id"] = self.org_id
-        team = self.ok("POST", "/teams", json=body)
-        body = {}
-        if owner_budget is not None:
-            body["budget_nano_usd"] = owner_budget
+            self.ok(
+                "PUT",
+                f"/zones/{ZONE}/limits",
+                json={"team_id": team["id"], "budget_nano_usd": team_budget},
+            )
         token = None
         if owner_kind == "user":
             token = self.create_pat("owner@e2e.test", team["id"], "member")
             owner_id = self.ok("GET", "/users/me", token)["user_id"]
-            self.ok("PATCH", f"/teams/{team['id']}/members/{owner_id}", json=body)
+            if owner_budget is not None:
+                self.ok(
+                    "PUT",
+                    f"/zones/{ZONE}/limits",
+                    json={"team_id": team["id"], "user_id": owner_id, "budget_nano_usd": owner_budget},
+                )
             key_body = {}
         else:
             assert owner_kind == "service_account"
             owner_id = self.ok(
                 "POST",
                 f"/teams/{team['id']}/service-accounts",
-                json={"name": "chat", **body},
+                json={"name": "chat"},
             )["id"]
+            if owner_budget is not None:
+                self.ok(
+                    "PUT",
+                    f"/zones/{ZONE}/limits",
+                    json={
+                        "team_id": team["id"],
+                        "service_account_id": owner_id,
+                        "budget_nano_usd": owner_budget,
+                    },
+                )
             key_body = {"service_account_id": owner_id}
         keys = {}
         for name in ("a", "b"):

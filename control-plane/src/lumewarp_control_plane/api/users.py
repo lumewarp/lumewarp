@@ -27,11 +27,13 @@ from lumewarp_control_plane.api.schemas import (
     EffectiveModelOut,
     MeBudgetOut,
     MeKeyLimitsOut,
+    MeKeyRulesOut,
     MeLimitsOut,
     MeMcpGrantOut,
     MeOrgOut,
     MeOut,
     MeTeamOut,
+    MeZoneOut,
     Page,
     TokenCreate,
     TokenCreated,
@@ -60,6 +62,9 @@ from lumewarp_control_plane.models import (
     TeamRole,
     UsageTotal,
     User,
+    Zone,
+    ZoneLimit,
+    ZoneMemberDefaults,
     member_scope_id,
 )
 from lumewarp_control_plane.orgs import live_orgs
@@ -74,6 +79,11 @@ from lumewarp_control_plane.security import Principal, SecretKind, generate_secr
 from lumewarp_control_plane.windows import month_window
 
 router = APIRouter(tags=["users"])
+
+
+def _min_opt(*values: int | None) -> int | None:
+    present = [value for value in values if value is not None]
+    return min(present) if present else None
 
 
 def _check_not_null(body: object, *fields: str) -> None:
@@ -118,6 +128,7 @@ async def _my_teams(
     *,
     installation_admin: bool,
     admin_org_ids: set[uuid.UUID],
+    zone: str,
 ) -> list[MeTeamOut]:
     """Direct memberships plus the teams the caller administers by inheritance.
 
@@ -183,6 +194,7 @@ async def _my_teams(
         session,
         user_id,
         rows,
+        zone=zone,
         installation_admin=installation_admin,
         inherited={team_id: source for team_id, (_, source) in inherited.items()},
         direct=direct,
@@ -194,22 +206,25 @@ async def _team_details(
     user_id: uuid.UUID,
     rows: list[tuple[Team, TeamRole, TeamMember | None]],
     *,
+    zone: str,
     installation_admin: bool,
     inherited: dict[uuid.UUID, InheritedFrom] | None = None,
     direct: set[uuid.UUID] | None = None,
 ) -> list[MeTeamOut]:
-    """Enrich memberships with what a key of this member could do in each team.
+    """Enrich memberships with what a key of this member could do in each team and zone.
 
-    The model list and the limits are the member's *effective* policy from the one
-    resolver (`quota`), org included; they never widen what a member may read. The org and
-    team budgets and spends are only filled for a team admin or an installation admin: a
-    plain member gets the effective remaining amount, computed server-side. Spend is the
-    current UTC month. A missing local member row (external IAM) still gets the team's
-    member defaults, exactly as in the compiler.
+    The model list is the one resolver's effective set (org included); it never widens what
+    a member may read. `by_zone` carries the effective limits, key rules, key count and
+    remaining budget for every live zone; the top-level `limits`/`budget`/`key_limits` are
+    the default zone's values. The org and team budgets and spends are only filled for a
+    team admin or an installation admin: a plain member gets the effective remaining amount,
+    computed server-side. Spend is the current UTC month.
     """
     if not rows:
         return []
     from lumewarp_control_plane.model_types import catalog_types
+
+    default_zone = zone
 
     types = await catalog_types(session)
     names = (await session.execute(select(CatalogName.id, CatalogName.name))).all()
@@ -219,6 +234,10 @@ async def _team_details(
     team_ids = [team.id for team, _, _ in rows]
     org_ids = {team.org_id for team, _, _ in rows}
     orgs = {org.id: org for org in await session.scalars(select(Org).where(Org.id.in_(org_ids)))}
+    zones = list(
+        await session.scalars(select(Zone).where(Zone.archived_at.is_(None)).order_by(Zone.name))
+    )
+    zone_names = [zone.name for zone in zones]
     # MCP and A2A access resolve to the live targets, like `models` resolves to the catalog.
     mcp_targets = sorted(
         (await session.scalars(select(McpServer.name).where(McpServer.deleted_at.is_(None)))).all()
@@ -226,15 +245,13 @@ async def _team_details(
     agent_targets = sorted(
         (await session.scalars(select(A2aAgent.name).where(A2aAgent.deleted_at.is_(None)))).all()
     )
-    # Every team of these orgs, so the org spend is derived from its whole subtree.
+    # Every team of these orgs, so the org spend is derived from its whole subtree, per zone.
     org_team_ids = {
         team_id: org_id
         for team_id, org_id in await session.execute(
             select(Team.id, Team.org_id).where(Team.org_id.in_(org_ids))
         )
     }
-    # Every team's member scope: inherited admins and external-backend members have no local
-    # membership row, yet their keys compile with the same uuid5 scope id.
     member_ids = [member_scope_id(team.id, user_id) for team, _, _ in rows]
     scope_filters = [
         and_(UsageTotal.scope_type == ScopeType.TEAM, UsageTotal.scope_id.in_(org_team_ids))
@@ -243,28 +260,34 @@ async def _team_details(
         scope_filters.append(
             and_(UsageTotal.scope_type == ScopeType.MEMBER, UsageTotal.scope_id.in_(member_ids))
         )
-    spent = {
-        (scope_type, scope_id): cost
-        for scope_type, scope_id, cost in await session.execute(
-            select(UsageTotal.scope_type, UsageTotal.scope_id, UsageTotal.cost_nano_usd).where(
-                UsageTotal.window_start == window_start, or_(*scope_filters)
-            )
+    spent: dict[tuple[str, ScopeType, uuid.UUID], int] = {
+        (zone, scope_type, scope_id): cost
+        for zone, scope_type, scope_id, cost in await session.execute(
+            select(
+                UsageTotal.zone,
+                UsageTotal.scope_type,
+                UsageTotal.scope_id,
+                UsageTotal.cost_nano_usd,
+            ).where(UsageTotal.window_start == window_start, or_(*scope_filters))
         )
     }
-    org_spent: dict[uuid.UUID, int] = {}
+    org_spent: dict[tuple[str, uuid.UUID], int] = {}
     for team_id, org_id in org_team_ids.items():
-        org_spent[org_id] = org_spent.get(org_id, 0) + spent.get((ScopeType.TEAM, team_id), 0)
-    key_counts = {
-        team_id: count
-        for team_id, count in await session.execute(
-            select(ApiKey.team_id, func.count())
+        for zone in zone_names:
+            org_spent[(zone, org_id)] = org_spent.get((zone, org_id), 0) + spent.get(
+                (zone, ScopeType.TEAM, team_id), 0
+            )
+    key_counts: dict[tuple[str, uuid.UUID], int] = {
+        (zone, team_id): count
+        for zone, team_id, count in await session.execute(
+            select(ApiKey.zone, ApiKey.team_id, func.count())
             .where(
                 ApiKey.team_id.in_(team_ids),
                 ApiKey.owner_kind == KeyOwnerKind.USER,
                 ApiKey.user_id == user_id,
                 ApiKey.lifecycle != KeyLifecycle.REVOKED,
             )
-            .group_by(ApiKey.team_id)
+            .group_by(ApiKey.zone, ApiKey.team_id)
         )
     }
     member_policies = {
@@ -275,48 +298,158 @@ async def _team_details(
             )
         )
     }
+    # One read per zone for every limit row this page needs.
+    zone_limits = {
+        zone: list(
+            await session.scalars(
+                select(ZoneLimit).where(
+                    ZoneLimit.zone == zone,
+                    or_(
+                        ZoneLimit.org_id.in_(org_ids),
+                        ZoneLimit.team_id.in_(team_ids),
+                    ),
+                )
+            )
+        )
+        for zone in zone_names
+    }
+    zone_defaults = {
+        zone: {
+            row.team_id: row
+            for row in await session.scalars(
+                select(ZoneMemberDefaults).where(
+                    ZoneMemberDefaults.zone == zone,
+                    ZoneMemberDefaults.team_id.in_(team_ids),
+                )
+            )
+        }
+        for zone in zone_names
+    }
+    limits_by_owner: dict[str, dict[tuple, ZoneLimit]] = {}
+    for zone, limits in zone_limits.items():
+        index: dict[tuple, ZoneLimit] = {}
+        for row in limits:
+            if row.org_id is not None:
+                index[("org", row.org_id)] = row
+            elif row.user_id is not None:
+                index[("member", row.team_id, row.user_id)] = row
+            elif row.service_account_id is not None:
+                index[("service_account", row.service_account_id)] = row
+            else:
+                index[("team", row.team_id)] = row
+        limits_by_owner[zone] = index
+
+    def limits_row(zone: str, key: tuple) -> ZoneLimit | None:
+        return limits_by_owner.get(zone, {}).get(key)
+
     details: list[MeTeamOut] = []
     for team, role, _member in rows:
         org = orgs[team.org_id]
-        team_limits = policy_of(team)
         member_policy = member_policies.get((team.id, user_id))
-        member_limits = policy_of(member_policy) if member_policy is not None else None
-        team_eff = team_effective(org_effective(org), team)
-        effective_limits = owner_effective(
-            team_eff,
-            team,
-            member_limits,
-            service_account=False,
-        )
-        # The member scope exists for external-backend members too (their keys compile
-        # with the same uuid5 id), so read it even without a local membership row.
-        member_spent = spent.get((ScopeType.MEMBER, member_scope_id(team.id, user_id)), 0)
-        team_spent = spent.get((ScopeType.TEAM, team.id), 0)
-        org_spend = org_spent.get(org.id, 0)
-        budgets: list[BudgetLevel] = []
-        for level, scope_id, budget, used in (
-            (ScopeType.ORG, org.id, org.budget_nano_usd, org_spend),
-            (ScopeType.TEAM, team.id, team_limits.budget_nano_usd, team_spent),
-            (
-                ScopeType.MEMBER,
-                member_scope_id(team.id, user_id),
-                member_limits.budget_nano_usd if member_limits else None,
-                member_spent,
-            ),
-        ):
-            if budget is not None:
-                budgets.append(
-                    BudgetLevel(
-                        level=level,
-                        scope_id=scope_id,
-                        budget_nano_usd=budget,
-                        spent_nano_usd=used,
-                    )
-                )
-        # The team scope is the team-admin view. An installation admin passes every
-        # team's checks, even without a direct admin role. The org scope is visible to
-        # org admins too; `role` is only the direct team role, so it follows the team view.
         can_read_team = installation_admin or role is TeamRole.ADMIN
+        by_zone: dict[str, MeZoneOut] = {}
+        default_zone_out: MeZoneOut | None = None
+        for zone_row in zones:
+            zone = zone_row.name
+            org_limits = limits_row(zone, ("org", org.id))
+            team_limits = limits_row(zone, ("team", team.id))
+            member_limits = limits_row(zone, ("member", team.id, user_id))
+            defaults = zone_defaults.get(zone, {}).get(team.id)
+            team_eff = team_effective(org_effective(org, org_limits), team, team_limits)
+            effective_limits = owner_effective(
+                team_eff,
+                defaults,
+                policy_of(member_policy, member_limits) if member_policy is not None else None,
+                service_account=False,
+            )
+            member_spent = spent.get((zone, ScopeType.MEMBER, member_scope_id(team.id, user_id)), 0)
+            team_spent = spent.get((zone, ScopeType.TEAM, team.id), 0)
+            org_spend = org_spent.get((zone, org.id), 0)
+            budgets: list[BudgetLevel] = []
+            for level, scope_id, budget, used in (
+                (
+                    ScopeType.ORG,
+                    org.id,
+                    getattr(org_limits, "budget_nano_usd", None),
+                    org_spend,
+                ),
+                (
+                    ScopeType.TEAM,
+                    team.id,
+                    getattr(team_limits, "budget_nano_usd", None),
+                    team_spent,
+                ),
+                (
+                    ScopeType.MEMBER,
+                    member_scope_id(team.id, user_id),
+                    getattr(member_limits, "budget_nano_usd", None)
+                    if member_policy is not None
+                    else None,
+                    member_spent,
+                ),
+            ):
+                if budget is not None:
+                    budgets.append(
+                        BudgetLevel(
+                            level=level,
+                            scope_id=scope_id,
+                            budget_nano_usd=budget,
+                            spent_nano_usd=used,
+                        )
+                    )
+            zone_out = MeZoneOut(
+                zone=zone,
+                display_name=zone_row.display_name or zone_row.name,
+                color=zone_row.color,
+                limits=MeLimitsOut(
+                    rpm_limit=effective_limits.rpm_limit,
+                    tpm_limit=effective_limits.tpm_limit,
+                    max_parallel=effective_limits.max_parallel,
+                ),
+                key_rules=MeKeyRulesOut(
+                    key_min_creator_role=zone_row.key_min_creator_role,
+                    key_max_lifetime_seconds=_min_opt(
+                        zone_row.key_max_lifetime_seconds,
+                        team.max_member_key_lifetime_seconds,
+                    ),
+                    key_expiry_required=zone_row.key_expiry_required,
+                    key_max_per_member=_min_opt(
+                        zone_row.key_max_per_member, team.max_keys_per_member
+                    ),
+                    service_account_keys_allowed=zone_row.service_account_keys_allowed,
+                    playground_allowed=zone_row.playground_allowed,
+                ),
+                key_count=key_counts.get((zone, team.id), 0),
+                budget=MeBudgetOut(
+                    org_budget_nano_usd=(
+                        getattr(org_limits, "budget_nano_usd", None) if can_read_team else None
+                    ),
+                    org_spent_nano_usd=(org_spend if can_read_team else None),
+                    team_budget_nano_usd=(
+                        getattr(team_limits, "budget_nano_usd", None) if can_read_team else None
+                    ),
+                    team_spent_nano_usd=team_spent if can_read_team else None,
+                    member_budget_nano_usd=(
+                        getattr(member_limits, "budget_nano_usd", None)
+                        if member_policy is not None
+                        else None
+                    ),
+                    member_spent_nano_usd=member_spent,
+                    remaining_nano_usd=remaining_nano_usd(budgets),
+                    window_start=window_start,
+                    window_end=window_end,
+                ),
+                playground_gateway_url=zone_row.playground_gateway_url,
+            )
+            by_zone[zone] = zone_out
+            if zone == default_zone:
+                default_zone_out = zone_out
+        # Fall back to the first zone when the configured default is archived: the top-level
+        # fields still describe one usable zone.
+        current = default_zone_out or (next(iter(by_zone.values())) if by_zone else None)
+        effective_models = (
+            None if effective_limits.models is None else sorted(effective_limits.models)
+        )
         details.append(
             MeTeamOut(
                 team_id=team.id,
@@ -324,16 +457,10 @@ async def _team_details(
                 role=role,
                 inherited_from=(inherited or {}).get(team.id),
                 direct=direct is None or team.id in direct,
-                models=catalog
-                if effective_limits.models is None
-                else sorted(effective_limits.models),
+                models=catalog if effective_models is None else effective_models,
                 typed_models=[
                     EffectiveModelOut(name=name, model_type=types_by_name.get(name))
-                    for name in (
-                        catalog
-                        if effective_limits.models is None
-                        else sorted(effective_limits.models)
-                    )
+                    for name in (catalog if effective_models is None else effective_models)
                 ],
                 all_models=effective_limits.models is None,
                 mcp_servers=(
@@ -354,29 +481,24 @@ async def _team_details(
                 if effective_limits.agents is None
                 else sorted(name for name in effective_limits.agents if name in agent_targets),
                 all_agents=effective_limits.agents is None,
-                limits=MeLimitsOut(
-                    rpm_limit=effective_limits.rpm_limit,
-                    tpm_limit=effective_limits.tpm_limit,
-                    max_parallel=effective_limits.max_parallel,
-                ),
+                limits=current.limits if current is not None else MeLimitsOut(),
                 key_limits=MeKeyLimitsOut(
                     max_keys_per_member=team.max_keys_per_member,
                     max_member_key_lifetime_seconds=team.max_member_key_lifetime_seconds,
-                    key_count=key_counts.get(team.id, 0),
+                    key_count=key_counts.get((default_zone, team.id), 0),
                 ),
-                budget=MeBudgetOut(
-                    org_budget_nano_usd=(org.budget_nano_usd if can_read_team else None),
-                    org_spent_nano_usd=(org_spend if can_read_team else None),
-                    team_budget_nano_usd=(team_limits.budget_nano_usd if can_read_team else None),
-                    team_spent_nano_usd=team_spent if can_read_team else None,
-                    member_budget_nano_usd=(
-                        member_limits.budget_nano_usd if member_limits else None
-                    ),
-                    member_spent_nano_usd=member_spent,
-                    remaining_nano_usd=remaining_nano_usd(budgets),
+                budget=current.budget
+                if current is not None
+                else MeBudgetOut(
+                    team_budget_nano_usd=None,
+                    team_spent_nano_usd=None,
+                    member_budget_nano_usd=None,
+                    member_spent_nano_usd=0,
+                    remaining_nano_usd=None,
                     window_start=window_start,
                     window_end=window_end,
                 ),
+                by_zone=by_zone,
             )
         )
     return details
@@ -431,7 +553,9 @@ async def create_user(body: UserCreate, authz: Authz, session: SessionDep) -> Us
 
 
 @router.get("/users/me", response_model=MeOut, operation_id="getCurrentUser")
-async def get_current_user(request: Request, authz: Authz, session: SessionDep) -> MeOut:
+async def get_current_user(
+    request: Request, authz: Authz, session: SessionDep, settings: SettingsDep
+) -> MeOut:
     """The caller: installation role, the orgs and teams they belong to or administer (inherited
     ones marked `inherited_from`), and per team the effective models, limits, key limits and the
     month's remaining budget. A break-glass session has no user and returns only its kind.
@@ -475,6 +599,7 @@ async def get_current_user(request: Request, authz: Authz, session: SessionDep) 
             user.id,
             installation_admin=role is not None,
             admin_org_ids=administered,
+            zone=settings.zone,
         )
     except AuthzUnavailable:
         teams = []

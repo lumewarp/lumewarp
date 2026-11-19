@@ -535,6 +535,7 @@ async def seed_usage(url: str) -> None:
                     UsageEvent(
                         request_id=uuid.uuid4(),
                         gateway_id="e2e-gw",
+                        zone="default",
                         ts=ts,
                         started_at=ts - timedelta(seconds=1),
                         key_id=key,
@@ -724,6 +725,7 @@ async def seed_docs(url: str) -> None:
                             UsageEvent(
                                 request_id=uuid.uuid4(),
                                 gateway_id=gateway_ids[0],
+                                zone="default",
                                 ts=ts,
                                 started_at=ts - timedelta(seconds=2),
                                 key_id=key,

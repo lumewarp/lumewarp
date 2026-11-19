@@ -1,5 +1,5 @@
 import type { McpGrant, ModelAccess, PolicyOut, Team } from "../api";
-import { nanoToUsd, usdToNano, fmtUsd } from "./Bits";
+import { nanoToUsd, fmtUsd } from "./Bits";
 import { NumberField } from "./Form";
 import { PermissionPicker } from "./PermissionPicker";
 import { AgentGrants, McpGrants, type TargetScope } from "./TargetGrants";
@@ -48,10 +48,10 @@ export const policyFrom = (p: PolicyOut, isTeam = false): PolicyValues => ({
   mcp_servers: (p.mcp_servers ?? []).map((grant) => ({ server: grant.server, all_tools: grant.all_tools, tools: [...grant.tools] })),
   a2a_access: accessFrom(p.a2a_access, isTeam),
   a2a_agents: [...(p.a2a_agents ?? [])],
-  rpm_limit: p.rpm_limit,
-  tpm_limit: p.tpm_limit,
-  max_parallel: p.max_parallel,
-  budget_usd: nanoToUsd(p.budget_nano_usd),
+  rpm_limit: p.rpm_limit ?? null,
+  tpm_limit: p.tpm_limit ?? null,
+  max_parallel: p.max_parallel ?? null,
+  budget_usd: nanoToUsd(p.budget_nano_usd ?? null),
 });
 
 /**
@@ -70,10 +70,6 @@ export const policyBody = (v: PolicyValues) => ({
       : [],
   a2a_access: v.a2a_access,
   a2a_agents: v.a2a_access === "list" ? v.a2a_agents : [],
-  rpm_limit: v.rpm_limit,
-  tpm_limit: v.tpm_limit,
-  max_parallel: v.max_parallel,
-  budget_nano_usd: usdToNano(v.budget_usd),
 });
 
 /** Server field names -> form field names, for `useForm().run`. */

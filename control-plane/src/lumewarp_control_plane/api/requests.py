@@ -71,6 +71,7 @@ class RequestOut(ReadModel):
 
     request_id: uuid.UUID
     ts: datetime
+    zone: str
     kind: TrafficKind
     endpoint: str
     requested: str
@@ -182,6 +183,9 @@ async def list_requests(
     router: Annotated[
         str | None, Query(description="Only requests that went through this router name.")
     ] = None,
+    zone: Annotated[
+        str | None, Query(description="Only requests of this zone; omitted reads every zone.")
+    ] = None,
     status: Annotated[
         int | None,
         Query(ge=100, le=599, description="Only responses with this HTTP status."),
@@ -271,6 +275,8 @@ async def list_requests(
         filters.append(UsageEvent.owner_id == service_account_id)
     if key_id is not None:
         filters.append(UsageEvent.key_id == key_id)
+    if zone is not None:
+        filters.append(UsageEvent.zone == zone)
     if readable is not None:
         filters.append(UsageEvent.team_id.in_(readable))
     if admin_teams is not None:
@@ -308,6 +314,7 @@ async def list_requests(
         RequestOut(
             request_id=event.request_id,
             ts=event.ts,
+            zone=event.zone,
             kind=event.kind,
             endpoint=event.endpoint,
             requested=event.requested,

@@ -31,6 +31,8 @@ from lumewarp_control_plane.models import (
     UsageState,
     UsageTotal,
     Zone,
+    ZoneLimit,
+    ZoneMemberDefaults,
 )
 from tests import factories
 
@@ -48,6 +50,7 @@ def _event(request_id: uuid.UUID, ids, cost: int = 100) -> dict:
     return dict(
         request_id=request_id,
         gateway_id="gw-1",
+        zone="default",
         ts=datetime(2026, 10, 22, tzinfo=UTC),
         key_id=uuid.uuid4(),
         team_id=team.id,
@@ -97,13 +100,14 @@ async def test_usage_events_reject_negative(session: AsyncSession) -> None:
 
 
 async def test_usage_totals_primary_key_and_upsert(session: AsyncSession) -> None:
+    await factories.ensure_zone(session, "default")
     scope_id = uuid.uuid4()
     window = datetime(2026, 10, 1, tzinfo=UTC)
-    key = dict(scope_type=ScopeType.TEAM, scope_id=scope_id, window_start=window)
+    key = dict(zone="default", scope_type=ScopeType.TEAM, scope_id=scope_id, window_start=window)
 
     upsert = insert(UsageTotal).values(**key, cost_nano_usd=10, request_count=1)
     upsert = upsert.on_conflict_do_update(
-        index_elements=["scope_type", "scope_id", "window_start"],
+        index_elements=["zone", "scope_type", "scope_id", "window_start"],
         set_={
             "cost_nano_usd": UsageTotal.cost_nano_usd + upsert.excluded.cost_nano_usd,
             "request_count": UsageTotal.request_count + upsert.excluded.request_count,
@@ -151,8 +155,12 @@ async def test_allowlist_modes(session: AsyncSession) -> None:
 
 async def test_budget_and_limit_checks(session: AsyncSession) -> None:
     org = await factories.make_org(session)
-    await _fails(session, Team(name="t2", org_id=org.id, rpm_limit=0))
-    await _fails(session, Team(name="t3", org_id=org.id, budget_nano_usd=-1))
+    await _fails(session, ZoneLimit(zone="default", org_id=org.id, rpm_limit=0))
+    await _fails(session, ZoneLimit(zone="default", org_id=org.id, budget_nano_usd=-1))
+    await _fails(
+        session,
+        ZoneMemberDefaults(zone="default", team_id=uuid.uuid4(), max_parallel=0),
+    )
 
 
 async def test_service_account_key_must_match_team(session: AsyncSession) -> None:

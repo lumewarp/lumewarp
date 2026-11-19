@@ -489,10 +489,10 @@ const minLimit = (own: number | null, parent: number | null | undefined) =>
   own === null ? (parent ?? null) : parent === null || parent === undefined ? own : Math.min(own, parent);
 
 /** A stored policy or member default, as the three limit fields. */
-const policyLimits = (p: { rpm_limit: number | null; tpm_limit: number | null; max_parallel: number | null }): KeyLimitValues => ({
-  rpm_limit: p.rpm_limit,
-  tpm_limit: p.tpm_limit,
-  max_parallel: p.max_parallel,
+const policyLimits = (p: { rpm_limit?: number | null; tpm_limit?: number | null; max_parallel?: number | null }): KeyLimitValues => ({
+  rpm_limit: p.rpm_limit ?? null,
+  tpm_limit: p.tpm_limit ?? null,
+  max_parallel: p.max_parallel ?? null,
 });
 
 const clampLimits = (own: KeyLimitValues, parent: KeyLimitValues): KeyLimitValues => ({
@@ -843,9 +843,6 @@ function TeamSettings({ team }: { team: TeamAny }) {
         name: values.name,
         max_keys_per_member: values.max_keys_per_member,
         max_member_key_lifetime_seconds: values.max_member_key_lifetime_seconds,
-        member_rpm_default: values.member_rpm_default,
-        member_tpm_default: values.member_tpm_default,
-        member_max_parallel_default: values.member_max_parallel_default,
       };
       // A team admin edits the name, the member key limits and the member defaults; the
       // team quota (models, rate limits, budget) is sent only by an org admin, so a stale

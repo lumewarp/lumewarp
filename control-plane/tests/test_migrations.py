@@ -60,6 +60,14 @@ async def test_enum_check_constraints_exist(engine) -> None:
         "ck_zones_key_min_creator_role",
         "ck_zones_key_lifetime_positive",
         "ck_zones_key_max_positive",
+        "ck_zone_limits_owner_shape",
+        "ck_zone_limits_rpm_positive",
+        "ck_zone_limits_tpm_positive",
+        "ck_zone_limits_parallel_positive",
+        "ck_zone_limits_budget_nonneg",
+        "ck_zone_member_defaults_rpm_positive",
+        "ck_zone_member_defaults_tpm_positive",
+        "ck_zone_member_defaults_parallel_positive",
     ):
         assert name in names
 

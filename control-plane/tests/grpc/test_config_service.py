@@ -2097,10 +2097,10 @@ async def test_usage_is_attributed_to_the_reporting_gateway(
 
     scope, tokens = await _seed(session_factory)
     async with session_factory() as session, session.begin():
-        team = await factories.make_team(session)
+        team = await factories.make_team(session, zone=scope)
         user = await factories.make_user(session)
         await factories.make_member(session, team, user)
-        key = await factories.make_key(session, team, user)
+        key = await factories.make_key(session, team, user, zone=scope)
         key_id, team_id = key.id, team.id
     server, channel, _ = await _start(session_factory, scope)
     metadata = (("authorization", f"Bearer {tokens['gateway-a']}"),)

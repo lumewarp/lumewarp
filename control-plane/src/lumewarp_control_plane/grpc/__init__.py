@@ -1076,7 +1076,7 @@ class _UsageService(usage_pb2_grpc.UsageServiceServicer):
                     session,
                     request.gateway_id,
                     request.events,
-                    zone_name=identity.zone,
+                    zone=identity.zone,
                     max_batch_events=self.settings.max_usage_batch_events,
                     skipped=skipped,
                 )

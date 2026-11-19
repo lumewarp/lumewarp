@@ -92,6 +92,7 @@ DIMENSIONS = (
 )
 # Output columns behind each dimension, in cursor order.
 COLUMNS = {
+    "zone": ("zone",),
     "day": ("day",),
     "endpoint": ("endpoint",),
     "model_type": ("model_type",),
@@ -113,7 +114,7 @@ UUID_COLUMNS = {"team", "owner_id", "key"}
 # them; everyone else groups by `requested`, the name the client actually called.
 ROUTING_DIMENSIONS = frozenset({"model", "upstream_model", "alias", "router"})
 # Dimensions that are plain columns of the event: no catalog name to resolve.
-PLAIN_DIMENSIONS = frozenset({"kind", "target", "method", "tool", "endpoint", "model_type"})
+PLAIN_DIMENSIONS = frozenset({"zone", "kind", "target", "method", "tool", "endpoint", "model_type"})
 
 ENDPOINT_TYPES = {
     "chat_completions": "llm",
@@ -216,13 +217,14 @@ async def _totals_page(
     from_: datetime,
     to_: datetime,
     team_id: uuid.UUID | None,
+    zone: str | None,
     limit: int,
     cursor: str | None,
 ) -> Page[UsageRowOut]:
-    group_column = UsageTotal.scope_id
+    group_columns = [UsageTotal.zone, UsageTotal.scope_id]
     stmt = (
         select(
-            group_column,
+            *group_columns,
             func.coalesce(func.sum(UsageTotal.request_count), 0),
             func.coalesce(func.sum(UsageTotal.prompt_tokens), 0),
             func.coalesce(func.sum(UsageTotal.completion_tokens), 0),
@@ -235,30 +237,40 @@ async def _totals_page(
             UsageTotal.window_start >= from_,
             UsageTotal.window_start < to_,
         )
-        .group_by(group_column)
-        .order_by(group_column)
+        .group_by(*group_columns)
+        .order_by(*group_columns)
     )
     if team_id is not None:
-        stmt = stmt.where(group_column == team_id)
+        stmt = stmt.where(UsageTotal.scope_id == team_id)
+    if zone is not None:
+        stmt = stmt.where(UsageTotal.zone == zone)
     if cursor is not None:
+        # A team can appear once per zone, so the totals cursor is the (zone, team) pair.
+        zone_cursor, team_cursor = _decode_cursor(cursor, ["zone", "team"])
         try:
-            stmt = stmt.where(group_column > uuid.UUID(cursor))
-        except ValueError as exc:
+            team_uuid = uuid.UUID(str(team_cursor))
+        except (TypeError, ValueError) as exc:
             raise validation_error("cursor", "invalid cursor") from exc
+        stmt = stmt.where(
+            tuple_(UsageTotal.zone, UsageTotal.scope_id) > tuple_(str(zone_cursor), team_uuid)
+        )
     rows = (await session.execute(stmt.limit(limit + 1))).all()
-    next_cursor = str(rows[limit - 1][0]) if len(rows) > limit else None
+    next_cursor = (
+        _encode_cursor([rows[limit - 1][0], str(rows[limit - 1][1])]) if len(rows) > limit else None
+    )
     items = [
         UsageRowOut(
-            audio_ms=int(row[6]),
+            zone=row[0],
+            audio_ms=int(row[7]),
             # The totals table holds LLM requests only (usage.ingest), so a row from it is one.
             kind=TrafficKind.LLM,
-            team_id=row[0],
-            requests=int(row[1]),
-            prompt_tokens=int(row[2]),
-            completion_tokens=int(row[3]),
-            total_tokens=int(row[2]) + int(row[3]),
-            cost_nano_usd=int(row[4]),
-            unknown_cost_count=int(row[5]),
+            team_id=row[1],
+            requests=int(row[2]),
+            prompt_tokens=int(row[3]),
+            completion_tokens=int(row[4]),
+            total_tokens=int(row[3]) + int(row[4]),
+            cost_nano_usd=int(row[5]),
+            unknown_cost_count=int(row[6]),
             # Not aggregated into the totals: nothing reads it from this shape.
             error_count=0,
             total_duration_ms=0,
@@ -303,6 +315,7 @@ def _events_query(
         )
     upstream = "model" in groups or "upstream_model" in groups
     fields = {
+        "zone": UsageEvent.zone,
         "day": func.date_trunc("day", func.timezone("UTC", UsageEvent.ts)),
         "kind": UsageEvent.kind,
         "endpoint": UsageEvent.endpoint,
@@ -404,6 +417,10 @@ async def _events_page(
 ) -> Page[UsageRowOut]:
     if readable is not None and not readable:
         return Page[UsageRowOut](items=[], next_cursor=None)
+    # The zone is part of every grouped row. No dimension (an aggregate over the whole
+    # range) stays a single all-zones row, so its `zone` is null.
+    if groups and "zone" not in groups:
+        groups = ["zone", *groups]
     stmt, fields, kinds, upstream = _events_query(groups, readable, from_, to_, filters)
     names = list(fields)
     group_columns = list(fields.values())
@@ -493,6 +510,9 @@ async def get_usage(
     target: str | None = None,
     method: str | None = None,
     tool: str | None = None,
+    zone: Annotated[
+        str | None, Query(description="Only this zone; omitted reads every zone.")
+    ] = None,
     requested: str | None = None,
     model: str | None = None,
     upstream_model: str | None = None,
@@ -615,12 +635,15 @@ async def get_usage(
         and user_id is None
         and service_account_id is None
         and key_id is None
+        and zone is None
         and _month_aligned(start, end)
     )
     if use_totals:
-        return await _totals_page(session, start, end, team_id, limit, cursor)
+        return await _totals_page(session, start, end, team_id, zone, limit, cursor)
     ensure_range(start, end)
     filters: list[Any] = []
+    if zone is not None:
+        filters.append(UsageEvent.zone == zone)
     for catalog_kind, name, name_id in (
         (CatalogKind.MODEL, model, model_id),
         (CatalogKind.ALIAS, alias, alias_id),
@@ -742,6 +765,9 @@ async def get_usage_leaderboard(
         TrafficKind,
         Query(description="Gateway protocol to rank; `llm` by default."),
     ] = TrafficKind.LLM,
+    zone: Annotated[
+        str | None, Query(description="Only this zone; omitted ranks every zone.")
+    ] = None,
     limit: Annotated[
         int,
         Query(ge=1, le=50, description="How many rows to return, 1 to 50; default 10."),
@@ -779,11 +805,16 @@ async def get_usage_leaderboard(
         return Page[UsageLeaderboardRowOut](items=[], next_cursor=None)
 
     if by == "requested":
-        group_columns = [UsageEvent.requested]
+        group_columns = [UsageEvent.zone, UsageEvent.requested]
     elif by == "key":
-        group_columns = [UsageEvent.team_id, UsageEvent.key_id]
+        group_columns = [UsageEvent.zone, UsageEvent.team_id, UsageEvent.key_id]
     else:
-        group_columns = [UsageEvent.team_id, UsageEvent.owner_kind, UsageEvent.owner_id]
+        group_columns = [
+            UsageEvent.zone,
+            UsageEvent.team_id,
+            UsageEvent.owner_kind,
+            UsageEvent.owner_id,
+        ]
     total_tokens = func.coalesce(func.sum(UsageEvent.prompt_tokens), 0) + func.coalesce(
         func.sum(UsageEvent.completion_tokens), 0
     )
@@ -809,6 +840,8 @@ async def get_usage_leaderboard(
         stmt = stmt.where(UsageEvent.team_id == scoped_team)
     elif readable is not None:
         stmt = stmt.where(UsageEvent.team_id.in_(readable))
+    if zone is not None:
+        stmt = stmt.where(UsageEvent.zone == zone)
     rows = (await session.execute(stmt)).mappings().all()
 
     admin_team_ids = admin_teams or set()
@@ -846,6 +879,7 @@ async def get_usage_leaderboard(
     for rank, row in enumerate(rows, start=1):
         values: dict[str, Any] = {
             "rank": rank,
+            "zone": row["zone"],
             "requests": int(row["requests"]),
             "prompt_tokens": int(row["prompt_tokens"]),
             "completion_tokens": int(row["completion_tokens"]),

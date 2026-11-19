@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane.compiler import compile_zone
 from lumewarp_control_plane.models import AuditLog, ModelAccess, TeamRole
-from tests.api.helpers import ADMIN_AUTH, auth, suffix, user_with_token
+from tests.api.helpers import ADMIN_AUTH, auth, set_playground_url, suffix, user_with_token
 from tests.factories import (
     grant,
     make_member,
@@ -258,6 +258,7 @@ async def test_playground_offers_only_the_key_list(client, committed) -> None:
     )
     assert created.status_code == 201, created.text
     key_id = created.json()["key"]["id"]
+    await set_playground_url(client, committed, "http://gateway:4000")
     body = client.get("/api/v1/playground", headers=auth("session:" + cookie)).json()
     assert next(k for k in body["keys"] if k["id"] == key_id)["models"] == [a]
 

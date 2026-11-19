@@ -167,10 +167,10 @@ class PolicyFields(ApiModel):
     """Writable policy columns shared by teams, team members and service accounts.
 
     `model_access`/`allowed_models`, `mcp_access`/`mcp_servers` and
-    `a2a_access`/`a2a_agents` cannot be null; limits and budgets can be set to null to
-    clear them. On update, omitted fields keep their current value. MCP and A2A access
-    mirror model access: `inherit` keeps the parent's set, `all` grants everything the
-    parent allows, `list` grants exactly these rows (empty = deny all).
+    `a2a_access`/`a2a_agents` cannot be null. On update, omitted fields keep their current
+    value. MCP and A2A access mirror model access: `inherit` keeps the parent's set, `all`
+    grants everything the parent allows, `list` grants exactly these rows (empty = deny
+    all). Limits and budgets are per zone and written through `PUT /zones/{zone}/limits`.
     """
 
     model_access: ModelAccess | None = None
@@ -180,10 +180,6 @@ class PolicyFields(ApiModel):
     mcp_servers: list[McpGrantIn] | None = None
     a2a_access: ModelAccess | None = None
     a2a_agents: list[Annotated[str, AfterValidator(_target_name)]] | None = None
-    rpm_limit: int | None = Field(default=None, gt=0)
-    tpm_limit: int | None = Field(default=None, gt=0)
-    max_parallel: int | None = Field(default=None, gt=0)
-    budget_nano_usd: int | None = Field(default=None, ge=0)
 
     @field_validator("allowed_models")
     @classmethod
@@ -247,10 +243,16 @@ class PolicyOut(ReadModel):
     mcp_servers: list[McpGrantOut]
     a2a_access: ModelAccess
     a2a_agents: list[str]
-    rpm_limit: int | None
-    tpm_limit: int | None
-    max_parallel: int | None
-    budget_nano_usd: int | None
+    # The default zone's values, kept for convenience; the authoritative view is
+    # `limits_by_zone`.
+    rpm_limit: int | None = None
+    tpm_limit: int | None = None
+    max_parallel: int | None = None
+    budget_nano_usd: int | None = None
+    limits_by_zone: dict[str, ZoneLimitsOut] = Field(
+        default_factory=dict,
+        description="This level's own limits and budget in every zone that sets one.",
+    )
 
 
 class TeamKeyLimits(ApiModel):
@@ -276,6 +278,67 @@ class TeamMemberDefaults(ApiModel):
     member_rpm_default: int | None = Field(default=None, gt=0)
     member_tpm_default: int | None = Field(default=None, gt=0)
     member_max_parallel_default: int | None = Field(default=None, gt=0)
+
+
+class ZoneLimitsOut(ReadModel):
+    """One level's own limits and budget in one zone. Both absent limits = none."""
+
+    rpm_limit: int | None = None
+    tpm_limit: int | None = None
+    max_parallel: int | None = None
+    budget_nano_usd: int | None = None
+
+
+class ZoneMemberDefaultsOut(ReadModel):
+    """A team's per-zone default limits for its members."""
+
+    rpm_limit: int | None = None
+    tpm_limit: int | None = None
+    max_parallel: int | None = None
+
+
+class ZoneLimitSet(ApiModel):
+    """`PUT /zones/{zone}/limits`: the owner and its limits in that zone.
+
+    Exactly one owner shape: `org_id` alone, `team_id` alone, `team_id` + `user_id`, or
+    `team_id` + `service_account_id`. Every limit is optional; null (or omitting all four)
+    means no limit at this level in the zone.
+    """
+
+    org_id: uuid.UUID | None = None
+    team_id: uuid.UUID | None = None
+    user_id: uuid.UUID | None = None
+    service_account_id: uuid.UUID | None = None
+    rpm_limit: int | None = Field(default=None, gt=0)
+    tpm_limit: int | None = Field(default=None, gt=0)
+    max_parallel: int | None = Field(default=None, gt=0)
+    budget_nano_usd: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _one_owner(self) -> ZoneLimitSet:
+        if self.org_id is not None:
+            if self.team_id is not None or self.user_id is not None:
+                raise ValueError("org_id cannot be combined with a team or user")
+            if self.service_account_id is not None:
+                raise ValueError("org_id cannot be combined with a service account")
+            return self
+        if self.team_id is None:
+            raise ValueError("provide org_id, team_id, or team_id with user_id/service_account_id")
+        if self.user_id is not None and self.service_account_id is not None:
+            raise ValueError("user_id and service_account_id are mutually exclusive")
+        return self
+
+
+class ZoneMemberDefaultsSet(ApiModel):
+    """`PUT /zones/{zone}/member-defaults`: a team's default limits for its members.
+
+    Null means "no default"; omitting every value deletes the row.
+    """
+
+    team_id: uuid.UUID
+    rpm_limit: int | None = Field(default=None, gt=0)
+    tpm_limit: int | None = Field(default=None, gt=0)
+    max_parallel: int | None = Field(default=None, gt=0)
 
 
 class OrgCreate(PolicyFields):
@@ -326,6 +389,7 @@ class OrgAdminOut(ReadModel):
 class OrgTeamUsageOut(ApiModel):
     """One team's usage inside an org, aggregated from `usage_events` at query time."""
 
+    zone: str | None = Field(default=None, description="The zone filter, null = all zones.")
     team_id: uuid.UUID
     team_name: str
     archived: bool
@@ -338,6 +402,7 @@ class OrgTeamUsageOut(ApiModel):
 
 
 class OrgUsageOut(ApiModel):
+    zone: str | None = Field(default=None, description="The zone filter, null = all zones.")
     org_id: uuid.UUID
     org_name: str
     teams: list[OrgTeamUsageOut]
@@ -349,12 +414,12 @@ class OrgUsageOut(ApiModel):
     unknown_cost_count: int
 
 
-class TeamCreate(PolicyFields, TeamKeyLimits, TeamMemberDefaults):
+class TeamCreate(PolicyFields, TeamKeyLimits):
     name: Name
     org_id: uuid.UUID
 
 
-class TeamUpdate(PolicyFields, TeamKeyLimits, TeamMemberDefaults):
+class TeamUpdate(PolicyFields, TeamKeyLimits):
     name: Name | None = None
 
 
@@ -377,6 +442,10 @@ class TeamOut(PolicyOut, TeamBasicOut, TeamMemberDefaults):
     """The whole team, including its policy: team admins and installation admins only."""
 
     effective_models: list[str] | None = Field(default=None, description=_EFFECTIVE_MODELS)
+    member_defaults_by_zone: dict[str, ZoneMemberDefaultsOut] = Field(
+        default_factory=dict,
+        description="This team's member-default limits in every zone that sets one.",
+    )
 
 
 class MemberUpsert(PolicyFields):
@@ -470,6 +539,9 @@ def _key_models_not_null[T: BaseModel](body: T) -> T:
 class KeyCreate(ApiModel):
     name: Name
     expires_at: datetime | None = None
+    # The zone whose snapshots this key is compiled into and whose key rules apply.
+    # Omitted = the default zone; immutable after creation.
+    zone: ZoneName | None = None
     # Omit to create a key owned by the caller.
     service_account_id: uuid.UUID | None = None
     # The key level of the hierarchy: no value here means no extra limiter scope. The
@@ -566,6 +638,10 @@ class KeyRefOut(ReadModel):
 class KeyOut(ReadModel):
     id: uuid.UUID
     team_id: uuid.UUID
+    zone: str
+    # Rules of the key's zone (or its team) that this existing key no longer satisfies.
+    # Such a key keeps working until it expires or is rotated.
+    rule_violations: list[str] = Field(default_factory=list)
     rpm_limit: int | None
     tpm_limit: int | None
     max_parallel: int | None
@@ -1637,6 +1713,35 @@ class EffectiveModelOut(ApiModel):
     model_type: ModelType | None
 
 
+class MeKeyRulesOut(ApiModel):
+    """The key rules that apply to a key this member creates in one zone."""
+
+    key_min_creator_role: KeyMinCreatorRole
+    key_max_lifetime_seconds: int | None = Field(
+        description="The effective cap for a member key: min(zone, team); null = none."
+    )
+    key_expiry_required: bool
+    key_max_per_member: int | None = Field(
+        description="The effective per-member cap in this zone: min(zone, team); null = none."
+    )
+    service_account_keys_allowed: bool
+    playground_allowed: bool
+
+
+class MeZoneOut(ApiModel):
+    """The caller's effective policy in one zone for one team."""
+
+    zone: str
+    display_name: str
+    color: str
+    limits: MeLimitsOut
+    key_rules: MeKeyRulesOut
+    # Non-revoked user-owned keys the caller has in this team and zone.
+    key_count: int
+    budget: MeBudgetOut
+    playground_gateway_url: str | None = None
+
+
 class MeTeamOut(ApiModel):
     typed_models: list[EffectiveModelOut] = Field(default_factory=list)
     team_id: uuid.UUID
@@ -1659,9 +1764,12 @@ class MeTeamOut(ApiModel):
     all_mcp: bool
     agents: list[str]
     all_agents: bool
+    # The default zone's values, kept for convenience; `by_zone` is authoritative.
     limits: MeLimitsOut
     key_limits: MeKeyLimitsOut
     budget: MeBudgetOut
+    # Every live zone: effective limits, key rules, key count and remaining budget.
+    by_zone: dict[str, MeZoneOut] = Field(default_factory=dict)
 
 
 class MeOrgOut(ApiModel):
@@ -1746,6 +1854,9 @@ class UsageRowOut(ApiModel):
     monthly totals fast path (LLM requests only) reports both as 0.
     """
 
+    zone: str | None = Field(
+        default=None, description="The request zone; null when the row is not grouped by zone."
+    )
     endpoint: str | None = None
     model_type: ModelType | None = None
     audio_ms: int = 0
@@ -1793,6 +1904,7 @@ class UsageLeaderboardRowOut(ApiModel):
     """
 
     rank: int = Field(description="1-based position, ordered by total tokens, then cost.")
+    zone: str = Field(description="The zone this row was ranked in.")
     label: str = Field(
         description=(
             "What the row names: the called name, the key's name or the owner's name; an"

@@ -17,7 +17,7 @@ import uuid
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from sqlalchemy import delete, select
+from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane.errors import ApiError
@@ -39,6 +39,8 @@ from lumewarp_control_plane.models import (
     PolicyGroupGrant,
     ServiceAccount,
     Team,
+    ZoneLimit,
+    ZoneMemberDefaults,
 )
 from lumewarp_control_plane.quota import (
     Effective,
@@ -364,10 +366,6 @@ def policy_from_fields(
             model_access=mode,
             allowed_models=allowed,
             allowed_groups=groups,
-            rpm_limit=fields.rpm_limit,
-            tpm_limit=fields.tpm_limit,
-            max_parallel=fields.max_parallel,
-            budget_nano_usd=fields.budget_nano_usd,
             mcp_access=mcp_access,
             mcp_grants=_mcp_grants(fields) if mcp_access is ModelAccess.LIST else (),
             a2a_access=a2a_access,
@@ -423,12 +421,12 @@ def policy_from_fields(
         model_access=mode,
         allowed_models=allowed,
         allowed_groups=groups,
-        rpm_limit=(fields.rpm_limit if "rpm_limit" in supplied else base.rpm_limit),
-        tpm_limit=(fields.tpm_limit if "tpm_limit" in supplied else base.tpm_limit),
-        max_parallel=(fields.max_parallel if "max_parallel" in supplied else base.max_parallel),
-        budget_nano_usd=(
-            fields.budget_nano_usd if "budget_nano_usd" in supplied else base.budget_nano_usd
-        ),
+        # The zone limit row is not part of `PolicyFields`: a write that also changes
+        # limits merges them in its own transaction (`api.zone_limits`).
+        rpm_limit=base.rpm_limit,
+        tpm_limit=base.tpm_limit,
+        max_parallel=base.max_parallel,
+        budget_nano_usd=base.budget_nano_usd,
         mcp_access=mcp_access,
         mcp_grants=mcp_grants,
         a2a_access=a2a_access,
@@ -536,9 +534,163 @@ async def _org_of(session: AsyncSession, team: Team) -> Org:
     return org
 
 
-async def team_effective_of(session: AsyncSession, team: Team) -> Effective:
-    """The team's effective policy: the org's effective set narrowed by the team."""
-    return team_effective(org_effective(await _org_of(session, team)), team)
+# ------------------------------------------------------------------ per-zone limits
+
+
+def _owner_values(
+    owner: dict[str, uuid.UUID | None],
+) -> dict[str, uuid.UUID | None]:
+    """The four zone-limit owner columns, dropping the key shape."""
+    return {
+        "org_id": owner.get("org_id"),
+        "team_id": owner.get("team_id"),
+        "user_id": owner.get("user_id"),
+        "service_account_id": owner.get("service_account_id"),
+    }
+
+
+def owner_of(
+    row: Org | Team | MemberPolicy | ServiceAccount,
+) -> dict[str, uuid.UUID | None]:
+    """The zone-limit owner shape of a policy row."""
+    return _owner_values(_owner(row))
+
+
+async def zone_limits_of(
+    session: AsyncSession, zone: str, owner: dict[str, uuid.UUID | None]
+) -> ZoneLimit | None:
+    """The owner's limit row in one zone, or None."""
+    values = _owner_values(owner)
+    return await session.scalar(
+        select(ZoneLimit).where(
+            ZoneLimit.zone == zone,
+            *(
+                column.is_(None) if value is None else column == value
+                for column, value in (
+                    (ZoneLimit.org_id, values["org_id"]),
+                    (ZoneLimit.team_id, values["team_id"]),
+                    (ZoneLimit.user_id, values["user_id"]),
+                    (ZoneLimit.service_account_id, values["service_account_id"]),
+                )
+            ),
+        )
+    )
+
+
+async def zone_limits_batch(
+    session: AsyncSession,
+    zone: str,
+    *,
+    org_ids: set[uuid.UUID] | None = None,
+    team_ids: set[uuid.UUID] | None = None,
+    member_pairs: set[tuple[uuid.UUID, uuid.UUID]] | None = None,
+    service_account_ids: set[uuid.UUID] | None = None,
+) -> dict[tuple[str, uuid.UUID] | tuple[str, uuid.UUID, uuid.UUID], ZoneLimit]:
+    """Every limit row of one zone for the requested owner ids, keyed by shape.
+
+    Keys are `("org", id)`, `("team", id)`, `("member", team_id, user_id)` and
+    `("service_account", id)`.
+    """
+    clauses = []
+    if org_ids:
+        clauses.append(and_(ZoneLimit.org_id.in_(org_ids), ZoneLimit.zone == zone))
+    if team_ids:
+        clauses.append(
+            and_(
+                ZoneLimit.team_id.in_(team_ids),
+                ZoneLimit.user_id.is_(None),
+                ZoneLimit.service_account_id.is_(None),
+                ZoneLimit.org_id.is_(None),
+                ZoneLimit.zone == zone,
+            )
+        )
+    if member_pairs:
+        clauses.append(
+            and_(
+                ZoneLimit.team_id.in_({team_id for team_id, _ in member_pairs}),
+                ZoneLimit.user_id.in_({user_id for _, user_id in member_pairs}),
+                ZoneLimit.zone == zone,
+            )
+        )
+    if service_account_ids:
+        clauses.append(
+            and_(
+                ZoneLimit.service_account_id.in_(service_account_ids),
+                ZoneLimit.zone == zone,
+            )
+        )
+    if not clauses:
+        return {}
+    out: dict[tuple, ZoneLimit] = {}
+    for row in await session.scalars(select(ZoneLimit).where(or_(*clauses))):
+        if row.org_id is not None:
+            out[("org", row.org_id)] = row
+        elif row.user_id is not None:
+            out[("member", row.team_id, row.user_id)] = row
+        elif row.service_account_id is not None:
+            out[("service_account", row.service_account_id)] = row
+        else:
+            out[("team", row.team_id)] = row
+    return out
+
+
+async def member_defaults_of(
+    session: AsyncSession, zone: str, team_id: uuid.UUID
+) -> ZoneMemberDefaults | None:
+    return await session.get(ZoneMemberDefaults, (zone, team_id))
+
+
+async def member_defaults_batch(
+    session: AsyncSession, zone: str, team_ids: set[uuid.UUID]
+) -> dict[uuid.UUID, ZoneMemberDefaults]:
+    if not team_ids:
+        return {}
+    rows = await session.scalars(
+        select(ZoneMemberDefaults).where(
+            ZoneMemberDefaults.zone == zone, ZoneMemberDefaults.team_id.in_(team_ids)
+        )
+    )
+    return {row.team_id: row for row in rows}
+
+
+async def org_effective_in(session: AsyncSession, zone: str, org: Org) -> Effective:
+    """The org's effective policy in one zone."""
+    return org_effective(org, await zone_limits_of(session, zone, {"org_id": org.id}))
+
+
+async def team_effective_in(session: AsyncSession, zone: str, team: Team) -> Effective:
+    """The team's effective policy in one zone: org ∩ team, with each level's zone limits."""
+    org = await _org_of(session, team)
+    return team_effective(
+        await org_effective_in(session, zone, org),
+        team,
+        await zone_limits_of(session, zone, {"team_id": team.id}),
+    )
+
+
+async def team_effective_of(
+    session: AsyncSession, team: Team, zone: str | None = None
+) -> Effective:
+    """The team's effective policy, in `zone` or the default zone without one."""
+    return await team_effective_in(session, zone or _default_zone(), team)
+
+
+async def owner_effective_in(
+    session: AsyncSession,
+    zone: str,
+    team: Team,
+    policy: Policy | None,
+    owner: dict[str, uuid.UUID | None],
+    *,
+    service_account: bool = False,
+) -> Effective:
+    """The owner's effective policy in one zone: exception ?? defaults, clamped by team."""
+    return owner_effective(
+        await team_effective_in(session, zone, team),
+        await member_defaults_of(session, zone, team.id),
+        policy,
+        service_account=service_account,
+    )
 
 
 async def owner_effective_of(
@@ -547,14 +699,37 @@ async def owner_effective_of(
     policy: Policy | None,
     *,
     service_account: bool = False,
+    zone: str | None = None,
+    limits: ZoneLimit | None = None,
 ) -> Effective:
-    """The owner's effective policy: exception ?? defaults, clamped by the team."""
+    """The owner's effective policy; `zone` defaults to the default zone.
+
+    `limits` is the owner's zone-limit row when the caller already loaded it; without it
+    the owner's policy carries no limits of its own and only the team's zone limit and the
+    member defaults apply.
+    """
+    zone = zone or _default_zone()
+    resolved = policy
+    if resolved is not None and limits is not None:
+        resolved = replace(
+            resolved,
+            rpm_limit=limits.rpm_limit,
+            tpm_limit=limits.tpm_limit,
+            max_parallel=limits.max_parallel,
+            budget_nano_usd=limits.budget_nano_usd,
+        )
     return owner_effective(
-        await team_effective_of(session, team),
-        team,
-        policy,
+        await team_effective_in(session, zone, team),
+        await member_defaults_of(session, zone, team.id),
+        resolved,
         service_account=service_account,
     )
+
+
+def _default_zone() -> str:
+    from lumewarp_control_plane.settings import get_settings
+
+    return get_settings().zone
 
 
 def _models_changed(base: Policy, proposed: Policy) -> bool:
@@ -566,10 +741,10 @@ def _models_changed(base: Policy, proposed: Policy) -> bool:
 
 
 async def validate_team_policy(
-    session: AsyncSession, team: Team, proposed: Policy, base: Policy | None
+    session: AsyncSession, zone: str, team: Team, proposed: Policy, base: Policy | None
 ) -> None:
-    """A changed team value may not exceed the org's current effective value."""
-    parent = org_effective(await _org_of(session, team))
+    """A changed team value may not exceed the org's current effective value in `zone`."""
+    parent = await org_effective_in(session, zone, await _org_of(session, team))
     check_narrowing(
         parent,
         await expand_groups(session, proposed),
@@ -579,14 +754,18 @@ async def validate_team_policy(
 
 
 async def validate_owner_policy(
-    session: AsyncSession, team: Team, proposed: Policy, base: Policy | None = None
+    session: AsyncSession,
+    zone: str,
+    team: Team,
+    proposed: Policy,
+    base: Policy | None = None,
 ) -> None:
-    """Names exist and changed limits/models stay within the team's effective policy."""
+    """Names exist and changed limits/models stay within the team's effective zone policy."""
     models_changed = base is None or _models_changed(base, proposed)
     if models_changed:
         await grant_ids(session, proposed.allowed_models)
     check_narrowing(
-        await team_effective_of(session, team),
+        await team_effective_in(session, zone, team),
         await expand_groups(session, proposed),
         check_models=models_changed,
         base=base,

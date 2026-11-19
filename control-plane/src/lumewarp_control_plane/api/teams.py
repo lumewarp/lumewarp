@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane import audit
 from lumewarp_control_plane.api.common import (
+    DefaultZoneDep,
     LimitDep,
     SessionDep,
     SettingsDep,
@@ -30,9 +31,14 @@ from lumewarp_control_plane.api.policy import (
     save_grants,
     team_effective_of,
     validate_team_policy,
-    violation,
 )
 from lumewarp_control_plane.api.schemas import Page, TeamBasicOut, TeamCreate, TeamOut, TeamUpdate
+from lumewarp_control_plane.api.zone_limits import (
+    apply_default_zone_limits,
+    limits_by_zone,
+    limits_of,
+    member_defaults_by_zone,
+)
 from lumewarp_control_plane.authz import Action, Authz
 from lumewarp_control_plane.errors import not_found
 from lumewarp_control_plane.models import (
@@ -43,22 +49,21 @@ from lumewarp_control_plane.models import (
     ServiceAccount,
     Team,
 )
-from lumewarp_control_plane.quota import Effective
 
 router = APIRouter(tags=["teams"])
 
-MEMBER_DEFAULT_FIELDS = (
-    "member_rpm_default",
-    "member_tpm_default",
-    "member_max_parallel_default",
-)
 
-
-async def _team_out(session: AsyncSession, row: Team) -> TeamOut:
+async def _team_out(session: AsyncSession, row: Team, zone: str) -> TeamOut:
     """The full team with its effective model set: org ∩ team, groups expanded."""
     out = TeamOut.model_validate(row)
-    models = (await team_effective_of(session, row)).models
+    models = (await team_effective_of(session, row, zone)).models
     out.effective_models = None if models is None else sorted(models)
+    apply_default_zone_limits(
+        out,
+        (await limits_by_zone(session, "team", {row.id})).get(("team", row.id), {}),
+        default_zone=zone,
+        member_defaults=(await member_defaults_by_zone(session, {row.id})).get(row.id, {}),
+    )
     return out
 
 
@@ -70,6 +75,7 @@ async def _team_out(session: AsyncSession, row: Team) -> TeamOut:
 async def list_teams(
     authz: Authz,
     session: SessionDep,
+    zone: DefaultZoneDep,
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[TeamOut | TeamBasicOut]:
@@ -90,7 +96,7 @@ async def list_teams(
     # record and reads their own effective policy from /users/me.
     admin_teams = None if is_admin else await authz.admin_teams([row.id for row in rows])
     items = [
-        await _team_out(session, row)
+        await _team_out(session, row, zone)
         if admin_teams is None or row.id in admin_teams
         else TeamBasicOut.model_validate(row)
         for row in rows
@@ -128,13 +134,11 @@ async def create_team(
             name=body.name,
             max_keys_per_member=body.max_keys_per_member,
             max_member_key_lifetime_seconds=body.max_member_key_lifetime_seconds,
-            member_rpm_default=body.member_rpm_default,
-            member_tpm_default=body.member_tpm_default,
-            member_max_parallel_default=body.member_max_parallel_default,
         )
         # A new team is a child write too: it may not start above its org's effective
-        # policy.
-        await validate_team_policy(session, row, policy, None)
+        # policy in the default zone. Its per-zone limits are written afterwards through
+        # `PUT /zones/{zone}/limits`.
+        await validate_team_policy(session, settings.zone, row, policy, None)
         apply_policy(row, policy)
         session.add(row)
         await session.flush()
@@ -151,7 +155,7 @@ async def create_team(
             details={"name": row.name},
         )
         await enqueue_recompile(session, settings, "api.team.create")
-    return await _team_out(session, row)
+    return await _team_out(session, row, settings.zone)
 
 
 @router.get(
@@ -159,13 +163,15 @@ async def create_team(
     response_model=TeamOut | TeamBasicOut,
     operation_id="getTeam",
 )
-async def get_team(team_id: uuid.UUID, authz: Authz, session: SessionDep) -> TeamOut | TeamBasicOut:
+async def get_team(
+    team_id: uuid.UUID, authz: Authz, session: SessionDep, zone: DefaultZoneDep
+) -> TeamOut | TeamBasicOut:
     """A team admin gets the full record; any other member gets the basic one. A caller outside the
     team gets 404.
     """
     row = await get_team_or_404(session, authz, team_id)
     if await authz.allowed(Action.TEAM_ADMIN_READ, row.id):
-        return await _team_out(session, row)
+        return await _team_out(session, row, zone)
     return TeamBasicOut.model_validate(row)
 
 
@@ -186,15 +192,14 @@ async def update_team(
         await lock_hierarchy(session)
         ensure_not_null(body, "name")
         row = await get_team_or_404(session, authz, team_id)
-        base = policy_of(row)
+        zone = settings.zone
+        limits = await limits_of(session, zone, {"team_id": row.id})
+        base = policy_of(row, limits)
         proposed = policy_from_fields(body, default_mode=ModelAccess.ALL, base=base)
         changed = proposed != base
         settings_fields = (
             "max_keys_per_member",
             "max_member_key_lifetime_seconds",
-            "member_rpm_default",
-            "member_tpm_default",
-            "member_max_parallel_default",
         )
         field_changes = {
             field: getattr(body, field)
@@ -210,29 +215,10 @@ async def update_team(
             await authz.require(Action.TEAM_SETTINGS_UPDATE, row.id)
         if changed:
             await grant_ids(session, proposed.allowed_models)
-            await validate_team_policy(session, row, proposed, base)
+            await validate_team_policy(session, zone, row, proposed, base)
             apply_policy(row, proposed)
             await save_grants(session, row, proposed)
             await session.refresh(row)
-        default_changes = {
-            field: value for field, value in field_changes.items() if field in MEMBER_DEFAULT_FIELDS
-        }
-        if default_changes:
-            # The member default is a child of the team's own effective limits: a changed
-            # default may not exceed them. Lowering the team still succeeds; per-member
-            # exceptions are not rechecked and the effective value is clamped.
-            team_eff: Effective = await team_effective_of(session, row)
-            parents = {
-                "member_rpm_default": team_eff.rpm_limit,
-                "member_tpm_default": team_eff.tpm_limit,
-                "member_max_parallel_default": team_eff.max_parallel,
-            }
-            for field, value in default_changes.items():
-                parent = parents[field]
-                if parent is not None and value is not None and value > parent:
-                    raise violation(
-                        field, f"must be <= the team's effective value {parent} (got {value})"
-                    )
         if body.name is not None:
             row.name = body.name
         for field, value in field_changes.items():
@@ -254,7 +240,7 @@ async def update_team(
             },
         )
         await enqueue_recompile(session, settings, "api.team.update")
-    return await _team_out(session, row)
+    return await _team_out(session, row, settings.zone)
 
 
 @router.delete(

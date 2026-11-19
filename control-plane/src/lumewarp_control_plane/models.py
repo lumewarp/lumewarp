@@ -327,11 +327,11 @@ class PolicyMixin:
     - MCP and A2A access mirror model access at the same four levels, with the same mode
       enum and defaults: `mcp_server_grants` (one row per server, optionally narrowed to a
       tool list) and `a2a_agent_grants` (one row per agent).
-    - Rate limits: NULL = no limit at this level. Each set level becomes one shared
-      `RateLimitScope` ("org:<id>", "team:<id>", "member:<scope id>", "sa:<id>",
-      "key:<id>").
-    - Budget: monthly (UTC calendar) hard limit in nano-USD, NULL = none. Spend lives in
-      `usage_totals` (the org level derives it from its teams), never on the entity row.
+    - Rate limits and budgets are per zone and live in `zone_limits` (org, team, member or
+      service account) and `zone_member_defaults` (a team's member defaults), not on this
+      row: the same grant set applies in every zone, but an org may allow 10 rpm in prod
+      and 100 in dev. A set level becomes one shared `RateLimitScope`; a budget is the
+      monthly (UTC calendar) hard limit in nano-USD. Spend lives in `usage_totals`.
     """
 
     @declared_attr
@@ -371,21 +371,8 @@ class PolicyMixin:
             server_default=_access_default(cls).value,
         )
 
-    rpm_limit: Mapped[int | None] = mapped_column(Integer)
-    tpm_limit: Mapped[int | None] = mapped_column(BigInteger)
-    max_parallel: Mapped[int | None] = mapped_column(Integer)
-    budget_nano_usd: Mapped[int | None] = mapped_column(BigInteger)
-
-    @staticmethod
-    def policy_constraints() -> tuple[CheckConstraint, ...]:
-        return (
-            CheckConstraint("rpm_limit IS NULL OR rpm_limit > 0", name="rpm_positive"),
-            CheckConstraint("tpm_limit IS NULL OR tpm_limit > 0", name="tpm_positive"),
-            CheckConstraint("max_parallel IS NULL OR max_parallel > 0", name="parallel_positive"),
-            CheckConstraint(
-                "budget_nano_usd IS NULL OR budget_nano_usd >= 0", name="budget_nonneg"
-            ),
-        )
+    # Limits and budgets are per zone (`zone_limits`, `zone_member_defaults`); the grants
+    # above are global because they name catalog entries by id.
 
 
 # --------------------------------------------------------------------------- installation
@@ -437,6 +424,122 @@ class Zone(Base):
     )
     playground_allowed: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
     created_at: Mapped[datetime] = _now()
+
+
+# The four owner shapes of a zone limit: org only, team only, team + member, team +
+# service account. Keys keep their limits on `api_keys` (one zone each).
+_ZONE_LIMIT_OWNER_SHAPE = (
+    "(org_id IS NOT NULL AND team_id IS NULL AND user_id IS NULL AND service_account_id IS NULL)"
+    " OR (org_id IS NULL AND team_id IS NOT NULL"
+    " AND NOT (user_id IS NOT NULL AND service_account_id IS NOT NULL))"
+)
+
+
+def _zone_limit_owner_args() -> tuple:
+    """Composite owner FKs, the four owner shapes and one unique index per shape."""
+    return (
+        ForeignKeyConstraint(
+            ["team_id", "user_id"],
+            ["member_policies.team_id", "member_policies.user_id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["service_account_id", "team_id"],
+            ["service_accounts.id", "service_accounts.team_id"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(_ZONE_LIMIT_OWNER_SHAPE, name="owner_shape"),
+        CheckConstraint("rpm_limit IS NULL OR rpm_limit > 0", name="rpm_positive"),
+        CheckConstraint("tpm_limit IS NULL OR tpm_limit > 0", name="tpm_positive"),
+        CheckConstraint("max_parallel IS NULL OR max_parallel > 0", name="parallel_positive"),
+        CheckConstraint("budget_nano_usd IS NULL OR budget_nano_usd >= 0", name="budget_nonneg"),
+        Index(
+            "uq_zone_limits_org",
+            "zone",
+            "org_id",
+            unique=True,
+            postgresql_where=text("org_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_zone_limits_team",
+            "zone",
+            "team_id",
+            unique=True,
+            postgresql_where=text(
+                "user_id IS NULL AND service_account_id IS NULL AND org_id IS NULL"
+            ),
+        ),
+        Index(
+            "uq_zone_limits_member",
+            "zone",
+            "team_id",
+            "user_id",
+            unique=True,
+            postgresql_where=text("user_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_zone_limits_service_account",
+            "zone",
+            "service_account_id",
+            unique=True,
+            postgresql_where=text("service_account_id IS NOT NULL"),
+        ),
+        Index(None, "org_id"),
+        Index(None, "team_id"),
+        Index(None, "service_account_id"),
+    )
+
+
+class ZoneLimit(TimestampMixin, Base):
+    """Rate limits and a monthly budget for one owner in one zone.
+
+    One row per owner shape (`org`, `team`, `member`, `service_account`) and zone. A NULL
+    column is "no limit here"; each set level becomes one shared limiter scope. Budgets are
+    the UTC calendar month's hard limit in nano-USD; spend lives in `usage_totals` tagged
+    with the same zone. The owner-shape CHECK mirrors `policy_grants`.
+    """
+
+    __tablename__ = "zone_limits"
+    __table_args__ = (*_zone_limit_owner_args(),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.name", ondelete="CASCADE"), nullable=False)
+    org_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("orgs.id", ondelete="CASCADE"))
+    team_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"))
+    user_id: Mapped[uuid.UUID | None] = mapped_column()
+    service_account_id: Mapped[uuid.UUID | None] = mapped_column()
+    rpm_limit: Mapped[int | None] = mapped_column(Integer)
+    tpm_limit: Mapped[int | None] = mapped_column(BigInteger)
+    max_parallel: Mapped[int | None] = mapped_column(Integer)
+    budget_nano_usd: Mapped[int | None] = mapped_column(BigInteger)
+
+
+class ZoneMemberDefaults(Base):
+    """A team's per-zone default limits for its members.
+
+    The member level takes an exception's own value when set, else these defaults, and the
+    result is clamped by the team's zone limit. Source-only: they compile into each
+    member's effective policy rather than into a separate limiter level.
+    """
+
+    __tablename__ = "zone_member_defaults"
+    __table_args__ = (
+        PrimaryKeyConstraint("zone", "team_id"),
+        CheckConstraint("rpm_limit IS NULL OR rpm_limit > 0", name="rpm_positive"),
+        CheckConstraint("tpm_limit IS NULL OR tpm_limit > 0", name="tpm_positive"),
+        CheckConstraint("max_parallel IS NULL OR max_parallel > 0", name="parallel_positive"),
+    )
+
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.name", ondelete="CASCADE"), nullable=False)
+    team_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("teams.id", ondelete="CASCADE"), nullable=False
+    )
+    rpm_limit: Mapped[int | None] = mapped_column(Integer)
+    tpm_limit: Mapped[int | None] = mapped_column(BigInteger)
+    max_parallel: Mapped[int | None] = mapped_column(Integer)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
 
 class User(TimestampMixin, Base):
@@ -583,7 +686,6 @@ class Org(PolicyMixin, TimestampMixin, Base):
 
     __tablename__ = "orgs"
     __table_args__ = (
-        *PolicyMixin.policy_constraints(),
         CheckConstraint(
             "model_access <> 'inherit' AND mcp_access <> 'inherit' AND a2a_access <> 'inherit'",
             name="no_inherit",
@@ -623,7 +725,6 @@ class OrgAdmin(Base):
 class Team(PolicyMixin, TimestampMixin, Base):
     __tablename__ = "teams"
     __table_args__ = (
-        *PolicyMixin.policy_constraints(),
         CheckConstraint(
             "model_access <> 'inherit' AND mcp_access <> 'inherit' AND a2a_access <> 'inherit'",
             name="no_inherit",
@@ -635,18 +736,6 @@ class Team(PolicyMixin, TimestampMixin, Base):
         CheckConstraint(
             "max_member_key_lifetime_seconds IS NULL OR max_member_key_lifetime_seconds > 0",
             name="max_member_key_lifetime_positive",
-        ),
-        CheckConstraint(
-            "member_rpm_default IS NULL OR member_rpm_default > 0",
-            name="member_rpm_default_positive",
-        ),
-        CheckConstraint(
-            "member_tpm_default IS NULL OR member_tpm_default > 0",
-            name="member_tpm_default_positive",
-        ),
-        CheckConstraint(
-            "member_max_parallel_default IS NULL OR member_max_parallel_default > 0",
-            name="member_max_parallel_default_positive",
         ),
         # A name is freed by archiving: unique only among live teams (moving a team
         # between orgs is still not supported).
@@ -672,12 +761,8 @@ class Team(PolicyMixin, TimestampMixin, Base):
     # into snapshots): the API enforces them on create/rotate. Revoking a key frees a slot.
     max_keys_per_member: Mapped[int | None] = mapped_column(Integer)
     max_member_key_lifetime_seconds: Mapped[int | None] = mapped_column(Integer)
-    # The member level's default limits: a member exception overrides them, and the
-    # effective value is clamped by the team's own limit. Source-only, like the key
-    # limits above; no model or budget default (those need an explicit policy row).
-    member_rpm_default: Mapped[int | None] = mapped_column(Integer)
-    member_tpm_default: Mapped[int | None] = mapped_column(BigInteger)
-    member_max_parallel_default: Mapped[int | None] = mapped_column(Integer)
+    # The member level's per-zone default limits live in `zone_member_defaults`; they are
+    # source-only, like the key limits above.
 
 
 class MemberPolicy(PolicyMixin, TimestampMixin, Base):
@@ -691,7 +776,6 @@ class MemberPolicy(PolicyMixin, TimestampMixin, Base):
 
     __tablename__ = "member_policies"
     __table_args__ = (
-        *PolicyMixin.policy_constraints(),
         PrimaryKeyConstraint("team_id", "user_id"),
         Index(None, "user_id"),
     )
@@ -729,7 +813,6 @@ class ServiceAccount(PolicyMixin, TimestampMixin, Base):
 
     __tablename__ = "service_accounts"
     __table_args__ = (
-        *PolicyMixin.policy_constraints(),
         UniqueConstraint("team_id", "name"),
         # Target for the composite FK that pins a key to its owner's team.
         UniqueConstraint("id", "team_id"),
@@ -793,6 +876,7 @@ class ApiKey(TimestampMixin, Base):
         Index(None, "team_id"),
         Index(None, "user_id"),
         Index(None, "service_account_id"),
+        Index(None, "zone"),
         Index(
             "uq_api_keys_previous_key_hash",
             "previous_key_hash",
@@ -810,6 +894,8 @@ class ApiKey(TimestampMixin, Base):
     team_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("teams.id", ondelete="RESTRICT"), nullable=False
     )
+    # The zone whose snapshots this key is compiled into. Immutable: rotation keeps it.
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.name", ondelete="RESTRICT"), nullable=False)
     owner_kind: Mapped[KeyOwnerKind] = mapped_column(
         _enum(KeyOwnerKind, "key_owner_kind"), nullable=False
     )
@@ -2268,6 +2354,9 @@ class UsageEvent(Base):
     received_at: Mapped[datetime] = _now()
     key_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
     team_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    # The zone of the authenticated gateway token (never a gateway claim), stamped at
+    # ingest. No FK: this is an append-only log and a zone row outlives its versions.
+    zone: Mapped[str] = mapped_column(String(64), nullable=False)
     # The key's owner at ingest time (user or service account id).
     owner_kind: Mapped[KeyOwnerKind] = mapped_column(
         _enum(KeyOwnerKind, "key_owner_kind"), nullable=False
@@ -2352,8 +2441,9 @@ class OrgBudgetWindow(Base):
     """
 
     __tablename__ = "org_budget_windows"
-    __table_args__ = (PrimaryKeyConstraint("org_id", "window_start"),)
+    __table_args__ = (PrimaryKeyConstraint("zone", "org_id", "window_start"),)
 
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.name", ondelete="CASCADE"), nullable=False)
     org_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("orgs.id", ondelete="CASCADE"), nullable=False
     )
@@ -2372,7 +2462,7 @@ class UsageTotal(Base):
 
     __tablename__ = "usage_totals"
     __table_args__ = (
-        PrimaryKeyConstraint("scope_type", "scope_id", "window_start"),
+        PrimaryKeyConstraint("zone", "scope_type", "scope_id", "window_start"),
         CheckConstraint(
             "cost_nano_usd >= 0 AND prompt_tokens >= 0 AND completion_tokens >= 0"
             " AND audio_ms >= 0 AND request_count >= 0 AND unknown_cost_count >= 0",
@@ -2380,6 +2470,7 @@ class UsageTotal(Base):
         ),
     )
 
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.name", ondelete="CASCADE"), nullable=False)
     scope_type: Mapped[ScopeType] = mapped_column(_enum(ScopeType, "scope_type"), nullable=False)
     scope_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
     window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

@@ -1677,9 +1677,8 @@ export interface paths {
         /**
          * Archive Zone
          * @description Archive a zone: revoke its gateway tokens and stop compiling it. Requires an
-         *     installation admin. Refused (409) for the default zone (`LUMEWARP_ZONE`) and while a
-         *     gateway session is still connected; a zone with a live key is refused too once keys
-         *     carry a zone.
+         *     installation admin. Refused (409) for the default zone (`LUMEWARP_ZONE`), while a
+         *     gateway session is still connected, and while a key of the zone is not revoked.
          */
         delete: operations["archiveZone"];
         options?: never;
@@ -1690,6 +1689,56 @@ export interface paths {
          *     is immutable. Requires an installation admin.
          */
         patch: operations["updateZone"];
+        trace?: never;
+    };
+    "/api/v1/zones/{zone}/limits": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Put Zone Limits
+         * @description Set one owner's rate limits and monthly budget in one zone.
+         *
+         *     The owner is an org, a team, a member (`team_id` + `user_id`) or a service account
+         *     (`team_id` + `service_account_id`). Requires the same role as the old inline edit: an
+         *     installation admin for an org, an org admin for a team, a team admin for a member or
+         *     service account. A changed value may not exceed its parent's effective value in this
+         *     zone. Sending every limit as null removes the row (no limit at this level).
+         */
+        put: operations["putZoneLimits"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/zones/{zone}/member-defaults": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Put Zone Member Defaults
+         * @description Set a team's default member limits in one zone (team-admin write).
+         *
+         *     The defaults are the member level's fallback when a member has no exception of their
+         *     own; a changed default may not exceed the team's effective limit in this zone. Sending
+         *     every value as null deletes the row.
+         */
+        put: operations["putZoneMemberDefaults"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/api/v1/session": {
@@ -2466,23 +2515,28 @@ export interface components {
              */
             expires_at?: string | null;
             /**
+             * Zone
+             * @description Config zone the record belongs to; omitted = the default zone.
+             */
+            zone?: string | null;
+            /**
              * Service Account Id
              * @description The service account that owns the key; omit for a key owned by the caller.
              */
             service_account_id?: string | null;
             /**
              * Rpm Limit
-             * @description Requests per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             * @description Requests per minute in this zone; null = no limit at this level.
              */
             rpm_limit?: number | null;
             /**
              * Tpm Limit
-             * @description Tokens per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             * @description Tokens per minute in this zone; null = no limit at this level.
              */
             tpm_limit?: number | null;
             /**
              * Max Parallel
-             * @description Concurrent requests at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             * @description Concurrent requests in this zone; null = no limit at this level.
              */
             max_parallel?: number | null;
             /**
@@ -2534,6 +2588,10 @@ export interface components {
              * Format: uuid
              */
             team_id: string;
+            /** Zone */
+            zone: string;
+            /** Rule Violations */
+            rule_violations?: string[];
             /** Rpm Limit */
             rpm_limit: number | null;
             /** Tpm Limit */
@@ -2714,17 +2772,17 @@ export interface components {
             lifecycle?: components["schemas"]["KeyLifecycle"] | null;
             /**
              * Rpm Limit
-             * @description Requests per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             * @description Requests per minute in this zone; null = no limit at this level.
              */
             rpm_limit?: number | null;
             /**
              * Tpm Limit
-             * @description Tokens per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             * @description Tokens per minute in this zone; null = no limit at this level.
              */
             tpm_limit?: number | null;
             /**
              * Max Parallel
-             * @description Concurrent requests at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             * @description Concurrent requests in this zone; null = no limit at this level.
              */
             max_parallel?: number | null;
             /**
@@ -3103,6 +3161,29 @@ export interface components {
             key_count: number;
         };
         /**
+         * MeKeyRulesOut
+         * @description The key rules that apply to a key this member creates in one zone.
+         */
+        MeKeyRulesOut: {
+            key_min_creator_role: components["schemas"]["KeyMinCreatorRole"];
+            /**
+             * Key Max Lifetime Seconds
+             * @description The effective cap for a member key: min(zone, team); null = none.
+             */
+            key_max_lifetime_seconds: number | null;
+            /** Key Expiry Required */
+            key_expiry_required: boolean;
+            /**
+             * Key Max Per Member
+             * @description The effective per-member cap in this zone: min(zone, team); null = none.
+             */
+            key_max_per_member: number | null;
+            /** Service Account Keys Allowed */
+            service_account_keys_allowed: boolean;
+            /** Playground Allowed */
+            playground_allowed: boolean;
+        };
+        /**
          * MeLimitsOut
          * @description Effective rate limits for a key the caller could create in this team.
          */
@@ -3203,6 +3284,29 @@ export interface components {
             limits: components["schemas"]["MeLimitsOut"];
             key_limits: components["schemas"]["MeKeyLimitsOut"];
             budget: components["schemas"]["MeBudgetOut"];
+            /** By Zone */
+            by_zone?: {
+                [key: string]: components["schemas"]["MeZoneOut"];
+            };
+        };
+        /**
+         * MeZoneOut
+         * @description The caller's effective policy in one zone for one team.
+         */
+        MeZoneOut: {
+            /** Zone */
+            zone: string;
+            /** Display Name */
+            display_name: string;
+            /** Color */
+            color: string;
+            limits: components["schemas"]["MeLimitsOut"];
+            key_rules: components["schemas"]["MeKeyRulesOut"];
+            /** Key Count */
+            key_count: number;
+            budget: components["schemas"]["MeBudgetOut"];
+            /** Playground Gateway Url */
+            playground_gateway_url?: string | null;
         };
         /** MemberCreate */
         MemberCreate: {
@@ -3232,26 +3336,6 @@ export interface components {
              * @description A2A agent names granted when `a2a_access` is `list`; empty denies all.
              */
             a2a_agents?: string[] | null;
-            /**
-             * Rpm Limit
-             * @description Requests per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            rpm_limit?: number | null;
-            /**
-             * Tpm Limit
-             * @description Tokens per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            tpm_limit?: number | null;
-            /**
-             * Max Parallel
-             * @description Concurrent requests at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            max_parallel?: number | null;
-            /**
-             * Budget Nano Usd
-             * @description Budget per UTC calendar month in nano-USD (1e-9 USD); null = no budget at this level.
-             */
-            budget_nano_usd?: number | null;
             /** @description `admin` or `member`. */
             role: components["schemas"]["TeamRole"];
             /**
@@ -3298,13 +3382,20 @@ export interface components {
             /** A2A Agents */
             a2a_agents: string[];
             /** Rpm Limit */
-            rpm_limit: number | null;
+            rpm_limit?: number | null;
             /** Tpm Limit */
-            tpm_limit: number | null;
+            tpm_limit?: number | null;
             /** Max Parallel */
-            max_parallel: number | null;
+            max_parallel?: number | null;
             /** Budget Nano Usd */
-            budget_nano_usd: number | null;
+            budget_nano_usd?: number | null;
+            /**
+             * Limits By Zone
+             * @description This level's own limits and budget in every zone that sets one.
+             */
+            limits_by_zone?: {
+                [key: string]: components["schemas"]["ZoneLimitsOut"];
+            };
             /**
              * Team Id
              * Format: uuid
@@ -3372,26 +3463,6 @@ export interface components {
              * @description A2A agent names granted when `a2a_access` is `list`; empty denies all.
              */
             a2a_agents?: string[] | null;
-            /**
-             * Rpm Limit
-             * @description Requests per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            rpm_limit?: number | null;
-            /**
-             * Tpm Limit
-             * @description Tokens per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            tpm_limit?: number | null;
-            /**
-             * Max Parallel
-             * @description Concurrent requests at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            max_parallel?: number | null;
-            /**
-             * Budget Nano Usd
-             * @description Budget per UTC calendar month in nano-USD (1e-9 USD); null = no budget at this level.
-             */
-            budget_nano_usd?: number | null;
             /** @description `admin` or `member`. */
             role?: components["schemas"]["TeamRole"] | null;
         };
@@ -3423,26 +3494,6 @@ export interface components {
              * @description A2A agent names granted when `a2a_access` is `list`; empty denies all.
              */
             a2a_agents?: string[] | null;
-            /**
-             * Rpm Limit
-             * @description Requests per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            rpm_limit?: number | null;
-            /**
-             * Tpm Limit
-             * @description Tokens per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            tpm_limit?: number | null;
-            /**
-             * Max Parallel
-             * @description Concurrent requests at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            max_parallel?: number | null;
-            /**
-             * Budget Nano Usd
-             * @description Budget per UTC calendar month in nano-USD (1e-9 USD); null = no budget at this level.
-             */
-            budget_nano_usd?: number | null;
             /** @description `admin` or `member`. */
             role: components["schemas"]["TeamRole"];
         };
@@ -3877,26 +3928,6 @@ export interface components {
              */
             a2a_agents?: string[] | null;
             /**
-             * Rpm Limit
-             * @description Requests per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            rpm_limit?: number | null;
-            /**
-             * Tpm Limit
-             * @description Tokens per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            tpm_limit?: number | null;
-            /**
-             * Max Parallel
-             * @description Concurrent requests at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            max_parallel?: number | null;
-            /**
-             * Budget Nano Usd
-             * @description Budget per UTC calendar month in nano-USD (1e-9 USD); null = no budget at this level.
-             */
-            budget_nano_usd?: number | null;
-            /**
              * Name
              * @description Display name, 1 to 200 characters.
              */
@@ -3927,13 +3958,20 @@ export interface components {
             /** A2A Agents */
             a2a_agents: string[];
             /** Rpm Limit */
-            rpm_limit: number | null;
+            rpm_limit?: number | null;
             /** Tpm Limit */
-            tpm_limit: number | null;
+            tpm_limit?: number | null;
             /** Max Parallel */
-            max_parallel: number | null;
+            max_parallel?: number | null;
             /** Budget Nano Usd */
-            budget_nano_usd: number | null;
+            budget_nano_usd?: number | null;
+            /**
+             * Limits By Zone
+             * @description This level's own limits and budget in every zone that sets one.
+             */
+            limits_by_zone?: {
+                [key: string]: components["schemas"]["ZoneLimitsOut"];
+            };
             /**
              * Id
              * Format: uuid
@@ -3964,6 +4002,11 @@ export interface components {
          * @description One team's usage inside an org, aggregated from `usage_events` at query time.
          */
         OrgTeamUsageOut: {
+            /**
+             * Zone
+             * @description The zone filter, null = all zones.
+             */
+            zone?: string | null;
             /**
              * Team Id
              * Format: uuid
@@ -4015,26 +4058,6 @@ export interface components {
              */
             a2a_agents?: string[] | null;
             /**
-             * Rpm Limit
-             * @description Requests per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            rpm_limit?: number | null;
-            /**
-             * Tpm Limit
-             * @description Tokens per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            tpm_limit?: number | null;
-            /**
-             * Max Parallel
-             * @description Concurrent requests at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            max_parallel?: number | null;
-            /**
-             * Budget Nano Usd
-             * @description Budget per UTC calendar month in nano-USD (1e-9 USD); null = no budget at this level.
-             */
-            budget_nano_usd?: number | null;
-            /**
              * Name
              * @description Display name, 1 to 200 characters.
              */
@@ -4042,6 +4065,11 @@ export interface components {
         };
         /** OrgUsageOut */
         OrgUsageOut: {
+            /**
+             * Zone
+             * @description The zone filter, null = all zones.
+             */
+            zone?: string | null;
             /**
              * Org Id
              * Format: uuid
@@ -4260,6 +4288,8 @@ export interface components {
              * Format: uuid
              */
             id: string;
+            /** Zone */
+            zone: string;
             /** Name */
             name: string;
             /** Display Prefix */
@@ -4543,6 +4573,8 @@ export interface components {
              * Format: date-time
              */
             ts: string;
+            /** Zone */
+            zone: string;
             kind: components["schemas"]["TrafficKind"];
             /** Endpoint */
             endpoint: string;
@@ -4920,26 +4952,6 @@ export interface components {
              */
             a2a_agents?: string[] | null;
             /**
-             * Rpm Limit
-             * @description Requests per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            rpm_limit?: number | null;
-            /**
-             * Tpm Limit
-             * @description Tokens per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            tpm_limit?: number | null;
-            /**
-             * Max Parallel
-             * @description Concurrent requests at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            max_parallel?: number | null;
-            /**
-             * Budget Nano Usd
-             * @description Budget per UTC calendar month in nano-USD (1e-9 USD); null = no budget at this level.
-             */
-            budget_nano_usd?: number | null;
-            /**
              * Name
              * @description Display name, 1 to 200 characters.
              */
@@ -4976,13 +4988,20 @@ export interface components {
             /** A2A Agents */
             a2a_agents: string[];
             /** Rpm Limit */
-            rpm_limit: number | null;
+            rpm_limit?: number | null;
             /** Tpm Limit */
-            tpm_limit: number | null;
+            tpm_limit?: number | null;
             /** Max Parallel */
-            max_parallel: number | null;
+            max_parallel?: number | null;
             /** Budget Nano Usd */
-            budget_nano_usd: number | null;
+            budget_nano_usd?: number | null;
+            /**
+             * Limits By Zone
+             * @description This level's own limits and budget in every zone that sets one.
+             */
+            limits_by_zone?: {
+                [key: string]: components["schemas"]["ZoneLimitsOut"];
+            };
             /**
              * Id
              * Format: uuid
@@ -5040,26 +5059,6 @@ export interface components {
              * @description A2A agent names granted when `a2a_access` is `list`; empty denies all.
              */
             a2a_agents?: string[] | null;
-            /**
-             * Rpm Limit
-             * @description Requests per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            rpm_limit?: number | null;
-            /**
-             * Tpm Limit
-             * @description Tokens per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            tpm_limit?: number | null;
-            /**
-             * Max Parallel
-             * @description Concurrent requests at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            max_parallel?: number | null;
-            /**
-             * Budget Nano Usd
-             * @description Budget per UTC calendar month in nano-USD (1e-9 USD); null = no budget at this level.
-             */
-            budget_nano_usd?: number | null;
             /**
              * Name
              * @description Display name, 1 to 200 characters.
@@ -5203,21 +5202,6 @@ export interface components {
         /** TeamCreate */
         TeamCreate: {
             /**
-             * Member Rpm Default
-             * @description Requests per minute for each member who has no limit of their own; capped by the team's limit. null = none.
-             */
-            member_rpm_default?: number | null;
-            /**
-             * Member Tpm Default
-             * @description Tokens per minute for each member who has no limit of their own; capped by the team's limit. null = none.
-             */
-            member_tpm_default?: number | null;
-            /**
-             * Member Max Parallel Default
-             * @description Concurrent requests for each member who has no limit of their own; capped by the team's limit. null = none.
-             */
-            member_max_parallel_default?: number | null;
-            /**
              * Max Keys Per Member
              * @description How many keys one member may own in the team; null = unlimited. Service-account keys do not count.
              */
@@ -5253,26 +5237,6 @@ export interface components {
              * @description A2A agent names granted when `a2a_access` is `list`; empty denies all.
              */
             a2a_agents?: string[] | null;
-            /**
-             * Rpm Limit
-             * @description Requests per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            rpm_limit?: number | null;
-            /**
-             * Tpm Limit
-             * @description Tokens per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            tpm_limit?: number | null;
-            /**
-             * Max Parallel
-             * @description Concurrent requests at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            max_parallel?: number | null;
-            /**
-             * Budget Nano Usd
-             * @description Budget per UTC calendar month in nano-USD (1e-9 USD); null = no budget at this level.
-             */
-            budget_nano_usd?: number | null;
             /**
              * Name
              * @description Team name, unique among live teams.
@@ -5345,18 +5309,32 @@ export interface components {
             /** A2A Agents */
             a2a_agents: string[];
             /** Rpm Limit */
-            rpm_limit: number | null;
+            rpm_limit?: number | null;
             /** Tpm Limit */
-            tpm_limit: number | null;
+            tpm_limit?: number | null;
             /** Max Parallel */
-            max_parallel: number | null;
+            max_parallel?: number | null;
             /** Budget Nano Usd */
-            budget_nano_usd: number | null;
+            budget_nano_usd?: number | null;
+            /**
+             * Limits By Zone
+             * @description This level's own limits and budget in every zone that sets one.
+             */
+            limits_by_zone?: {
+                [key: string]: components["schemas"]["ZoneLimitsOut"];
+            };
             /**
              * Effective Models
              * @description The callable names this level allows after inheritance (groups expanded, intersected down from the org); null = every name in the catalog.
              */
             effective_models?: string[] | null;
+            /**
+             * Member Defaults By Zone
+             * @description This team's member-default limits in every zone that sets one.
+             */
+            member_defaults_by_zone?: {
+                [key: string]: components["schemas"]["ZoneMemberDefaultsOut"];
+            };
         };
         /**
          * TeamRole
@@ -5365,21 +5343,6 @@ export interface components {
         TeamRole: "admin" | "member";
         /** TeamUpdate */
         TeamUpdate: {
-            /**
-             * Member Rpm Default
-             * @description Requests per minute for each member who has no limit of their own; capped by the team's limit. null = none.
-             */
-            member_rpm_default?: number | null;
-            /**
-             * Member Tpm Default
-             * @description Tokens per minute for each member who has no limit of their own; capped by the team's limit. null = none.
-             */
-            member_tpm_default?: number | null;
-            /**
-             * Member Max Parallel Default
-             * @description Concurrent requests for each member who has no limit of their own; capped by the team's limit. null = none.
-             */
-            member_max_parallel_default?: number | null;
             /**
              * Max Keys Per Member
              * @description How many keys one member may own in the team; null = unlimited. Service-account keys do not count.
@@ -5416,26 +5379,6 @@ export interface components {
              * @description A2A agent names granted when `a2a_access` is `list`; empty denies all.
              */
             a2a_agents?: string[] | null;
-            /**
-             * Rpm Limit
-             * @description Requests per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            rpm_limit?: number | null;
-            /**
-             * Tpm Limit
-             * @description Tokens per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            tpm_limit?: number | null;
-            /**
-             * Max Parallel
-             * @description Concurrent requests at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            max_parallel?: number | null;
-            /**
-             * Budget Nano Usd
-             * @description Budget per UTC calendar month in nano-USD (1e-9 USD); null = no budget at this level.
-             */
-            budget_nano_usd?: number | null;
             /**
              * Name
              * @description Team name, unique among live teams.
@@ -5803,6 +5746,11 @@ export interface components {
              */
             rank: number;
             /**
+             * Zone
+             * @description The zone this row was ranked in.
+             */
+            zone: string;
+            /**
              * Label
              * @description What the row names: the called name, the key's name or the owner's name; an unreadable key or owner is `Key #<rank>` or `Member #<rank>`.
              */
@@ -5890,6 +5838,11 @@ export interface components {
          *     monthly totals fast path (LLM requests only) reports both as 0.
          */
         UsageRowOut: {
+            /**
+             * Zone
+             * @description The request zone; null when the row is not grouped by zone.
+             */
+            zone?: string | null;
             /** Endpoint */
             endpoint?: string | null;
             model_type?: components["schemas"]["ModelType"] | null;
@@ -6093,6 +6046,111 @@ export interface components {
              * @description Gateway base URL the Playground forwards to for keys of this zone; null = Playground unavailable there.
              */
             playground_gateway_url?: string | null;
+        };
+        /**
+         * ZoneLimitSet
+         * @description `PUT /zones/{zone}/limits`: the owner and its limits in that zone.
+         *
+         *     Exactly one owner shape: `org_id` alone, `team_id` alone, `team_id` + `user_id`, or
+         *     `team_id` + `service_account_id`. Every limit is optional; null (or omitting all four)
+         *     means no limit at this level in the zone.
+         */
+        ZoneLimitSet: {
+            /**
+             * Org Id
+             * @description The org this limit row or usage filter belongs to.
+             */
+            org_id?: string | null;
+            /**
+             * Team Id
+             * @description The team this limit row or filter belongs to.
+             */
+            team_id?: string | null;
+            /**
+             * User Id
+             * @description The member this limit row belongs to; requires team_id.
+             */
+            user_id?: string | null;
+            /**
+             * Service Account Id
+             * @description The service account this limit row belongs to; requires team_id.
+             */
+            service_account_id?: string | null;
+            /**
+             * Rpm Limit
+             * @description Requests per minute in this zone; null = no limit at this level.
+             */
+            rpm_limit?: number | null;
+            /**
+             * Tpm Limit
+             * @description Tokens per minute in this zone; null = no limit at this level.
+             */
+            tpm_limit?: number | null;
+            /**
+             * Max Parallel
+             * @description Concurrent requests in this zone; null = no limit at this level.
+             */
+            max_parallel?: number | null;
+            /**
+             * Budget Nano Usd
+             * @description Budget per UTC calendar month in nano-USD (1e-9 USD) in this zone; null = none.
+             */
+            budget_nano_usd?: number | null;
+        };
+        /**
+         * ZoneLimitsOut
+         * @description One level's own limits and budget in one zone. Both absent limits = none.
+         */
+        ZoneLimitsOut: {
+            /** Rpm Limit */
+            rpm_limit?: number | null;
+            /** Tpm Limit */
+            tpm_limit?: number | null;
+            /** Max Parallel */
+            max_parallel?: number | null;
+            /** Budget Nano Usd */
+            budget_nano_usd?: number | null;
+        };
+        /**
+         * ZoneMemberDefaultsOut
+         * @description A team's per-zone default limits for its members.
+         */
+        ZoneMemberDefaultsOut: {
+            /** Rpm Limit */
+            rpm_limit?: number | null;
+            /** Tpm Limit */
+            tpm_limit?: number | null;
+            /** Max Parallel */
+            max_parallel?: number | null;
+        };
+        /**
+         * ZoneMemberDefaultsSet
+         * @description `PUT /zones/{zone}/member-defaults`: a team's default limits for its members.
+         *
+         *     Null means "no default"; omitting every value deletes the row.
+         */
+        ZoneMemberDefaultsSet: {
+            /**
+             * Team Id
+             * Format: uuid
+             * @description The team this limit row or filter belongs to.
+             */
+            team_id: string;
+            /**
+             * Rpm Limit
+             * @description Requests per minute in this zone; null = no limit at this level.
+             */
+            rpm_limit?: number | null;
+            /**
+             * Tpm Limit
+             * @description Tokens per minute in this zone; null = no limit at this level.
+             */
+            tpm_limit?: number | null;
+            /**
+             * Max Parallel
+             * @description Concurrent requests in this zone; null = no limit at this level.
+             */
+            max_parallel?: number | null;
         };
         /** ZoneOut */
         ZoneOut: {
@@ -7071,6 +7129,8 @@ export interface operations {
             query?: {
                 from?: string | null;
                 to?: string | null;
+                /** @description Only this zone; omitted sums every zone. */
+                zone?: string | null;
             };
             header?: never;
             path: {
@@ -7847,6 +7907,8 @@ export interface operations {
                 user_id?: string | null;
                 service_account_id?: string | null;
                 lifecycle?: components["schemas"]["KeyLifecycle"] | null;
+                /** @description Only keys of this zone; omitted lists every zone. */
+                zone?: string | null;
                 limit?: number;
                 cursor?: string | null;
             };
@@ -8293,6 +8355,8 @@ export interface operations {
             query?: {
                 /** @description Also list the service-account keys of every live team the caller administers, including by org or installation inheritance. */
                 include_service_accounts?: boolean;
+                /** @description Only keys of this zone; omitted lists every zone. */
+                zone?: string | null;
                 limit?: number;
                 cursor?: string | null;
             };
@@ -12798,6 +12862,8 @@ export interface operations {
                 target?: string | null;
                 method?: string | null;
                 tool?: string | null;
+                /** @description Only this zone; omitted reads every zone. */
+                zone?: string | null;
                 requested?: string | null;
                 model?: string | null;
                 upstream_model?: string | null;
@@ -12888,6 +12954,8 @@ export interface operations {
                 team_id?: string | null;
                 /** @description Gateway protocol to rank; `llm` by default. */
                 kind?: components["schemas"]["TrafficKind"];
+                /** @description Only this zone; omitted ranks every zone. */
+                zone?: string | null;
                 /** @description How many rows to return, 1 to 50; default 10. */
                 limit?: number;
             };
@@ -12974,6 +13042,8 @@ export interface operations {
                 alias?: string | null;
                 /** @description Only requests that went through this router name. */
                 router?: string | null;
+                /** @description Only requests of this zone; omitted reads every zone. */
+                zone?: string | null;
                 /** @description Only responses with this HTTP status. */
                 status?: number | null;
                 /** @description Only requests with this outcome. */
@@ -13764,6 +13834,148 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ZoneOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    putZoneLimits: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                zone: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ZoneLimitSet"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ZoneLimitsOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    putZoneMemberDefaults: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                zone: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ZoneMemberDefaultsSet"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ZoneMemberDefaultsOut"];
                 };
             };
             /** @description Missing or invalid credentials */

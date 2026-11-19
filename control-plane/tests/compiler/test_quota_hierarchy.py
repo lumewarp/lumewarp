@@ -17,6 +17,7 @@ from lumewarp_control_plane.models import (
     ModelAccess,
     ScopeType,
     UsageTotal,
+    ZoneLimit,
     member_scope_id,
 )
 from tests import factories
@@ -152,6 +153,14 @@ async def test_member_policy_applies_without_a_membership_row(factory) -> None:
                 team_id=team.id,
                 user_id=user.id,
                 model_access=LIST,
+            )
+        )
+        await s.flush()
+        s.add(
+            ZoneLimit(
+                zone=factories.DEFAULT_ZONE,
+                team_id=team.id,
+                user_id=user.id,
                 rpm_limit=5,
             )
         )
@@ -208,6 +217,7 @@ async def _spend(factory, level, entity_id, cost: int, window: datetime = OCT) -
     async with factory() as s, s.begin():
         s.add(
             UsageTotal(
+                zone=factories.DEFAULT_ZONE,
                 scope_type=level,
                 scope_id=entity_id,
                 window_start=datetime(window.year, window.month, 1, tzinfo=UTC),

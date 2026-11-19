@@ -51,15 +51,24 @@ async def _seed(
     factory: SessionFactory, *, teams: int = 1, budget: int | None = 100
 ) -> tuple[str, Org, list[ApiKey]]:
     scope_name = f"org-budget-{uuid7().hex}"
-    async with factory() as session, session.begin():
-        session.add(Zone(name=scope_name))
-        org = await factories.make_org(session, f"org-{uuid7().hex[-10:]}", budget_nano_usd=budget)
-        keys: list[ApiKey] = []
-        for index in range(teams):
-            team = await factories.make_team(session, f"team-{index}-{uuid7().hex[-8:]}", org=org)
-            account = await factories.make_service_account(session, team)
-            keys.append(await factories.make_key(session, team, account, name=f"key-{index}"))
-        return scope_name, org, keys
+    previous = factories.DEFAULT_ZONE
+    factories.DEFAULT_ZONE = scope_name
+    try:
+        async with factory() as session, session.begin():
+            session.add(Zone(name=scope_name))
+            org = await factories.make_org(
+                session, f"org-{uuid7().hex[-10:]}", budget_nano_usd=budget
+            )
+            keys: list[ApiKey] = []
+            for index in range(teams):
+                team = await factories.make_team(
+                    session, f"team-{index}-{uuid7().hex[-8:]}", org=org
+                )
+                account = await factories.make_service_account(session, team)
+                keys.append(await factories.make_key(session, team, account, name=f"key-{index}"))
+            return scope_name, org, keys
+    finally:
+        factories.DEFAULT_ZONE = previous
 
 
 @pytest.fixture(scope="module")
@@ -81,7 +90,7 @@ async def session_factory(engine: AsyncEngine) -> SessionFactory:
 
 async def _report(session_factory: SessionFactory, scope: str, key: ApiKey, cost: int) -> int:
     async with session_factory() as session, session.begin():
-        return await ingest(session, "gateway-a", [_event(key, cost=cost)], zone_name=scope)
+        return await ingest(session, "gateway-a", [_event(key, cost=cost)], zone=scope)
 
 
 @pytest.mark.asyncio

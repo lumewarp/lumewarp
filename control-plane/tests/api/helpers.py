@@ -78,6 +78,27 @@ def deployment_of(model: dict, zone: str | None = None) -> dict:
     return next(item for item in deployments if item["zone"] == zone)
 
 
+def put_zone_limits(client, zone: str, owner: dict[str, str], **limits) -> dict:
+    """`PUT /zones/{zone}/limits` as an installation admin."""
+    response = client.put(
+        f"/api/v1/zones/{zone}/limits",
+        json={**owner, **limits},
+        headers=ADMIN_AUTH,
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def put_member_defaults(client, zone: str, team_id: str, **limits) -> dict:
+    response = client.put(
+        f"/api/v1/zones/{zone}/member-defaults",
+        json={"team_id": team_id, **limits},
+        headers=ADMIN_AUTH,
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
 async def set_playground_url(client, session, url: str = "http://gateway:4000") -> None:
     """Point the default zone's Playground at a gateway, as an administrator would."""
     zone = await session.get(Zone, client.app.state.settings.zone)
@@ -168,6 +189,7 @@ def usage_event(
         ts=ts,
         key_id=key.id,
         team_id=key.team_id,
+        zone=key.zone,
         owner_kind=key.owner_kind,
         owner_id=key.owner_id,
         kind=kind,
@@ -200,8 +222,12 @@ def usage_total(
     completion_tokens: int = 5,
     cost_nano_usd: int = 1000,
     unknown_cost_count: int = 0,
+    zone: str | None = None,
 ) -> UsageTotal:
+    from tests import factories
+
     return UsageTotal(
+        zone=zone or factories.DEFAULT_ZONE,
         scope_type=scope_type,
         scope_id=scope_id,
         window_start=window_start,

@@ -111,7 +111,7 @@ async def test_removing_the_membership_of_an_org_admin_keeps_their_keys(client, 
     row = next(r for r in rows if r["user_id"] == str(user.id))
     assert (row["role"], row["inherited_from"], row["direct"]) == ("admin", "org", False)
     response = client.patch(
-        f"/api/v1/teams/{team.id}/members/{user.id}", json={"rpm_limit": 5}, headers=ADMIN_AUTH
+        f"/api/v1/teams/{team.id}/members/{user.id}", json={"role": "member"}, headers=ADMIN_AUTH
     )
     assert response.status_code == 404, response.text
 

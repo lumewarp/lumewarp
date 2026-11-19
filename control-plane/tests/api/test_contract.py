@@ -51,6 +51,8 @@ EXPECTED_OPERATION_IDS = {
     "createUser",
     "createUserToken",
     "createZone",
+    "putZoneLimits",
+    "putZoneMemberDefaults",
     "archiveZone",
     "deleteModel",
     "deleteMember",

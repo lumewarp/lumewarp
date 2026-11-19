@@ -143,8 +143,15 @@ async def test_member_scope_id_is_stable_uuid5(factory) -> None:
 
 async def _spend(factory, level: ScopeType, entity_id, cost: int, window: datetime) -> None:
     async with factory() as s, s.begin():
-        s.add(UsageTotal(scope_type=level, scope_id=entity_id, window_start=window,
-                         cost_nano_usd=cost))  # fmt: skip
+        s.add(
+            UsageTotal(
+                zone=factories.DEFAULT_ZONE,
+                scope_type=level,
+                scope_id=entity_id,
+                window_start=window,
+                cost_nano_usd=cost,
+            )
+        )
 
 
 async def test_budget_status_and_rollover(factory) -> None:

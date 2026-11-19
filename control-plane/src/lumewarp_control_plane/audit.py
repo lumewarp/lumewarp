@@ -87,6 +87,7 @@ DETAIL_ALLOWLIST: dict[str, dict[str, DetailSpec]] = {
     "alias.rename": {"old_name": None, "new_name": None},
     "alias.update": {"name": None, "changes": {"name": None, "target": None}},
     "budget.hard_exceeded": {
+        "zone": None,
         "window_start": None,
         "spent_nano_usd": None,
         "budget_nano_usd": None,
@@ -134,6 +135,31 @@ DETAIL_ALLOWLIST: dict[str, dict[str, DetailSpec]] = {
         },
     },
     "zone.archive": {"name": None, "revoked_tokens": None},
+    "zone.limits.update": {
+        "zone": None,
+        "owner": {
+            "org_id": None,
+            "team_id": None,
+            "user_id": None,
+            "service_account_id": None,
+        },
+        "changes": {
+            "rpm_limit": None,
+            "tpm_limit": None,
+            "max_parallel": None,
+            "budget_nano_usd": None,
+        },
+    },
+    "zone.member_defaults.update": {
+        "zone": None,
+        "team_id": None,
+        "changes": {
+            "team_id": None,
+            "rpm_limit": None,
+            "tpm_limit": None,
+            "max_parallel": None,
+        },
+    },
     "installation_admin.assign": {"user_id": None, "role": None},
     "installation_admin.bootstrap": {"user_id": None, "role": None},
     "installation_admin.remove": {"user_id": None, "role": None, "suspended_keys": None},
@@ -155,6 +181,7 @@ DETAIL_ALLOWLIST: dict[str, dict[str, DetailSpec]] = {
     },
     "key.create": {
         "name": None,
+        "zone": None,
         "owner_kind": None,
         "owner_id": None,
         "expires_at": None,
@@ -165,6 +192,7 @@ DETAIL_ALLOWLIST: dict[str, dict[str, DetailSpec]] = {
     "key.revoke": {"name": None},
     "key.rotate": {
         "name": None,
+        "zone": None,
         "grace_seconds": None,
         "expires_at": None,
         "previous_key_expires_at": None,

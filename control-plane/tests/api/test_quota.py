@@ -7,7 +7,14 @@ import pytest
 from lumewarp_control_plane.authz import Authorizer, Decision, Relation
 from lumewarp_control_plane.models import ModelAccess, ScopeType, TeamRole, member_scope_id
 from lumewarp_control_plane.windows import month_window
-from tests.api.helpers import ADMIN_AUTH, auth, suffix, usage_total, user_with_token
+from tests.api.helpers import (
+    ADMIN_AUTH,
+    auth,
+    put_zone_limits,
+    suffix,
+    usage_total,
+    user_with_token,
+)
 from tests.factories import make_key, make_member, make_org, make_team, make_user
 
 
@@ -22,17 +29,39 @@ async def test_team_admin_cannot_set_team_totals_but_sets_member_defaults(
     path = f"/api/v1/teams/{team.id}"
 
     # Team totals and models are org level: a team admin may not touch them.
-    for body in ({"rpm_limit": 200}, {"model_access": "list"}, {"budget_nano_usd": 10}):
-        response = client.patch(path, json=body, headers=headers)
-        assert response.status_code == 403, (body, response.text)
+    for limits in ({"rpm_limit": 200}, {"budget_nano_usd": 10}):
+        response = client.put(
+            "/api/v1/zones/api-test/limits",
+            json={"team_id": str(team.id), **limits},
+            headers=headers,
+        )
+        assert response.status_code == 403, (limits, response.text)
+    response = client.patch(path, json={"model_access": "list"}, headers=headers)
+    assert response.status_code == 403, response.text
     # Member defaults are team settings.
-    response = client.patch(path, json={"member_rpm_default": 10}, headers=headers)
+    response = client.put(
+        "/api/v1/zones/api-test/member-defaults",
+        json={"team_id": str(team.id), "rpm_limit": 10},
+        headers=headers,
+    )
     assert response.status_code == 200, response.text
-    assert response.json()["member_rpm_default"] == 10
+    assert response.json()["rpm_limit"] == 10
     # A changed default may not exceed the team's own effective limit.
-    assert client.patch(path, json={"member_rpm_default": 200}, headers=headers).status_code == 422
+    assert (
+        client.put(
+            "/api/v1/zones/api-test/member-defaults",
+            json={"team_id": str(team.id), "rpm_limit": 200},
+            headers=headers,
+        ).status_code
+        == 422
+    )
     # A form that only resends the current values still works for a team admin.
-    assert client.patch(path, json={"rpm_limit": 100}, headers=headers).status_code == 200
+    assert (
+        client.patch(
+            path, json={"model_access": "all", "allowed_models": []}, headers=headers
+        ).status_code
+        == 200
+    )
 
 
 async def test_member_key_limits_are_capped_by_their_own_limit(client, committed) -> None:
@@ -218,12 +247,13 @@ async def test_key_limit_patch_checks_only_changed_values(client, committed) -> 
     path = f"/api/v1/keys/{key.id}"
 
     # A parent decrease always succeeds and leaves the key's stored value untouched.
-    lowered = client.patch(
-        f"/api/v1/teams/{team.id}/members/{user.id}",
-        json={"rpm_limit": 10},
-        headers=ADMIN_AUTH,
+    lowered = put_zone_limits(
+        client,
+        "api-test",
+        {"team_id": str(team.id), "user_id": str(user.id)},
+        rpm_limit=10,
     )
-    assert lowered.status_code == 200, lowered.text
+    assert lowered["rpm_limit"] == 10
 
     # A different limit is the only change: the stale stored rpm 40 is not rechecked.
     other = client.patch(path, json={"tpm_limit": 500}, headers=headers)
@@ -239,19 +269,24 @@ async def test_key_limit_patch_checks_only_changed_values(client, committed) -> 
         assert "rpm_limit" in raised.json()["error"]["message"]
 
 
-async def test_member_put_resending_a_value_survives_parent_decrease(client, committed) -> None:
-    """A PUT that resends an unchanged quota value is not rechecked against the new team."""
+async def test_member_limit_write_resending_a_value_survives_parent_decrease(
+    client, committed
+) -> None:
+    """A zone-limits PUT that resends an unchanged value is not rechecked against the team."""
     team = await make_team(committed, rpm_limit=100)
     user = await make_user(committed)
     await make_member(committed, team, user, rpm_limit=50)
     await committed.commit()
-    lowered = client.patch(f"/api/v1/teams/{team.id}", json={"rpm_limit": 20}, headers=ADMIN_AUTH)
-    assert lowered.status_code == 200, lowered.text
-    path = f"/api/v1/teams/{team.id}/members/{user.id}"
-    response = client.put(path, json={"role": "admin", "rpm_limit": 50}, headers=ADMIN_AUTH)
-    assert response.status_code == 200, response.text
-    assert (response.json()["role"], response.json()["rpm_limit"]) == ("admin", 50)
+    lowered = put_zone_limits(client, "api-test", {"team_id": str(team.id)}, rpm_limit=20)
+    assert lowered["rpm_limit"] == 20
+    owner = {"team_id": str(team.id), "user_id": str(user.id)}
+    response = put_zone_limits(client, "api-test", owner, rpm_limit=50)
+    assert response["rpm_limit"] == 50
     # A value the PUT actually changes is still checked against the parent.
-    raised = client.put(path, json={"role": "admin", "rpm_limit": 60}, headers=ADMIN_AUTH)
+    raised = client.put(
+        "/api/v1/zones/api-test/limits",
+        json={**owner, "rpm_limit": 60},
+        headers=ADMIN_AUTH,
+    )
     assert raised.status_code == 422, raised.text
     assert "rpm_limit" in raised.json()["error"]["message"]

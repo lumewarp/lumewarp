@@ -244,16 +244,18 @@ def test_org_rate_limit_decrease_blocks_at_the_lower_value(stack):
     values are unchanged; the minimum down the chain is what the gateway enforces.
     """
     seeded = stack.seed()
-    stack.ok("PATCH", f"/teams/{seeded.team_id}", json={"rpm_limit": 1000})
+    stack.ok(
+        "PUT", "/zones/e2e/limits", json={"team_id": seeded.team_id, "rpm_limit": 1000}
+    )
     (org_id,) = pg(stack.dsn, "SELECT org_id FROM teams WHERE id = $1", uuid.UUID(seeded.team_id))[
         0
     ].values()
-    stack.ok("PATCH", f"/orgs/{org_id}", json={"rpm_limit": 1000})
+    stack.ok("PUT", "/zones/e2e/limits", json={"org_id": str(org_id), "rpm_limit": 1000})
     gw = stack.start_gateway()
 
     # No request runs before the decrease: the org window starts empty, so exactly two
     # of the three requests below fit. (A request under the old limit would count.)
-    stack.ok("PATCH", f"/orgs/{org_id}", json={"rpm_limit": 2})
+    stack.ok("PUT", "/zones/e2e/limits", json={"org_id": str(org_id), "rpm_limit": 2})
     version = stack.current_version()
     wait_for(lambda: stack.current_version() > version, 10, "a new config version")
     target = stack.current_version()

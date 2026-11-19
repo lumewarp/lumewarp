@@ -19,7 +19,13 @@ async def test_external_member_key_create_compile_and_rollback(
         update={"zone": f"external-{suffix()}", "authz_backend": "external"}
     )
     committed.add(Zone(name=settings.zone))
-    team = await make_team(committed, model_access="list", allowed_models=["a"], rpm_limit=60)
+    team = await make_team(
+        committed,
+        model_access="list",
+        allowed_models=["a"],
+        rpm_limit=60,
+        zone=settings.zone,
+    )
     user, token = await user_with_token(committed)
     await committed.commit()
 

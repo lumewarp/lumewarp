@@ -43,7 +43,7 @@ def app_settings(request: Request) -> Settings:
 SettingsDep = Annotated[Settings, Depends(app_settings)]
 
 
-def default_zone(settings: Settings) -> str:
+def default_zone(settings: Annotated[Settings, Depends(app_settings)]) -> str:
     """The zone a create gets when its body names none, and where a global definition
     (a router, or an MCP/A2A create without a zone) is validated against the gateways.
 
@@ -52,6 +52,9 @@ def default_zone(settings: Settings) -> str:
     row. Explicitly zone-scoped endpoints take a `zone` parameter instead.
     """
     return settings.zone
+
+
+DefaultZoneDep = Annotated[str, Depends(default_zone)]
 
 
 def app_metrics(request: Request) -> Metrics:

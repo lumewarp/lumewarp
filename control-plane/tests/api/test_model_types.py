@@ -236,10 +236,10 @@ def test_snapshot_type_validation(problem):
         validate_snapshot(snap, max_bytes=1 << 26, max_keys=100)
 
 
-async def test_audio_ingest_dimensions_and_filters(client, committed):
+async def test_audio_ingest_dimensions_and_filters(client, committed, api_scope):
     key = await key_for(committed)
     event = wire(key, timestamp=TS, endpoint="audio_transcriptions", audio_ms=1250)
-    await ingest(committed, "gw", [event])
+    await ingest(committed, "gw", [event], zone=api_scope)
     await committed.commit()
     stored = await committed.scalar(
         select(UsageEvent).where(UsageEvent.request_id == event.request_id)
