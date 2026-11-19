@@ -89,8 +89,7 @@ class TargetHealth(_message.Message):
     def __init__(self, name: _Optional[str] = ..., healthy: _Optional[bool] = ...) -> None: ...
 
 class Hello(_message.Message):
-    __slots__ = ("gateway_id", "have_version", "gateway_version", "supported_capabilities", "zone", "have_digest", "plugins", "plugin_abi", "shared_limits")
-    GATEWAY_ID_FIELD_NUMBER: _ClassVar[int]
+    __slots__ = ("have_version", "gateway_version", "supported_capabilities", "zone", "have_digest", "plugins", "plugin_abi", "shared_limits", "hostname")
     HAVE_VERSION_FIELD_NUMBER: _ClassVar[int]
     GATEWAY_VERSION_FIELD_NUMBER: _ClassVar[int]
     SUPPORTED_CAPABILITIES_FIELD_NUMBER: _ClassVar[int]
@@ -99,7 +98,7 @@ class Hello(_message.Message):
     PLUGINS_FIELD_NUMBER: _ClassVar[int]
     PLUGIN_ABI_FIELD_NUMBER: _ClassVar[int]
     SHARED_LIMITS_FIELD_NUMBER: _ClassVar[int]
-    gateway_id: str
+    HOSTNAME_FIELD_NUMBER: _ClassVar[int]
     have_version: int
     gateway_version: str
     supported_capabilities: _containers.RepeatedScalarFieldContainer[str]
@@ -108,7 +107,14 @@ class Hello(_message.Message):
     plugins: _containers.RepeatedCompositeFieldContainer[PluginDescriptor]
     plugin_abi: int
     shared_limits: SharedLimits
-    def __init__(self, gateway_id: _Optional[str] = ..., have_version: _Optional[int] = ..., gateway_version: _Optional[str] = ..., supported_capabilities: _Optional[_Iterable[str]] = ..., zone: _Optional[str] = ..., have_digest: _Optional[bytes] = ..., plugins: _Optional[_Iterable[_Union[PluginDescriptor, _Mapping]]] = ..., plugin_abi: _Optional[int] = ..., shared_limits: _Optional[_Union[SharedLimits, _Mapping]] = ...) -> None: ...
+    hostname: str
+    def __init__(self, have_version: _Optional[int] = ..., gateway_version: _Optional[str] = ..., supported_capabilities: _Optional[_Iterable[str]] = ..., zone: _Optional[str] = ..., have_digest: _Optional[bytes] = ..., plugins: _Optional[_Iterable[_Union[PluginDescriptor, _Mapping]]] = ..., plugin_abi: _Optional[int] = ..., shared_limits: _Optional[_Union[SharedLimits, _Mapping]] = ..., hostname: _Optional[str] = ...) -> None: ...
+
+class Welcome(_message.Message):
+    __slots__ = ("gateway_id",)
+    GATEWAY_ID_FIELD_NUMBER: _ClassVar[int]
+    gateway_id: str
+    def __init__(self, gateway_id: _Optional[str] = ...) -> None: ...
 
 class SharedLimits(_message.Message):
     __slots__ = ("enabled", "namespace")
@@ -215,16 +221,18 @@ class Nack(_message.Message):
     def __init__(self, version: _Optional[int] = ..., reason: _Optional[str] = ..., have_version: _Optional[int] = ..., code: _Optional[_Union[NackCode, str]] = ...) -> None: ...
 
 class ConfigUpdate(_message.Message):
-    __slots__ = ("full", "delta", "probe", "target_digest")
+    __slots__ = ("full", "delta", "probe", "welcome", "target_digest")
     FULL_FIELD_NUMBER: _ClassVar[int]
     DELTA_FIELD_NUMBER: _ClassVar[int]
     PROBE_FIELD_NUMBER: _ClassVar[int]
+    WELCOME_FIELD_NUMBER: _ClassVar[int]
     TARGET_DIGEST_FIELD_NUMBER: _ClassVar[int]
     full: _snapshot_pb2.Snapshot
     delta: Delta
     probe: ProbeRequest
+    welcome: Welcome
     target_digest: bytes
-    def __init__(self, full: _Optional[_Union[_snapshot_pb2.Snapshot, _Mapping]] = ..., delta: _Optional[_Union[Delta, _Mapping]] = ..., probe: _Optional[_Union[ProbeRequest, _Mapping]] = ..., target_digest: _Optional[bytes] = ...) -> None: ...
+    def __init__(self, full: _Optional[_Union[_snapshot_pb2.Snapshot, _Mapping]] = ..., delta: _Optional[_Union[Delta, _Mapping]] = ..., probe: _Optional[_Union[ProbeRequest, _Mapping]] = ..., welcome: _Optional[_Union[Welcome, _Mapping]] = ..., target_digest: _Optional[bytes] = ...) -> None: ...
 
 class Delta(_message.Message):
     __slots__ = ("base_version", "version", "upsert_upstreams", "remove_upstreams", "upsert_models", "remove_models", "upsert_routers", "remove_routers", "upsert_api_keys", "remove_api_keys", "upsert_teams", "remove_teams", "created_at_unix_ms", "required_capabilities", "upsert_aliases", "remove_aliases", "upsert_mcp_servers", "remove_mcp_servers", "upsert_a2a_agents", "remove_a2a_agents")
