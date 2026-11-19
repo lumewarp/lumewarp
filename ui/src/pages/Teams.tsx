@@ -4,7 +4,8 @@ import { api, hasPolicy, type TeamAny } from "../api";
 import { PageHeader } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
 import { FormDialog, required, SelectField, TextField, useForm } from "../components/Form";
-import { blankPolicy, Budget, PolicyFields, policyBody, PolicySummary, POLICY_ALIAS, type PolicyValues } from "../components/Policy";
+import { blankPolicy, Budget, limitsChanged, PolicyFields, policyBody, PolicySummary, POLICY_ALIAS, saveZoneLimits, type PolicyValues } from "../components/Policy";
+import { useZone } from "../zone";
 import { CreateButton, RowActions } from "../components/RowActions";
 import { DataTable } from "../components/Table";
 import { useCan, useMut, useNames, useOrgs, useTeams } from "../hooks";
@@ -26,9 +27,13 @@ export function Teams() {
   const [creating, setCreating] = useState(false);
   const [deleting, setDeleting] = useState<TeamAny | null>(null);
   const form = useForm<Values>(blank, { name: required("Name") });
+  const zone = useZone().name;
   const create = useMut(
-    (v: Values) =>
-      api.createTeam({ org_id: v.org_id || orgs.data?.[0]?.id || "", name: v.name, ...policyBody(v) }),
+    async (v: Values) => {
+      const saved = await api.createTeam({ org_id: v.org_id || orgs.data?.[0]?.id || "", name: v.name, ...policyBody(v) });
+      if (limitsChanged(blank, v)) await saveZoneLimits(zone, { team_id: saved.id }, v);
+      return saved;
+    },
     "Team created",
   );
   const remove = useMut((id: string) => api.deleteTeam(id), "Team archived");

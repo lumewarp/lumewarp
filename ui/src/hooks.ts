@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type Key, type McpDefinition, type McpDefinitionState, type Me, type PluginKind, type Schemas, type TeamAny } from "./api";
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useZone } from "./zone";
 import { useToast } from "./components/Toast";
 import { runSecretMutation } from "./lib/keySecret";
@@ -177,8 +177,11 @@ export function useNames(rows: { id: string; name: string }[] | undefined) {
   return (id: string | null | undefined) => (id ? (map.get(id) ?? id.slice(0, 8)) : "—");
 }
 
-export const useOwnKeys = (includeServiceAccounts = false) =>
-  useQuery({ queryKey: ["own-keys", includeServiceAccounts], queryFn: () => api.ownKeys(includeServiceAccounts) });
+/** The caller's keys in the header zone. */
+export function useOwnKeys(includeServiceAccounts = false) {
+  const zone = useZone().name;
+  return useQuery({ queryKey: ["own-keys", includeServiceAccounts, zone], queryFn: () => api.ownKeys(includeServiceAccounts, zone) });
+}
 
 export const useModels = (enabled = true) =>
   useQuery({ queryKey: ["models"], queryFn: () => api.models(), enabled });
@@ -285,4 +288,25 @@ export const useA2aAgents = (enabled = true) =>
 /** id → row lookup. */
 export function useById<T extends { id: string }>(rows: T[] | undefined) {
   return useMemo(() => new Map((rows ?? []).map((r) => [r.id, r])), [rows]);
+}
+
+/** The "All zones" choice of a zone filter. */
+export const ALL_ZONES = "*";
+
+/**
+ * The zone filter of Usage, Requests and the Leaderboard: the header zone until the user picks another or "All
+ * zones" here, and back to the header zone when the header changes. `param` is what goes into `?zone=` (absent =
+ * every zone) and into the query key.
+ */
+export function useZoneFilter() {
+  const header = useZone();
+  const [choice, setChoice] = useState<string | null>(null);
+  useEffect(() => setChoice(null), [header.name]);
+  const value = choice ?? header.name;
+  const all = value === ALL_ZONES;
+  const options = [
+    { value: ALL_ZONES, label: "All zones" },
+    ...header.zones.map((zone) => ({ value: zone.name, label: zone.display_name || zone.name })),
+  ];
+  return { value, all, param: all ? undefined : value, set: setChoice, options, zones: header.zones };
 }

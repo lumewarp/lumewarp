@@ -38,12 +38,15 @@ function Board({
   from,
   to,
   teamId,
+  zone,
 }: {
   by: By;
   title: string;
   from: string;
   to: string;
   teamId: string;
+  /** The `?zone=` value; absent = every zone. */
+  zone?: string;
 }) {
   const params = {
     by,
@@ -51,6 +54,7 @@ function Board({
     to,
     kind: "llm" as const,
     team_id: teamId || undefined,
+    zone,
     limit: 10,
   };
   const query = useQuery({
@@ -78,7 +82,7 @@ function Board({
           <ol className="m-0 grid list-none gap-2.5 p-0">
             {rows.map((row) => (
               <li
-                key={`${row.rank}|${row.label}`}
+                key={`${row.zone}|${row.rank}|${row.label}`}
                 className="grid grid-cols-[1.5rem_minmax(0,1fr)_auto] items-center gap-x-2 gap-y-1"
                 data-testid="leaderboard-row"
               >
@@ -88,6 +92,7 @@ function Board({
                 <span className="flex min-w-0 flex-wrap items-center gap-1.5">
                   <Label row={row} by={by} />
                   {row.is_me && <Badge tone="info">you</Badge>}
+                  {!zone && <Badge tone="info">{row.zone}</Badge>}
                 </span>
                 <span className="text-right tabular-nums">
                   {fmtUsd(row.cost_nano_usd)}
@@ -120,10 +125,12 @@ export function Leaderboard({
   from,
   to,
   teamId,
+  zone,
 }: {
   from: string;
   to: string;
   teamId: string;
+  zone?: string;
 }) {
   return (
     <section
@@ -132,7 +139,7 @@ export function Leaderboard({
       data-testid="leaderboards"
     >
       {BOARDS.map((board) => (
-        <Board key={board.by} {...board} from={from} to={to} teamId={teamId} />
+        <Board key={board.by} {...board} from={from} to={to} teamId={teamId} zone={zone} />
       ))}
     </section>
   );

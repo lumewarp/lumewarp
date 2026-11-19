@@ -21,6 +21,7 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrig
 import { Tooltip, TooltipContent, TooltipTrigger } from "../components/ui/tooltip";
 import { Textarea } from "../components/ui/textarea";
 import { useMe } from "../hooks";
+import { useZone } from "../zone";
 import type { Values } from "../lib/schema";
 import { PageLoading } from "./Access";
 
@@ -75,11 +76,25 @@ function saveChoice(key: string | undefined, model: string | undefined) {
 export function Playground() {
   const me = useMe();
   const breakGlass = me.data?.kind === "break_glass";
+  const zone = useZone();
+  const zoneLabel = zone.zone?.display_name || zone.name;
+  const zoneUnavailable = zone.zone
+    ? !zone.zone.playground_allowed
+      ? `${zoneLabel} does not allow the Playground.`
+      : !zone.zone.playground_gateway_url
+        ? `${zoneLabel} has no Playground gateway URL.`
+        : null
+    : null;
   const info = useQuery({ queryKey: ["playground"], queryFn: api.playground, staleTime: 30_000, enabled: !breakGlass });
   // Fills the main container's height (header and its padding aside), so the transcript scrolls inside it.
   return (
     <div className="flex flex-col lg:h-[calc(100dvh-6.75rem)] lg:min-h-[32rem]">
       <PageHeader title="Playground" />
+      {zoneUnavailable && !breakGlass && (
+        <Alert className="mb-3" data-testid="playground-zone-unavailable">
+          <AlertDescription>{zoneUnavailable} Keys of other zones are listed below and switch the header to their zone.</AlertDescription>
+        </Alert>
+      )}
       {breakGlass ? (
         <Alert data-testid="playground-break-glass">
           <AlertDescription>The playground is not available in the emergency session: it chats as one of your own keys, and that session owns none.</AlertDescription>
@@ -99,7 +114,7 @@ export function Playground() {
           <EmptyHeader>
             <EmptyTitle>No usable key</EmptyTitle>
             <EmptyDescription>
-              The playground uses an active key of yours or of a service account you administer. Create one in <Link to="/my-keys">My keys</Link>.
+              The playground uses an active key of yours or of a service account you administer, in a zone that allows it. Create one in <Link to="/my-keys">My keys</Link>.
             </EmptyDescription>
           </EmptyHeader>
         </Empty>
@@ -110,10 +125,9 @@ export function Playground() {
   );
 }
 
-/** The keys one may act as, grouped by who owns them; service-account keys name their team and account. */
+/** The keys one may act as, grouped by zone; service-account keys name their team and account. */
 function KeySelect({ keys, value, onChange }: { keys: PlaygroundKey[]; value: string; onChange: (id: string) => void }) {
-  const mine = keys.filter((key) => key.owner_kind !== "service_account");
-  const accounts = keys.filter((key) => key.owner_kind === "service_account");
+  const { zones } = useZone();
   const item = (key: PlaygroundKey) => (
     <SelectItem key={key.id} value={key.id}>
       <KeyRoundIcon aria-hidden="true" className="size-3.5 text-muted-foreground" />
@@ -124,26 +138,26 @@ function KeySelect({ keys, value, onChange }: { keys: PlaygroundKey[]; value: st
     </SelectItem>
   );
   const selected = keys.find((key) => key.id === value);
+  // Zones in the header switcher's order; a key whose zone is not listed (archived) still gets a group.
+  const names = [...new Set([...zones.map((z) => z.name), ...keys.map((key) => key.zone)])].filter((name) => keys.some((key) => key.zone === name));
   return (
-    <Field label="Key" hint="The request is limited and metered as this key.">
+    <Field label="Key" hint="The request is limited and metered as this key, in its zone.">
       {(p) => (
         <Select value={value} onValueChange={onChange}>
           <SelectTrigger {...p} className="w-full min-w-0">
             <SelectValue>{selected && <KeyPill keyRef={selected} tooltip={false} />}</SelectValue>
           </SelectTrigger>
           <SelectContent position="popper">
-            {mine.length > 0 && (
-              <SelectGroup>
-                <SelectLabel>My keys</SelectLabel>
-                {mine.map(item)}
-              </SelectGroup>
-            )}
-            {accounts.length > 0 && (
-              <SelectGroup>
-                <SelectLabel>Service accounts</SelectLabel>
-                {accounts.map(item)}
-              </SelectGroup>
-            )}
+            {names.map((name) => {
+              const zone = zones.find((z) => z.name === name);
+              const inZone = keys.filter((key) => key.zone === name);
+              return (
+                <SelectGroup key={name} data-testid={`playground-zone-${name}`}>
+                  <SelectLabel>{zone?.display_name || name}</SelectLabel>
+                  {inZone.map(item)}
+                </SelectGroup>
+              );
+            })}
           </SelectContent>
         </Select>
       )}
@@ -183,9 +197,12 @@ function Chat({ keys, reasoning }: { keys: PlaygroundKey[]; reasoning: Record<st
     end.current?.scrollIntoView?.({ block: "end" });
   }, [turns]);
 
+  const { setZone } = useZone();
   const chooseKey = (id: string) => {
     setKeyId(id);
     const next = keys.find((k) => k.id === id);
+    // The request goes through the key's zone, so the header follows it.
+    if (next) setZone(next.zone);
     if (next && !next.models.includes(model)) setModel(next.models[0] ?? "");
   };
 

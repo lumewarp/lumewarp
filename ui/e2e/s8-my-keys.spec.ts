@@ -109,7 +109,7 @@ test("the create dialog refuses an expiry past the team's limit with the API's m
   await form.getByLabel("Name").fill("s8-too-long");
   await form.getByLabel("Expires").fill(isoDay(daysFromNow(30)));
   await form.getByRole("button", { name: "Create key" }).click();
-  await expect(form.getByText(/member keys may not outlive 604800 seconds/)).toBeVisible();
+  await expect(form.getByText(/may not outlive 604800 seconds/)).toBeVisible();
   await expect(form).toBeVisible();
   await form.getByRole("button", { name: "Cancel" }).click();
 });
@@ -326,7 +326,7 @@ test("a lowered lifetime is fixed with Edit, then rotate succeeds", async ({ pag
   await row.getByRole("button", { name: "Rotate" }).click();
   let dialog = page.getByRole("dialog", { name: /^Rotate/ });
   await dialog.getByRole("button", { name: "Rotate key" }).click();
-  await expect(dialog.getByTestId("rotate-error")).toContainText(/shorten expires_at first/i);
+  await expect(dialog.getByTestId("rotate-error")).toContainText(/may not outlive 604800 seconds/);
   await dialog.getByRole("button", { name: "Cancel" }).click();
 
   // Edit is the way out: shorten the expiry inside the new cap, then rotate.
@@ -384,7 +384,7 @@ test("a 409 from the per-member cap is shown as text", async ({ page, browser })
   const form = page.getByRole("dialog", { name: "New key in s8-cap" });
   await form.getByLabel("Name").fill("s8-cap-second");
   await form.getByRole("button", { name: "Create key" }).click();
-  await expect(form.getByRole("alert")).toContainText("member key limit reached (1 per member in this team)");
+  await expect(form.getByRole("alert")).toContainText("member key limit reached (1 per member in zone 'default')");
   await expect(form).toBeVisible();
   await form.getByRole("button", { name: "Cancel" }).click();
 });
@@ -659,7 +659,7 @@ test("a one-time secret survives losing the role, while the page becomes no-acce
   await signIn(page, SHOTS_TOKEN, `/teams/${team.id}`);
   await page.getByRole("tab", { name: "Keys" }).click();
   await page.getByRole("button", { name: "New key" }).click();
-  const form = page.getByRole("dialog", { name: "New API key" });
+  const form = page.getByRole("dialog", { name: "New key in" });
   await form.getByLabel("Name").fill("s8-role-key");
   await form.getByRole("button", { name: "Create key" }).click();
   const secret = page.getByRole("dialog", { name: "API key created" });
@@ -752,7 +752,7 @@ test("the real Sign out button drops a create still in flight", async ({ page })
   });
 
   await page.getByRole("button", { name: "New key" }).click();
-  const form = page.getByRole("dialog", { name: "New API key" });
+  const form = page.getByRole("dialog", { name: "New key in" });
   await form.getByLabel("Name").fill("s8-inflight-key");
   await form.getByRole("button", { name: "Create key" }).click();
   await fetched;
@@ -856,7 +856,7 @@ test("two secrets arriving in a row are both shown, the second after the first i
 
   // Hold only the team create; close its busy form while the mutation is in flight.
   await page.getByRole("button", { name: "New key" }).click();
-  let form = page.getByRole("dialog", { name: "New API key" });
+  let form = page.getByRole("dialog", { name: "New key in" });
   await form.getByLabel("Name").fill("s8-team-secret");
   await form.getByRole("button", { name: "Create key" }).click();
   await fetchedGate;
@@ -936,7 +936,7 @@ test("a failed guard check keeps the guarded page and an open create-key form", 
   await signIn(page, VIEWER, `/teams/${team.id}`);
   await page.getByRole("tab", { name: "Keys" }).click();
   await page.getByRole("button", { name: "New key" }).click();
-  const form = page.getByRole("dialog", { name: "New API key" });
+  const form = page.getByRole("dialog", { name: "New key in" });
   await form.getByLabel("Name").fill("s8-guard-draft");
 
   // Stale the team keys query the same way as the My keys test above, then fail its focus refetch;
@@ -1089,32 +1089,34 @@ test.describe("local expiry dates", () => {
   test.describe("negative UTC offset", () => {
     test.use({ timezoneId: "America/Los_Angeles" });
     test("create then edit keeps the local day west of UTC", async ({ page }) => {
+      // A reused database keeps the keys of earlier runs: the name is unique per run.
+      const keyName = `s8-tz-la-${Date.now()}`;
       const team = await admin.ensureTeam("s8-tz-la");
       await admin.putMember(team.id, VIEWER_EMAIL);
       await signIn(page, VIEWER);
       const section = page.getByTestId("team-s8-tz-la");
       await section.getByRole("button", { name: "New key" }).click();
       const create = page.getByRole("dialog", { name: "New key in s8-tz-la" });
-      await create.getByLabel("Name").fill("s8-tz-la-key");
+      await create.getByLabel("Name").fill(keyName);
       await create.getByLabel("Expires").fill("2027-01-15");
       await create.getByRole("button", { name: "Create key" }).click();
       const secret = page.getByRole("dialog", { name: "API key created" });
       await secret.getByRole("button", { name: /saved it/ }).click();
 
-      const row = (await myKeyRow(page, "s8-tz-la", "s8-tz-la-key"));
+      const row = (await myKeyRow(page, "s8-tz-la", keyName));
       await row.getByRole("button", { name: "Edit" }).click();
-      const edit = page.getByRole("dialog", { name: /^Edit “s8-tz-la-key”/ });
+      const edit = page.getByRole("dialog", { name: new RegExp(`^Edit “${keyName}”`) });
       await expect(edit.getByLabel("Expires")).toHaveValue("2027-01-15");
       await edit.getByRole("button", { name: "Save" }).click();
       await expect(edit).toBeHidden();
 
       await row.getByRole("button", { name: "Edit" }).click();
-      const again = page.getByRole("dialog", { name: /^Edit “s8-tz-la-key”/ });
+      const again = page.getByRole("dialog", { name: new RegExp(`^Edit “${keyName}”`) });
       await again.getByLabel("Expires").fill("2027-02-20");
       await again.getByRole("button", { name: "Save" }).click();
       await expect(again).toBeHidden();
       await row.getByRole("button", { name: "Edit" }).click();
-      const third = page.getByRole("dialog", { name: /^Edit “s8-tz-la-key”/ });
+      const third = page.getByRole("dialog", { name: new RegExp(`^Edit “${keyName}”`) });
       await expect(third.getByLabel("Expires")).toHaveValue("2027-02-20");
       await third.getByRole("button", { name: "Cancel" }).click();
     });

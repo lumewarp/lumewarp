@@ -55,6 +55,17 @@ export class Admin {
     return (await response.json()) as T;
   }
 
+  async put<T>(path: string, data: object): Promise<T> {
+    const response = await this.request.put(`/api/v1${path}`, { headers: this.headers, data });
+    expect(response.status(), await response.text()).toBe(200);
+    return (await response.json()) as T;
+  }
+
+  /** Limits of an owner in one zone (`PUT /zones/{zone}/limits`). */
+  zoneLimits(owner: { org_id?: string; team_id?: string; user_id?: string; service_account_id?: string }, limits: object, zone = "default") {
+    return this.put(`/zones/${zone}/limits`, { ...owner, ...limits });
+  }
+
   async user(email: string): Promise<UserRow> {
     const users = await this.get<{ items: UserRow[] }>("/users?limit=200");
     const user = users.items.find((item) => item.email === email);

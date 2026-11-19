@@ -11,6 +11,7 @@ import { signIn, TEAM_ADMIN, VIEWER } from "./selfService";
 const KEY = {
   id: "11111111-1111-4111-8111-111111111111",
   name: "pg-key",
+  zone: "default",
   display_prefix: "lw_abcd",
   team_id: "22222222-2222-4222-8222-222222222222",
   team_name: "pg-team",
@@ -22,6 +23,7 @@ const KEY = {
 const SA_KEY = {
   id: "33333333-3333-4333-8333-333333333333",
   name: "pg-sa-key",
+  zone: "default",
   display_prefix: "lw_sa01",
   team_id: KEY.team_id,
   team_name: KEY.team_name,
@@ -120,7 +122,7 @@ test("sends the act-as and CSRF headers, streams text and shows the request id a
   await expect(page.getByTestId("turn-assistant")).toHaveCount(0);
 });
 
-test("groups own and service-account keys and chats as the chosen service-account key", async ({ page }) => {
+test("groups keys by zone and chats as the chosen service-account key", async ({ page }) => {
   await mockInfo(page, { enabled: true, keys: [KEY, SA_KEY] });
   let actAs: string | undefined;
   await page.route("**/api/v1/playground/v1/chat/completions", async (route) => {
@@ -135,8 +137,9 @@ test("groups own and service-account keys and chats as the chosen service-accoun
   const popupId = await picker.getAttribute("aria-controls");
   expect(popupId).toBeTruthy();
   const popup = page.locator(`[id="${popupId}"]`);
-  await expect(popup.getByText("My keys", { exact: true })).toBeVisible();
-  await expect(popup.getByText("Service accounts", { exact: true })).toBeVisible();
+  // Keys are grouped by zone, whoever owns them.
+  await expect(popup.getByTestId("playground-zone-default")).toContainText("pg-key");
+  await expect(popup.getByTestId("playground-zone-default")).toContainText("pg-sa-key");
   const option = page.getByRole("option", { name: "pg-sa-key pg-team / pg-bot", exact: true });
   await expect(option).toBeVisible();
   await option.click();

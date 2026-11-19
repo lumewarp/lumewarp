@@ -17,6 +17,8 @@ export type Key = Schemas["KeyOut"];
 export type Member = Schemas["MemberOut"];
 export type ServiceAccount = Schemas["ServiceAccountOut"];
 export type Zone = Schemas["ZoneOut"];
+export type ZoneLimitsOut = Schemas["ZoneLimitsOut"];
+export type ZoneMemberDefaultsOut = Schemas["ZoneMemberDefaultsOut"];
 export type Upstream = Schemas["UpstreamOut"];
 export type UpstreamTest = Schemas["UpstreamTestOut"];
 export type ModelTest = Schemas["ModelTestOut"];
@@ -155,8 +157,8 @@ export const api = {
     unwrap(client.DELETE("/api/v1/installation-admins/{user_id}", { params: { path: { user_id: userId } } })),
   transferProxyAdmin: (userId: string) =>
     unwrap(client.POST("/api/v1/installation-admins/transfer", { body: { user_id: userId } })),
-  orgUsage: (orgId: string) =>
-    unwrap(client.GET("/api/v1/orgs/{org_id}/usage", { params: { path: { org_id: orgId } } })),
+  orgUsage: (orgId: string, zone?: string) =>
+    unwrap(client.GET("/api/v1/orgs/{org_id}/usage", { params: { path: { org_id: orgId }, query: { ...(zone ? { zone } : {}) } } })),
 
   teams: () => listAll((c) => unwrap(client.GET("/api/v1/teams", { params: { query: q(c) } }))),
   team: (id: string) => unwrap(client.GET("/api/v1/teams/{team_id}", { params: { path: { team_id: id } } })),
@@ -182,14 +184,15 @@ export const api = {
   deleteServiceAccount: (id: string) =>
     unwrap(client.DELETE("/api/v1/service-accounts/{account_id}", { params: { path: { account_id: id } } })),
 
-  teamKeys: (teamId: string) => listAll((c) => unwrap(client.GET("/api/v1/teams/{team_id}/keys", { params: { path: { team_id: teamId }, query: q(c) } }))),
+  teamKeys: (teamId: string, zone?: string) =>
+    listAll((c) => unwrap(client.GET("/api/v1/teams/{team_id}/keys", { params: { path: { team_id: teamId }, query: { ...q(c), ...(zone ? { zone } : {}) } } }))),
   createKey: (teamId: string, body: Schemas["KeyCreate"]) =>
     unwrap(client.POST("/api/v1/teams/{team_id}/keys", { params: { path: { team_id: teamId } }, body })),
-  ownKeys: (includeServiceAccounts = false) =>
+  ownKeys: (includeServiceAccounts = false, zone?: string) =>
     listAll((c) =>
       unwrap(
         client.GET("/api/v1/users/me/keys", {
-          params: { query: { ...q(c), ...(includeServiceAccounts ? { include_service_accounts: true } : {}) } },
+          params: { query: { ...q(c), ...(includeServiceAccounts ? { include_service_accounts: true } : {}), ...(zone ? { zone } : {}) } },
         }),
       ),
     ),
@@ -288,6 +291,10 @@ export const api = {
   rollback: (version: number, force = false, zone?: string) =>
     unwrap(client.POST("/api/v1/config/rollback", { body: { version, ...(force ? { force } : {}), ...(zone ? { zone } : {}) } })),
 
+  putZoneLimits: (zone: string, body: Schemas["ZoneLimitSet"]) =>
+    unwrap(client.PUT("/api/v1/zones/{zone}/limits", { params: { path: { zone } }, body })),
+  putZoneMemberDefaults: (zone: string, body: Schemas["ZoneMemberDefaultsSet"]) =>
+    unwrap(client.PUT("/api/v1/zones/{zone}/member-defaults", { params: { path: { zone } }, body })),
   zones: (includeArchived = false) => unwrap(client.GET("/api/v1/zones", { params: { query: { include_archived: includeArchived } } })).then((page) => page.items),
   createZone: (body: Schemas["ZoneCreate"]) => unwrap(client.POST("/api/v1/zones", { body })),
   updateZone: (name: string, body: Schemas["ZoneUpdate"]) => unwrap(client.PATCH("/api/v1/zones/{name}", { params: { path: { name } }, body })),
