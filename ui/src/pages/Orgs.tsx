@@ -25,7 +25,7 @@ const orgValues = (org: Org, zone: string): OrgValues => ({ name: org.name, ...p
 
 /** Create or rename/set the policy of an org; installation level only. */
 function OrgEditor({ org, onClose }: { org: Org | "new"; onClose: () => void }) {
-  const zone = useZone().name;
+  const zone = useZone().id;
   const form = useForm<OrgValues>(org === "new" ? blankOrg() : orgValues(org, zone), { name: required("Name") });
   const save = useMut(
     async (values: OrgValues) => {
@@ -70,7 +70,7 @@ const blankTeam = (): TeamValues => ({ name: "", ...blankPolicy(true) });
 /** A new team in one org; the org admin may set its totals and model list. */
 function NewTeamDialog({ org, onClose }: { org: Org; onClose: () => void }) {
   const form = useForm<TeamValues>(blankTeam(), { name: required("Name") });
-  const zone = useZone().name;
+  const zone = useZone().id;
   const create = useMut(
     async (values: TeamValues) => {
       const saved = await api.createTeam({ org_id: org.id, name: values.name, ...policyBody(values) });
@@ -242,7 +242,7 @@ export function OrgDetail() {
   const navigate = useNavigate();
   const org = useQuery({ queryKey: ["org", orgId], queryFn: () => api.org(orgId) });
   const teams = useTeams();
-  const zone = useZone().name;
+  const zone = useZone().id;
   const usage = useQuery({ queryKey: ["org-usage", orgId, zone], queryFn: () => api.orgUsage(orgId, zone) });
   const admins = useQuery({
     queryKey: ["org-admins", orgId],

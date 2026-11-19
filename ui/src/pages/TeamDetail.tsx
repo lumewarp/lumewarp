@@ -158,7 +158,7 @@ function MembersPanel({
   // Only an installation admin may hand out or change a team admin role; a team admin
   // edits limits and leaves the existing role alone.
   const canAssignAdmin = perms.canAssignTeamAdmin(team.id);
-  const zone = useZone().name;
+  const zone = useZone().id;
   const save = useMut(async ({ member, values }: { member: Member | null; values: MemberValues }) => {
     try {
       const saved = member
@@ -370,7 +370,7 @@ function ServiceAccountsPanel({ team }: { team: Team }) {
   const [editing, setEditing] = useState<ServiceAccount | "new" | null>(null);
   const [deleting, setDeleting] = useState<ServiceAccount | null>(null);
   const [toggling, setToggling] = useState<ServiceAccount | null>(null);
-  const zone = useZone().name;
+  const zone = useZone().id;
   const form = useForm<ServiceValues>(blankService, { name: required("Name") });
   const save = useMut(
     async ({ account, values }: { account: ServiceAccount | null; values: ServiceValues }) => {
@@ -520,16 +520,16 @@ function KeysPanel({ team }: { team: TeamAny }) {
   const showSecret = useShowSecret();
   const isAdmin = perms.teamAdmin(team.id);
   const zone = useZone();
-  const zoneLabel = zone.zone?.display_name || zone.name;
+  const zoneLabel = zone.zone?.name || zone.id;
   const full = hasPolicy(team) ? team : null;
-  const teamLimits = full ? policyLimits(zoneLimits(full, zone.name)) : undefined;
+  const teamLimits = full ? policyLimits(zoneLimits(full, zone.id)) : undefined;
   const myTeam = me.data?.teams.find((row) => row.team_id === team.id);
-  const myLimits = myTeam?.by_zone?.[zone.name]?.limits ?? myTeam?.limits;
+  const myLimits = myTeam?.by_zone?.[zone.id]?.limits ?? myTeam?.limits;
   // The member and service-account lists are the team-admin view; a plain member's own
   // keys need neither (the server forces the list to their own keys).
   const members = useQuery({ queryKey: ["members", team.id], queryFn: () => api.members(team.id), enabled: isAdmin });
   const accounts = useQuery({ queryKey: ["service-accounts", team.id], queryFn: () => api.serviceAccounts(team.id), enabled: isAdmin });
-  const keys = useQuery({ queryKey: ["team-keys", team.id, zone.name], queryFn: () => api.teamKeys(team.id, zone.name) });
+  const keys = useQuery({ queryKey: ["team-keys", team.id, zone.id], queryFn: () => api.teamKeys(team.id, zone.id) });
   const [creating, setCreating] = useState(false);
   const [editingKey, setEditingKey] = useState<Key | null>(null);
   const [revoking, setRevoking] = useState<Key | null>(null);
@@ -547,7 +547,7 @@ function KeysPanel({ team }: { team: TeamAny }) {
       const { models, ...rest } = values;
       return api.createKey(team.id, {
         name: values.name,
-        zone: zone.name,
+        zone: zone.id,
         expires_at: expiryFromDay(values.expires),
         service_account_id: values.service_account_id || null,
         ...keyLimitsBody(rest),
@@ -582,11 +582,11 @@ function KeysPanel({ team }: { team: TeamAny }) {
     if (!full || !teamLimits) return undefined;
     const member = members.data?.find((row) => row.user_id === userId);
     const defaults: KeyLimitValues = {
-      rpm_limit: full.member_defaults_by_zone?.[zone.name]?.rpm_limit ?? null,
-      tpm_limit: full.member_defaults_by_zone?.[zone.name]?.tpm_limit ?? null,
-      max_parallel: full.member_defaults_by_zone?.[zone.name]?.max_parallel ?? null,
+      rpm_limit: full.member_defaults_by_zone?.[zone.id]?.rpm_limit ?? null,
+      tpm_limit: full.member_defaults_by_zone?.[zone.id]?.tpm_limit ?? null,
+      max_parallel: full.member_defaults_by_zone?.[zone.id]?.max_parallel ?? null,
     };
-    const mine = zoneLimits(member, zone.name);
+    const mine = zoneLimits(member, zone.id);
     const own = member ? {
       rpm_limit: mine.rpm_limit ?? defaults.rpm_limit,
       tpm_limit: mine.tpm_limit ?? defaults.tpm_limit,
@@ -597,7 +597,7 @@ function KeysPanel({ team }: { team: TeamAny }) {
   const accountCap = (accountId: string | null): KeyLimitCap => {
     const account = accounts.data?.find((row) => row.id === accountId);
     if (!account) return undefined;
-    const own = policyLimits(zoneLimits(account, zone.name));
+    const own = policyLimits(zoneLimits(account, zone.id));
     return teamLimits ? clampLimits(own, teamLimits) : own;
   };
   const capFor = (key: Key | "new"): KeyLimitCap => {
@@ -782,7 +782,7 @@ function TeamUsage({ team }: { team: TeamAny }) {
   const [groupBy, setGroupBy] = useState("owner");
   const members = useQuery({ queryKey: ["members", team.id], queryFn: () => api.members(team.id), enabled: isAdmin });
   const accounts = useQuery({ queryKey: ["service-accounts", team.id], queryFn: () => api.serviceAccounts(team.id), enabled: isAdmin });
-  const zone = useZone().name;
+  const zone = useZone().id;
   const usage = useQuery({
     queryKey: ["usage", team.id, groupBy, zone],
     queryFn: () => api.usage({ team_id: team.id, group_by: groupBy, zone }),
@@ -875,8 +875,8 @@ function TeamSettings({ team }: { team: TeamAny }) {
   const [archiving, setArchiving] = useState(false);
   const orgName = orgs.data?.find((org) => org.id === team.org_id)?.name;
   const zoneState = useZone();
-  const zone = zoneState.name;
-  const zoneLabel = zoneState.zone?.display_name || zone;
+  const zone = zoneState.id;
+  const zoneLabel = zoneState.zone?.name || zone;
   const form = useForm<TeamSettingsValues>(teamSettingsFrom(team, canSetQuota, zone), {
     name: required("Name"),
   });

@@ -6,22 +6,24 @@ import { createModel } from "./catalog-helpers";
  * The catalog per zone: lists show the header zone, a record of another zone is still reachable by id and
  * switches the header, a model is "not deployed" where it has no deployment, a router or alias nobody can
  * serve in the zone is flagged, and ModelEdit deploys and undeploys the header zone's deployment.
- * The second zone is created here.
+ * The second zone is declared by serve.py (a pool of tokens); each test takes the first one not yet archived.
  */
 
 const BREAK_GLASS = "e2e-break-glass-password";
-// An archived zone keeps its name, so every test gets its own.
+// An archived zone is never revived, so every test takes the next unarchived zone of serve.py's pool.
 let ZONE = "";
-let seq = 0;
 const admin: Record<string, string> = {};
 
 test.beforeEach(async ({ request }) => {
-  ZONE = `zc-b${Date.now().toString(36)}${++seq}`;
   const response = await request.post("/api/v1/session/break-glass", { data: { password: BREAK_GLASS } });
   expect(response.status()).toBe(204);
   admin["X-Lumewarp-CSRF"] = (await (await request.get("/api/v1/session")).json()).csrf_token;
-  const created = await request.post("/api/v1/zones", { headers: admin, data: { name: ZONE, display_name: "Zone B", color: "violet" } });
-  expect(created.status(), await created.text()).toBe(201);
+  const zones = ((await (await request.get("/api/v1/zones?include_archived=true&limit=200", { headers: admin })).json()) as { items: { id: string; archived_at: string | null }[] }).items;
+  const free = zones.find((z) => /^zc-b\d+$/.test(z.id) && !z.archived_at);
+  expect(free, "no unarchived zc-b zone left in serve.py's pool").toBeTruthy();
+  ZONE = free!.id;
+  const named = await request.patch(`/api/v1/zones/${ZONE}`, { headers: admin, data: { name: "Zone B", color: "violet" } });
+  expect(named.status(), await named.text()).toBe(200);
 });
 
 test.afterEach(async ({ request }) => {

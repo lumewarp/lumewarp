@@ -77,7 +77,7 @@ export function Playground() {
   const me = useMe();
   const breakGlass = me.data?.kind === "break_glass";
   const zone = useZone();
-  const zoneLabel = zone.zone?.display_name || zone.name;
+  const zoneLabel = zone.zone?.name || zone.id;
   const zoneUnavailable = zone.zone
     ? !zone.zone.playground_allowed
       ? `${zoneLabel} does not allow the Playground.`
@@ -139,7 +139,7 @@ function KeySelect({ keys, value, onChange }: { keys: PlaygroundKey[]; value: st
   );
   const selected = keys.find((key) => key.id === value);
   // Zones in the header switcher's order; a key whose zone is not listed (archived) still gets a group.
-  const names = [...new Set([...zones.map((z) => z.name), ...keys.map((key) => key.zone)])].filter((name) => keys.some((key) => key.zone === name));
+  const names = [...new Set([...zones.map((z) => z.id), ...keys.map((key) => key.zone)])].filter((name) => keys.some((key) => key.zone === name));
   return (
     <Field label="Key" hint="The request is limited and metered as this key, in its zone.">
       {(p) => (
@@ -149,11 +149,11 @@ function KeySelect({ keys, value, onChange }: { keys: PlaygroundKey[]; value: st
           </SelectTrigger>
           <SelectContent position="popper">
             {names.map((name) => {
-              const zone = zones.find((z) => z.name === name);
+              const zone = zones.find((z) => z.id === name);
               const inZone = keys.filter((key) => key.zone === name);
               return (
                 <SelectGroup key={name} data-testid={`playground-zone-${name}`}>
-                  <SelectLabel>{zone?.display_name || name}</SelectLabel>
+                  <SelectLabel>{zone?.name || name}</SelectLabel>
                   {inZone.map(item)}
                 </SelectGroup>
               );

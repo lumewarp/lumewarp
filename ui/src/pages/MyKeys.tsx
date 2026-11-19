@@ -93,7 +93,7 @@ export function MyKeys() {
       </Alert>
     );
   }
-  const teams = orderTeams(me.data?.teams ?? []).map((team) => inZone(team, zone.name));
+  const teams = orderTeams(me.data?.teams ?? []).map((team) => inZone(team, zone.id));
   const blocked = !!me.data?.authz_unavailable || me.data?.kind === "break_glass" || teams.length === 0;
   return (
     <>
@@ -642,7 +642,7 @@ function CreateKeyDialog({
 }) {
   const form = useForm<CreateValues>(blankCreate, { name: required("Name") });
   const zone = useZone();
-  const zoneLabel = zone.zone?.display_name || zone.name;
+  const zoneLabel = zone.zone?.name || zone.id;
   const [picked, setPicked] = useState("");
   const [teamError, setTeamError] = useState<string>();
   const team = given ?? teams.find((item) => item.team_id === picked) ?? null;
@@ -651,7 +651,7 @@ function CreateKeyDialog({
       const { models, ...rest } = values;
       return api.createKey(team!.team_id, {
         name: values.name.trim(),
-        zone: zone.name,
+        zone: zone.id,
         expires_at: expiryFromDay(values.expires),
         ...keyLimitsBody(rest),
         ...keyModelsBody(models),
@@ -659,7 +659,7 @@ function CreateKeyDialog({
     },
     (secret) => onCreated(secret),
   );
-  const rules = team?.by_zone?.[zone.name]?.key_rules;
+  const rules = team?.by_zone?.[zone.id]?.key_rules;
   const blocked = team ? keyCreationBlock(rules, zoneLabel, { role: team.role === "admin" ? "admin" : "member", inherited: team.inherited_from, serviceAccount: false }) : null;
   const notes = keyRuleNotes(rules, zoneLabel);
   const lifetime = team?.key_limits.max_member_key_lifetime_seconds ?? null;

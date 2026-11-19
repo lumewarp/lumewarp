@@ -61,8 +61,8 @@ export function Upstreams() {
   const perms = useCan();
   const navigate = useNavigate();
   // Health comes from gateway reports; refresh it while the page is open.
-  const { name: zone, zone: zoneRow } = useZone();
-  const zoneLabel = zoneRow?.display_name || zone;
+  const { id: zone, zone: zoneRow } = useZone();
+  const zoneLabel = zoneRow?.name || zone;
   const all = useQuery({ queryKey: ["upstreams"], queryFn: () => api.upstreams(), refetchInterval: 15000 });
   // Every zone is fetched so an edit page finds any record; the list shows the header zone.
   const list = { ...all, data: all.data?.filter((u) => u.zone === zone) };

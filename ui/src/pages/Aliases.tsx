@@ -14,8 +14,8 @@ import { NotAvailableBadge, unavailableHere } from "./Routers";
 
 export function Aliases() {
   const perms = useCan();
-  const { name: zone, zone: zoneRow } = useZone();
-  const zoneLabel = zoneRow?.display_name || zone;
+  const { id: zone, zone: zoneRow } = useZone();
+  const zoneLabel = zoneRow?.name || zone;
   const list = useAliases();
   const models = useModels();
   const routers = useRouters();

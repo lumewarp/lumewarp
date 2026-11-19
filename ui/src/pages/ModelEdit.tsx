@@ -229,8 +229,8 @@ const ALIAS = {
 export function ModelEdit() {
   const { modelId } = useParams({ strict: false }) as { modelId?: string };
   const list = useModels();
-  const { name: zone, zone: zoneRow } = useZone();
-  const zoneLabel = zoneRow?.display_name || zone;
+  const { id: zone, zone: zoneRow } = useZone();
+  const zoneLabel = zoneRow?.name || zone;
   const existing = modelId ? list.data?.find((m) => m.id === modelId) : undefined;
   if (modelId && list.isPending) return <PageLoading />;
   if (modelId && !existing) {
@@ -364,6 +364,61 @@ function ModelForm({ existing, zone, zoneLabel }: { existing?: Model; zone: stri
         {renamed && <CheckField label="Keep old name as alias" checked={v.keep_old_name_as_alias} onChange={(c) => form.set("keep_old_name_as_alias", c)} />}
       </Section>
 
+      <Section
+        title={`Deployment in ${zoneLabel}`}
+        hint="The upstream and upstream model that serve this model in the header zone; the definition above is the same in every zone. Off removes this zone's deployment."
+        toggle={{ label: "Deploy in this zone", checked: v.deploy, onChange: (x) => form.set("deploy", x) }}
+      >
+        {v.deploy ? (
+          <>
+        <ComboboxField label="Upstream" value={v.upstream_id} onChange={(x) => form.set("upstream_id", x)} error={form.errors.upstream_id} options={(upstreams.data ?? []).map((u) => ({ value: u.id, label: u.name }))} />
+        {saveFirst && (
+          <p className="text-xs text-muted-foreground" data-testid="test-now-hint">
+            {saveFirst}
+          </p>
+        )}
+        <ComboboxField
+          free
+          label="Upstream model"
+          value={v.upstream_model}
+          onChange={(x) => pickModel(String(x))}
+          error={form.errors.upstream_model}
+          placeholder="meta-llama/Llama-3.1-8B-Instruct"
+          options={modelOptions}
+          note={modelNote}
+        />
+            <DeploymentCheck values={v} errors={form.errors} set={form.set} />
+          </>
+        ) : (
+          <p className="text-sm text-muted-foreground" data-testid="not-deployed">
+            Not deployed in {zoneLabel}: the gateways of this zone do not serve this model.
+          </p>
+        )}
+      </Section>
+
+      {otherDeployments.length > 0 && (
+        <Section title="Deployments in other zones" hint="Read-only here; switch the header zone to change one.">
+          <DataTable
+            rows={otherDeployments}
+            rowKey={(d) => d.zone}
+            columns={[
+              { key: "zone", header: "Zone", cell: (d) => <ZoneBadge zone={zones.find((z) => z.id === d.zone) ?? { id: d.zone, name: "", color: "gray" }} /> },
+              { key: "upstream", header: "Upstream", cell: (d) => <code>{d.upstream_name}/{d.upstream_model}</code> },
+              { key: "health", header: "Health", cell: (d) => <HealthBadge health={d.health} probe={d.probe} /> },
+              {
+                key: "switch",
+                header: "",
+                cell: (d) => (
+                  <Button type="button" variant="outline" size="sm" onClick={() => setZone(d.zone)} aria-label={`Switch to zone ${d.zone}`}>
+                    Switch to zone
+                  </Button>
+                ),
+              },
+            ]}
+          />
+        </Section>
+      )}
+
       <Section title="Limits and pricing">
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <NumberField label="Input length (tokens)" value={v.max_input_tokens} onChange={(x) => form.set("max_input_tokens", x)} error={form.errors.max_input_tokens} min={1} placeholder="" />
@@ -449,61 +504,6 @@ function ModelForm({ existing, zone, zoneLabel }: { existing?: Model; zone: stri
           </>
         )}
       </Section>}
-
-      <Section
-        title={`Deployment in ${zoneLabel}`}
-        hint="The upstream and upstream model that serve this model in the header zone; the definition above is the same in every zone. Off removes this zone's deployment."
-        toggle={{ label: "Deploy in this zone", checked: v.deploy, onChange: (x) => form.set("deploy", x) }}
-      >
-        {v.deploy ? (
-          <>
-        <ComboboxField label="Upstream" value={v.upstream_id} onChange={(x) => form.set("upstream_id", x)} error={form.errors.upstream_id} options={(upstreams.data ?? []).map((u) => ({ value: u.id, label: u.name }))} />
-        {saveFirst && (
-          <p className="text-xs text-muted-foreground" data-testid="test-now-hint">
-            {saveFirst}
-          </p>
-        )}
-        <ComboboxField
-          free
-          label="Upstream model"
-          value={v.upstream_model}
-          onChange={(x) => pickModel(String(x))}
-          error={form.errors.upstream_model}
-          placeholder="meta-llama/Llama-3.1-8B-Instruct"
-          options={modelOptions}
-          note={modelNote}
-        />
-            <DeploymentCheck values={v} errors={form.errors} set={form.set} />
-          </>
-        ) : (
-          <p className="text-sm text-muted-foreground" data-testid="not-deployed">
-            Not deployed in {zoneLabel}: the gateways of this zone do not serve this model.
-          </p>
-        )}
-      </Section>
-
-      {otherDeployments.length > 0 && (
-        <Section title="Deployments in other zones" hint="Read-only here; switch the header zone to change one.">
-          <DataTable
-            rows={otherDeployments}
-            rowKey={(d) => d.zone}
-            columns={[
-              { key: "zone", header: "Zone", cell: (d) => <ZoneBadge zone={zones.find((z) => z.name === d.zone) ?? { name: d.zone, display_name: "", color: "gray" }} /> },
-              { key: "upstream", header: "Upstream", cell: (d) => <code>{d.upstream_name}/{d.upstream_model}</code> },
-              { key: "health", header: "Health", cell: (d) => <HealthBadge health={d.health} probe={d.probe} /> },
-              {
-                key: "switch",
-                header: "",
-                cell: (d) => (
-                  <Button type="button" variant="outline" size="sm" onClick={() => setZone(d.zone)} aria-label={`Switch to zone ${d.zone}`}>
-                    Switch to zone
-                  </Button>
-                ),
-              },
-            ]}
-          />
-        </Section>
-      )}
 
       {existing && <UsedBy model={existing} />}
     </EditPage>

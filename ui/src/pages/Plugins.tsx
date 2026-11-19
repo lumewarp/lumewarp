@@ -22,7 +22,7 @@ const KINDS: { kind: PluginKind; title: string }[] = [
 ];
 
 export function Plugins() {
-  const { name: zone } = useZone();
+  const { id: zone } = useZone();
   const plugins = usePlugins(undefined, true, 10_000, zone);
   const rows = plugins.data ?? [];
 

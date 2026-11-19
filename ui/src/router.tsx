@@ -170,11 +170,10 @@ const orgDetailRoute = createRoute({
   component: OrgDetailRoute,
 });
 
-/** Manage zones: reached from the header's zone menu, no sidebar entry. `?new=1` opens the create dialog. */
+/** Manage zones: reached from the header's zone menu, no sidebar entry. */
 const zonesRoute = createRoute({
   getParentRoute: () => appRoute,
   path: "/zones",
-  validateSearch: (search: Record<string, unknown>): { new?: boolean } => (search.new === true || search.new === "true" || search.new === 1 ? { new: true } : {}),
   component: guarded(() => <ZonesPage />, "installationAdmin"),
 });
 

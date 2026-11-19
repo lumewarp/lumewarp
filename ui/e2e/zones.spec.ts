@@ -21,40 +21,46 @@ test.afterEach(async ({ page }) => {
   await page.request.delete(`/api/v1/zones/${ZONE}`, { headers: csrf ? { "X-Lumewarp-CSRF": csrf } : {} }).catch(() => undefined);
 });
 
-test("zones: create, switch, colour, per-zone gateways, reload, archive, default refuses", async ({ page }) => {
+test("zones: edit, switch, colour, per-zone gateways, reload, archive, default refuses", async ({ page }) => {
   await signIn(page);
   await page.goto("/gateways");
   const header = page.getByTestId("app-header");
   const switcher = page.getByTestId("zone-switcher");
   await expect(header).toHaveAttribute("data-zone", "default");
-  await expect(header).toHaveClass(/border-t-zinc-500/);
+  // The zone's colour is its dot in the switcher; the header itself carries no colour bar.
+  await expect(switcher.getByTestId("zone-badge-default").locator("span").first()).toHaveClass(/bg-zinc-500/);
+  await expect(header).not.toHaveClass(/border-t-/);
   await expect(page.getByTestId("gateway-e2e-gw")).toBeVisible();
 
-  // Create the zone from the header menu.
+  // Zones are declared on the control plane: the header menu has no "New zone", and Manage zones has no create button.
   await switcher.click();
-  await page.getByRole("menuitem", { name: "New zone" }).click();
+  await expect(page.getByRole("menuitem", { name: "New zone" })).toHaveCount(0);
+  await page.getByRole("menuitem", { name: "Manage zones" }).click();
   await expect(page).toHaveURL(/\/zones$/);
+  await expect(page.getByRole("button", { name: "New zone" })).toHaveCount(0);
+  // The default zone has no token in this server; zdev has one.
+  await expect(page.getByTestId("zone-no-token-default")).toContainText("No gateway token");
+  await expect(page.getByTestId(`zone-no-token-${ZONE}`)).toHaveCount(0);
+
+  // Name and colour the declared zone.
+  await page.getByRole("row").filter({ hasText: ZONE }).getByRole("button", { name: "Edit" }).click();
   const form = dialog(page);
   await expect(form).toBeVisible();
-  await form.getByLabel("Name", { exact: true }).fill(ZONE);
-  await form.getByLabel("Display name").fill("Dev zone");
+  await expect(form.getByLabel("ID", { exact: true })).toHaveCount(0);
+  await form.getByLabel("Name", { exact: true }).fill("Dev zone");
   await pick(form, "Colour", "Blue");
-  await form.getByRole("button", { name: "Create" }).click();
+  await form.getByRole("button", { name: "Save" }).click();
   await expect(form).toHaveCount(0);
 
-  // Creating it switched the header to it: blue, named, and no gateway of the default zone.
+  await page.getByTestId("zone-switcher").click();
+  await page.getByTestId(`zone-option-${ZONE}`).click();
   await expect(header).toHaveAttribute("data-zone", ZONE);
-  await expect(header).toHaveClass(/border-t-blue-500/);
+  await expect(switcher.getByTestId(`zone-badge-${ZONE}`).locator("span").first()).toHaveClass(/bg-blue-500/);
   await expect(switcher).toContainText("Dev zone");
   await page.goto("/gateways");
   await expect(page.getByRole("heading", { name: "Gateways", level: 1 })).toBeVisible();
   await expect(page.getByText("No gateways have connected yet")).toBeVisible();
   await expect(page.getByTestId("gateway-e2e-gw")).toHaveCount(0);
-
-  // The token dialog names the zone.
-  await page.getByRole("button", { name: "New gateway token" }).click();
-  await expect(dialog(page).getByRole("heading", { name: "New gateway token in Dev zone" })).toBeVisible();
-  await page.keyboard.press("Escape");
 
   // Config versions are asked for this zone; the rollback confirmation says it is installation-wide.
   const asked: string[] = [];
@@ -99,6 +105,10 @@ test("zones: create, switch, colour, per-zone gateways, reload, archive, default
   await expect(row).toHaveCount(0);
   // A tab on an archived zone falls back to the default zone.
   await expect(page.getByTestId("app-header")).toHaveAttribute("data-zone", "default");
+
+  // Its token is still configured, so the archived zone says its gateways are refused.
+  await page.getByRole("switch", { name: "Show archived" }).click();
+  await expect(page.getByTestId(`zone-refused-${ZONE}`)).toContainText("Gateways refused");
 });
 
 test("zones: there is no sidebar entry for zones", async ({ page }) => {

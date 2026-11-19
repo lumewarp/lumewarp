@@ -343,7 +343,7 @@ function LlmUsage({ range }: { range: RangeProps }) {
 
   const dims = [...(range.zone.all ? ["zone"] : []), ...groupBy.split(",")];
   const zoneOf = (name: string | null | undefined) => {
-    const zone = range.zone.zones.find((z) => z.name === name);
+    const zone = range.zone.zones.find((z) => z.id === name);
     return zone ? <ZoneBadge zone={zone} /> : <span className="text-muted-foreground">{name ?? "—"}</span>;
   };
   const ownerLabel = (kind: string | null | undefined, id: string | null | undefined) => {
@@ -529,7 +529,7 @@ function TrafficUsage({ kind, range }: { kind: "mcp" | "a2a"; range: RangeProps 
         header: "Zone",
         sort: (a, b) => (a.zone ?? "").localeCompare(b.zone ?? ""),
         cell: (row) => {
-          const zone = range.zone.zones.find((z) => z.name === row.zone);
+          const zone = range.zone.zones.find((z) => z.id === row.zone);
           return zone ? <ZoneBadge zone={zone} /> : <span className="text-muted-foreground">{row.zone ?? "—"}</span>;
         },
       },

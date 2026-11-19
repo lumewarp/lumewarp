@@ -85,8 +85,8 @@ export function Routers() {
   const list = useRouters();
   const models = useModels();
   const aliases = useAliases();
-  const { name: zone, zone: zoneRow } = useZone();
-  const zoneLabel = zoneRow?.display_name || zone;
+  const { id: zone, zone: zoneRow } = useZone();
+  const zoneLabel = zoneRow?.name || zone;
   const strategies = useStrategies(zone);
   const modelName = useNames(models.data);
   const modelById = useById(models.data);

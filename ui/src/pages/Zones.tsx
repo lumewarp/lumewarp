@@ -1,23 +1,24 @@
 import { useQuery } from "@tanstack/react-query";
-import { getRouteApi } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 import { api, type Schemas, type Zone } from "../api";
 import { Badge, fmtDateTime, PageHeader } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
 import { CheckField, FormDialog, NumberField, SelectField, SwitchField, TextField, useForm } from "../components/Form";
-import { CreateButton, RowActions } from "../components/RowActions";
+import { RowActions } from "../components/RowActions";
 import { DataTable } from "../components/Table";
+import { HelpTip } from "../components/ui/help-tip";
 import { useMut } from "../hooks";
 import { useZone, zonesKey, ZONE_COLORS, ZoneBadge } from "../zone";
 
 /*
- * Manage zones: installation admins create, edit and archive config zones. Reached from the header's zone
- * menu, not from the sidebar. A zone's name is a slug and never changes.
+ * Manage zones: installation admins edit and archive config zones. Zones are declared on the control plane by
+ * their gateway token variable, so there is no create here. Reached from the header's zone menu, not from the
+ * sidebar. A zone's id is a slug and never changes; its name is what people see.
  */
 
 type Role = Schemas["KeyMinCreatorRole"];
-type Color = Schemas["ZoneCreate"]["color"];
+type Color = NonNullable<Schemas["ZoneUpdate"]["color"]>;
 
 const ROLES: { value: Role; label: string }[] = [
   { value: "member", label: "Member" },
@@ -25,13 +26,15 @@ const ROLES: { value: Role; label: string }[] = [
   { value: "org_admin", label: "Org admin" },
 ];
 const ROLE_LABEL: Record<string, string> = Object.fromEntries(ROLES.map((r) => [r.value, r.label]));
-const COLORS = (Object.keys(ZONE_COLORS) as Color[]).map((value) => ({ value, label: ZONE_COLORS[value].label }));
-
-const SLUG = /^[a-z][a-z0-9-]{0,62}$/;
+const COLORS = (Object.keys(ZONE_COLORS) as Color[]).map((value) => ({
+  value,
+  label: ZONE_COLORS[value].label,
+  icon: <span className={`size-3 shrink-0 rounded-full ${ZONE_COLORS[value].dot}`} aria-hidden="true" />,
+}));
 
 interface Values {
+  id: string;
   name: string;
-  display_name: string;
   color: Color;
   playground_gateway_url: string;
   key_min_creator_role: Role;
@@ -42,23 +45,10 @@ interface Values {
   playground_allowed: boolean;
 }
 
-const blank = (): Values => ({
-  name: "",
-  display_name: "",
-  color: "gray",
-  playground_gateway_url: "",
-  key_min_creator_role: "member",
-  key_max_lifetime_days: null,
-  key_expiry_required: false,
-  key_max_per_member: null,
-  service_account_keys_allowed: true,
-  playground_allowed: true,
-});
-
 const DAY = 86_400;
 const from = (z: Zone): Values => ({
+  id: z.id,
   name: z.name,
-  display_name: z.display_name,
   color: (z.color in ZONE_COLORS ? z.color : "gray") as Color,
   playground_gateway_url: z.playground_gateway_url ?? "",
   key_min_creator_role: z.key_min_creator_role,
@@ -71,7 +61,7 @@ const from = (z: Zone): Values => ({
 
 function rules(v: Values) {
   return {
-    display_name: v.display_name.trim() || v.name,
+    name: v.name.trim() || v.id,
     color: v.color,
     playground_gateway_url: v.playground_gateway_url.trim() || null,
     key_min_creator_role: v.key_min_creator_role,
@@ -83,39 +73,21 @@ function rules(v: Values) {
   };
 }
 
-function ZoneEditor({ zone, onClose, onSaved }: { zone: Zone | "new"; onClose: () => void; onSaved?: (name: string) => void }) {
-  const isNew = zone === "new";
-  const form = useForm<Values>(isNew ? blank() : from(zone), {
-    name: (v) => (SLUG.test(v) ? undefined : "Use lowercase letters, digits and dashes, starting with a letter"),
-  });
-  const save = useMut(
-    (v: Values) => (isNew ? api.createZone({ name: v.name, ...rules(v) }) : api.updateZone(zone.name, rules(v))),
-    isNew ? "Zone created" : "Zone saved",
-  );
+function ZoneEditor({ zone, onClose }: { zone: Zone; onClose: () => void }) {
+  const form = useForm<Values>(from(zone));
+  const save = useMut((v: Values) => api.updateZone(zone.id, rules(v)), "Zone saved");
   return (
     <FormDialog
       open
-      title={isNew ? "New zone" : `Edit zone ${zone.name}`}
-      submitLabel={isNew ? "Create" : "Save"}
+      title={`Edit zone ${zone.name || zone.id}`}
+      submitLabel="Save"
       onClose={onClose}
       onSubmit={async () => {
         if (!form.validate()) return false;
-        const result = await form.run(() => save.mutateAsync(form.values));
-        if (result === false) return false;
-        onSaved?.(form.values.name);
+        return form.run(() => save.mutateAsync(form.values));
       }}
     >
-      {isNew && (
-        <TextField
-          label="Name"
-          value={form.values.name}
-          onChange={(value) => form.set("name", value)}
-          error={form.errors.name}
-          hint="The zone's slug, used by gateways and the API; it cannot be changed later."
-          autoFocus
-        />
-      )}
-      <TextField label="Display name" value={form.values.display_name} onChange={(value) => form.set("display_name", value)} hint="Empty uses the name." />
+      <TextField label="Name" value={form.values.name} onChange={(value) => form.set("name", value)} hint="Empty uses the ID." autoFocus />
       <SelectField label="Colour" value={form.values.color} onChange={(value) => form.set("color", value)} options={COLORS} strict />
       <TextField
         label="Playground gateway URL"
@@ -157,54 +129,60 @@ function ZoneEditor({ zone, onClose, onSaved }: { zone: Zone | "new"; onClose: (
   );
 }
 
-const zonesRoute = getRouteApi("/app/zones");
+/** A zone without a token cannot be reached by a gateway; an archived zone with one has its gateways refused. */
+function TokenNote({ zone }: { zone: Zone }) {
+  if (zone.archived_at) {
+    return zone.token_configured ? (
+      <span className="inline-flex items-center gap-1" data-testid={`zone-refused-${zone.id}`}>
+        <Badge tone="warn">Gateways refused</Badge>
+        <HelpTip text="The zone is archived, so its gateways are refused even though a token is still configured on the control plane." label={`Archived zone ${zone.id}`} />
+      </span>
+    ) : null;
+  }
+  if (zone.token_configured) return null;
+  return (
+    <span className="inline-flex items-center gap-1" data-testid={`zone-no-token-${zone.id}`}>
+      <Badge tone="warn">No gateway token</Badge>
+      <HelpTip text="The zone's gateways authenticate with the LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN variable set on the control plane." label={`Gateway token of ${zone.id}`} />
+    </span>
+  );
+}
 
 export function Zones() {
-  const search = zonesRoute.useSearch();
-  const navigate = zonesRoute.useNavigate();
   const current = useZone();
   const [showArchived, setShowArchived] = useState(false);
   const list = useQuery({ queryKey: [...zonesKey, "manage", showArchived], queryFn: () => api.zones(showArchived) });
-  const [editing, setEditing] = useState<Zone | "new" | null>(search.new ? "new" : null);
+  const [editing, setEditing] = useState<Zone | null>(null);
   const [archiving, setArchiving] = useState<Zone | null>(null);
   const archive = useMut((name: string) => api.archiveZone(name), "Zone archived");
-
-  // "New zone" in the header menu arrives here with ?new=1; consume it so a reload does not reopen the dialog.
-  useEffect(() => {
-    if (search.new) void navigate({ search: {}, replace: true });
-  }, [search.new, navigate]);
 
   return (
     <>
       <PageHeader
         title="Zones"
-        hint="A zone is one config scope with its own gateways, upstreams and keys; names, users and roles are shared by all zones."
-        actions={
-          <div className="flex items-center gap-4">
-            <SwitchField label="Show archived" checked={showArchived} onChange={setShowArchived} />
-            <CreateButton onClick={() => setEditing("new")}>New zone</CreateButton>
-          </div>
-        }
+        hint="A zone is one config scope with its own gateways, upstreams and keys, declared on the control plane by its gateway token; names, users and roles are shared by all zones."
+        actions={<SwitchField label="Show archived" checked={showArchived} onChange={setShowArchived} />}
       />
       <DataTable
         rows={list.data}
         loading={list.isPending}
         error={list.error}
         onRetry={() => void list.refetch()}
-        rowKey={(z) => z.name}
+        rowKey={(z) => z.id}
         mutedRow={(z) => !!z.archived_at}
         empty="No zones."
         columns={[
           {
             key: "zone",
             header: "Zone",
-            sort: (a, b) => a.name.localeCompare(b.name),
+            sort: (a, b) => (a.name || a.id).localeCompare(b.name || b.id),
             cell: (z) => (
               <span className="inline-flex flex-wrap items-center gap-2">
                 <ZoneBadge zone={z} muted={!!z.archived_at} />
-                <code className="text-muted-foreground">{z.name}</code>
-                {z.name === current.defaultName && <Badge tone="info">default</Badge>}
+                <code className="text-muted-foreground">{z.id}</code>
+                {z.id === current.defaultId && <Badge tone="info">default</Badge>}
                 {z.archived_at && <Badge>Archived {fmtDateTime(z.archived_at)}</Badge>}
+                <TokenNote zone={z} />
               </span>
             ),
           },
@@ -230,7 +208,7 @@ export function Zones() {
               z.archived_at ? null : (
                 <RowActions
                   canEdit
-                  canDelete={z.name !== current.defaultName}
+                  canDelete={z.id !== current.defaultId}
                   deleteReason="The default zone cannot be archived"
                   deleteLabel="Archive"
                   onEdit={() => setEditing(z)}
@@ -240,13 +218,13 @@ export function Zones() {
           },
         ]}
       />
-      {editing && <ZoneEditor key={editing === "new" ? "new" : editing.name} zone={editing} onClose={() => setEditing(null)} onSaved={(name) => editing === "new" && current.setZone(name)} />}
+      {editing && <ZoneEditor key={editing.id} zone={editing} onClose={() => setEditing(null)} />}
       <ConfirmDialog
         open={!!archiving}
         title="Archive zone"
         confirmLabel="Archive"
-        message={`Archive zone “${archiving?.display_name || archiving?.name}”? Its gateway tokens are revoked and it stops being compiled. A zone cannot be archived while it is the default zone, a gateway is connected or a live key exists.`}
-        onConfirm={() => archive.mutateAsync(archiving!.name)}
+        message={`Archive zone “${archiving?.name || archiving?.id}”? It stops being compiled and its gateways are refused. A zone cannot be archived while it is the default zone, a gateway is connected or a live key exists.`}
+        onConfirm={() => archive.mutateAsync(archiving!.id)}
         onClose={() => setArchiving(null)}
       />
     </>

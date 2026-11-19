@@ -42,6 +42,15 @@ async function seeded(request: APIRequestContext) {
     expect(row, `${name} is seeded at ${path}; got ${JSON.stringify(items)}`).toBeTruthy();
     return row!;
   };
+  // serve.py writes the gateway rows, the shots user's admin role and the traffic in its last
+  // transaction, after the catalog: wait for the rows so the pictures see a finished seed.
+  const deadline = Date.now() + 60_000;
+  let gateways: unknown[] = [];
+  while (gateways.length === 0 && Date.now() < deadline) {
+    gateways = (await admin.get<{ items: unknown[] }>("/gateways?zone=default&limit=200")).items;
+    if (gateways.length === 0) await new Promise<void>((resolve) => setTimeout(resolve, 200));
+  }
+  expect(gateways.length, "serve.py seeded the default zone's gateways").toBeGreaterThan(0);
   return {
     team: await find("/teams", "search"),
     upstream: await find("/upstreams", "vllm-gpu-a"),

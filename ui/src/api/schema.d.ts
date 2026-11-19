@@ -1525,12 +1525,10 @@ export interface paths {
         };
         /**
          * List Gateways
-         * @description One row per gateway process of one zone, connected ones first and then by gateway
-         *     id.
+         * @description One row per gateway stream of one zone, connected ones first and then by gateway id.
          *
          *     Requires an installation admin. A disconnected gateway stays visible for 24 h after its
-         *     stream ended. Each row names the token its latest Hello authenticated with. Omit `zone`
-         *     for the default zone.
+         *     stream ended. Omit `zone` for the default zone.
          */
         get: operations["listGateways"];
         put?: never;
@@ -1541,36 +1539,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/gateway-tokens": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List Gateway Tokens
-         * @description Gateway tokens of one zone, newest first, with their connected gateway count.
-         *
-         *     Requires an installation admin. A revoked token stays listed. Omit `zone` for the default
-         *     zone.
-         */
-        get: operations["listGatewayTokens"];
-        put?: never;
-        /**
-         * Create Gateway Token
-         * @description Create a gateway token (`lwg-…`) with a label in a zone (default: the default zone).
-         *     It is not bound to a gateway id, so any number of gateways may use it. The secret is in
-         *     this response only. Requires an installation admin.
-         */
-        post: operations["createGatewayToken"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/gateway-tokens/{token_id}/revoke": {
+    "/api/v1/gateways/{zone}/{gateway_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -1579,13 +1548,16 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        post?: never;
         /**
-         * Revoke Gateway Token
-         * @description Revoke a gateway token. Every config and usage stream authenticated with it is closed
-         *     at once; other tokens are unaffected. Requires an installation admin.
+         * Delete Gateway
+         * @description Delete a disconnected gateway row and its plugin reports.
+         *
+         *     Requires an installation admin. A connected gateway cannot be deleted (409); it has to
+         *     disconnect first. A disconnected row is deleted automatically 24 h after its stream
+         *     ended, so this only shortens that. Unknown rows are 404.
          */
-        post: operations["revokeGatewayToken"];
-        delete?: never;
+        delete: operations["deleteGateway"];
         options?: never;
         head?: never;
         patch?: never;
@@ -1652,19 +1624,14 @@ export interface paths {
          */
         get: operations["listZones"];
         put?: never;
-        /**
-         * Create Zone
-         * @description Create a config zone. It starts empty: no gateway serves it and no upstream,
-         *     key or snapshot belongs to it yet. Requires an installation admin.
-         */
-        post: operations["createZone"];
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v1/zones/{name}": {
+    "/api/v1/zones/{zone}": {
         parameters: {
             query?: never;
             header?: never;
@@ -1676,17 +1643,18 @@ export interface paths {
         post?: never;
         /**
          * Archive Zone
-         * @description Archive a zone: revoke its gateway tokens and stop compiling it. Requires an
-         *     installation admin. Refused (409) for the default zone (`LUMEWARP_ZONE`), while a
-         *     gateway session is still connected, and while a key of the zone is not revoked.
+         * @description Archive a zone: stop compiling it, and refuse its gateways even if their env token
+         *     still exists. Requires an installation admin. Refused (409) for the default zone
+         *     (`LUMEWARP_ZONE`), while a gateway session is still connected, and while a key of the
+         *     zone is not revoked.
          */
         delete: operations["archiveZone"];
         options?: never;
         head?: never;
         /**
          * Update Zone
-         * @description Change a zone's display name, colour, Playground URL or key rules. The zone's `name`
-         *     is immutable. Requires an installation admin.
+         * @description Change a zone's name, colour, Playground URL or key rules. The zone's `id` is
+         *     immutable. Requires an installation admin.
          */
         patch: operations["updateZone"];
         trace?: never;
@@ -2259,17 +2227,17 @@ export interface components {
         };
         /**
          * GatewayOut
-         * @description One gateway process: its config stream, version and status.
+         * @description One gateway stream: its id, version and status.
          */
         GatewayOut: {
             /**
              * Zone
-             * @description Config zone this gateway's token serves (`Hello.zone`).
+             * @description Config zone this gateway serves (`x-lumewarp-zone`).
              */
             zone: string;
             /**
              * Gateway Id
-             * @description `Hello.gateway_id`: the process, stable for its lifetime.
+             * @description The id the control plane assigned in `Welcome`; one stream, one id.
              */
             gateway_id: string;
             /**
@@ -2342,71 +2310,6 @@ export interface components {
              * @description `Hello.shared_limits.namespace`; empty while sharing is off.
              */
             shared_limits_namespace: string;
-            /** @description The token its latest Hello authenticated with. */
-            token: components["schemas"]["GatewayTokenRef"];
-        };
-        /** GatewayTokenCreate */
-        GatewayTokenCreate: {
-            /**
-             * Name
-             * @description A label for the token.
-             * @default
-             */
-            name: string;
-            /**
-             * Zone
-             * @description Config zone the record belongs to; omitted = the default zone.
-             */
-            zone?: string | null;
-        };
-        /** GatewayTokenCreated */
-        GatewayTokenCreated: {
-            token: components["schemas"]["GatewayTokenOut"];
-            /** Secret */
-            secret: string;
-        };
-        /** GatewayTokenOut */
-        GatewayTokenOut: {
-            /**
-             * Id
-             * Format: uuid
-             */
-            id: string;
-            /** Zone */
-            zone: string;
-            /** Name */
-            name: string;
-            /** Display Prefix */
-            display_prefix: string;
-            /**
-             * Created At
-             * Format: date-time
-             */
-            created_at: string;
-            /** Last Used At */
-            last_used_at: string | null;
-            /** Revoked At */
-            revoked_at: string | null;
-            /**
-             * Connected Gateways
-             * @description Gateways connected with this token right now.
-             */
-            connected_gateways: number;
-        };
-        /**
-         * GatewayTokenRef
-         * @description The token a gateway's latest Hello authenticated with: enough to name it in the UI.
-         */
-        GatewayTokenRef: {
-            /**
-             * Id
-             * Format: uuid
-             */
-            id: string;
-            /** Name */
-            name: string;
-            /** Display Prefix */
-            display_prefix: string;
         };
         /**
          * HealthCheckIn
@@ -3296,8 +3199,8 @@ export interface components {
         MeZoneOut: {
             /** Zone */
             zone: string;
-            /** Display Name */
-            display_name: string;
+            /** Name */
+            name: string;
             /** Color */
             color: string;
             limits: components["schemas"]["MeLimitsOut"];
@@ -4134,13 +4037,6 @@ export interface components {
             /** Next Cursor */
             next_cursor?: string | null;
         };
-        /** Page[GatewayTokenOut] */
-        Page_GatewayTokenOut_: {
-            /** Items */
-            items: components["schemas"]["GatewayTokenOut"][];
-            /** Next Cursor */
-            next_cursor?: string | null;
-        };
         /** Page[InstallationAdminOut] */
         Page_InstallationAdminOut_: {
             /** Items */
@@ -4346,7 +4242,7 @@ export interface components {
         PluginGatewayOut: {
             /**
              * Gateway Id
-             * @description Hello.gateway_id of the gateway that reported it.
+             * @description The assigned id of the gateway that reported it.
              */
             gateway_id: string;
             /** Connected */
@@ -5988,65 +5884,6 @@ export interface components {
              */
             is_active?: boolean | null;
         };
-        /** ZoneCreate */
-        ZoneCreate: {
-            /**
-             * @description The lowest team role that may create a key in this zone: member, team_admin or org_admin (installation admins always may).
-             * @default member
-             */
-            key_min_creator_role: components["schemas"]["KeyMinCreatorRole"];
-            /**
-             * Key Max Lifetime Seconds
-             * @description Longest lifetime of a key created in this zone; null = only the team's own limit.
-             */
-            key_max_lifetime_seconds?: number | null;
-            /**
-             * Key Expiry Required
-             * @description Refuse a key created in this zone without an expiry.
-             * @default false
-             */
-            key_expiry_required: boolean;
-            /**
-             * Key Max Per Member
-             * @description How many keys one member may own in this zone; null = unlimited. Service-account keys do not count.
-             */
-            key_max_per_member?: number | null;
-            /**
-             * Service Account Keys Allowed
-             * @description Allow creating service-account keys in this zone.
-             * @default true
-             */
-            service_account_keys_allowed: boolean;
-            /**
-             * Playground Allowed
-             * @description Allow this zone's keys in the Playground.
-             * @default true
-             */
-            playground_allowed: boolean;
-            /**
-             * Name
-             * @description Display name, 1 to 200 characters.
-             */
-            name: string;
-            /**
-             * Display Name
-             * @description Shown in the Admin UI.
-             * @default
-             */
-            display_name: string;
-            /**
-             * Color
-             * @description One of the fixed palette names: gray, blue, green, amber, red, violet.
-             * @default gray
-             * @enum {string}
-             */
-            color: "gray" | "blue" | "green" | "amber" | "red" | "violet";
-            /**
-             * Playground Gateway Url
-             * @description Gateway base URL the Playground forwards to for keys of this zone; null = Playground unavailable there.
-             */
-            playground_gateway_url?: string | null;
-        };
         /**
          * ZoneLimitSet
          * @description `PUT /zones/{zone}/limits`: the owner and its limits in that zone.
@@ -6154,12 +5991,12 @@ export interface components {
         };
         /** ZoneOut */
         ZoneOut: {
+            /** Id */
+            id: string;
             /** Name */
             name: string;
             /** Is Default */
             is_default: boolean;
-            /** Display Name */
-            display_name: string;
             /** Color */
             color: string;
             /** Archived At */
@@ -6182,17 +6019,22 @@ export interface components {
             service_account_keys_allowed: boolean;
             /** Playground Allowed */
             playground_allowed: boolean;
+            /**
+             * Token Configured
+             * @description The environment has a `LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN` for this zone, so a gateway can connect.
+             */
+            token_configured: boolean;
         };
         /**
          * ZoneUpdate
-         * @description Only the supplied fields change. `name` is immutable.
+         * @description Only the supplied fields change. `id` is immutable.
          */
         ZoneUpdate: {
             /**
-             * Display Name
-             * @description Shown in the Admin UI.
+             * Name
+             * @description Display name, 1 to 200 characters.
              */
-            display_name?: string | null;
+            name?: string | null;
             /**
              * Color
              * @description One of the fixed palette names: gray, blue, green, amber, red, violet.
@@ -13265,163 +13107,24 @@ export interface operations {
             };
         };
     };
-    listGatewayTokens: {
-        parameters: {
-            query?: {
-                limit?: number;
-                cursor?: string | null;
-                zone?: string | null;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Page_GatewayTokenOut_"];
-                };
-            };
-            /** @description Missing or invalid credentials */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Not allowed */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-        };
-    };
-    createGatewayToken: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["GatewayTokenCreate"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["GatewayTokenCreated"];
-                };
-            };
-            /** @description Missing or invalid credentials */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Not allowed */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-        };
-    };
-    revokeGatewayToken: {
+    deleteGateway: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                token_id: string;
+                zone: string;
+                gateway_id: string;
             };
             cookie?: never;
         };
         requestBody?: never;
         responses: {
             /** @description Successful Response */
-            200: {
+            204: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content: {
-                    "application/json": components["schemas"]["GatewayTokenOut"];
-                };
+                content?: never;
             };
             /** @description Missing or invalid credentials */
             401: {
@@ -13676,81 +13379,12 @@ export interface operations {
             };
         };
     };
-    createZone: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ZoneCreate"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ZoneOut"];
-                };
-            };
-            /** @description Missing or invalid credentials */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Not allowed */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Validation error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-        };
-    };
     archiveZone: {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                name: string;
+                zone: string;
             };
             cookie?: never;
         };
@@ -13817,7 +13451,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                name: string;
+                zone: string;
             };
             cookie?: never;
         };

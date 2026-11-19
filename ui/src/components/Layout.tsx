@@ -21,7 +21,6 @@ import {
   Monitor,
   Moon,
   Plug,
-  Plus,
   Radio,
   Route,
   ScrollText,
@@ -37,7 +36,7 @@ import { clearCsrfToken } from "../auth";
 import type { Me } from "../api";
 import { hasAccess, useCan, useMe, type Access } from "../hooks";
 import { useTheme } from "../theme";
-import { useZone, zoneColor, ZoneBadge } from "../zone";
+import { useZone, ZoneBadge } from "../zone";
 import { AuthzNotice } from "../pages/Access";
 import { useClearSecrets } from "./SecretProvider";
 import { Badge } from "./Bits";
@@ -236,22 +235,22 @@ function NavSidebar({ installationAdmin, orgAdmin, teamAdmin, breakGlass }: { in
 
 /** The zone this view is looking at, at the left of the header; admins also reach Manage zones and New zone here. */
 function ZoneSwitcher({ installationAdmin }: { installationAdmin: boolean }) {
-  const { name, zone, zones, isLoading, setZone } = useZone();
+  const { id, zone, zones, isLoading, setZone } = useZone();
   const navigate = useNavigate();
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button variant="outline" size="sm" className="max-w-[240px]" data-testid="zone-switcher">
-          {zone ? <ZoneBadge zone={zone} /> : <span className="truncate text-muted-foreground">{isLoading ? "Zone…" : name}</span>}
+          {zone ? <ZoneBadge zone={zone} /> : <span className="truncate text-muted-foreground">{isLoading ? "Zone…" : id}</span>}
           <ChevronDown className="size-4" aria-hidden="true" />
           <span className="sr-only">Zone menu</span>
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-60">
         <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">Zone</DropdownMenuLabel>
-        <DropdownMenuRadioGroup value={name} onValueChange={setZone}>
+        <DropdownMenuRadioGroup value={id} onValueChange={setZone}>
           {zones.map((z) => (
-            <DropdownMenuRadioItem key={z.name} value={z.name} data-testid={`zone-option-${z.name}`}>
+            <DropdownMenuRadioItem key={z.id} value={z.id} data-testid={`zone-option-${z.id}`}>
               <ZoneBadge zone={z} />
             </DropdownMenuRadioItem>
           ))}
@@ -259,10 +258,6 @@ function ZoneSwitcher({ installationAdmin }: { installationAdmin: boolean }) {
         {installationAdmin && (
           <>
             <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={() => void navigate({ to: "/zones", search: { new: true } })}>
-              <Plus aria-hidden="true" />
-              New zone
-            </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => void navigate({ to: "/zones", search: {} })}>
               <Globe aria-hidden="true" />
               Manage zones
@@ -379,9 +374,9 @@ export function Layout() {
       <NavSidebar installationAdmin={perms.isInstallationAdmin} orgAdmin={perms.isOrgAdmin} teamAdmin={perms.isTeamAdmin} breakGlass={me.data?.kind === "break_glass"} />
       <div className="flex min-w-0 flex-1 flex-col">
         <header
-          className={`sticky top-0 z-40 flex items-center gap-2 border-t-2 border-b bg-background/95 px-4 py-2.5 backdrop-blur md:px-6 ${zoneColor(zone.zone?.color).border}`}
+          className="sticky top-0 z-40 flex items-center gap-2 border-b bg-background/95 px-4 py-2.5 backdrop-blur md:px-6"
           data-testid="app-header"
-          data-zone={zone.name}
+          data-zone={zone.id}
         >
           <NavToggle />
           <ZoneSwitcher installationAdmin={perms.isInstallationAdmin} />

@@ -51,8 +51,8 @@ export function AuthBadges({ server }: { server: Pick<McpServer, "auth" | "confi
 export function McpServers() {
   const perms = useCan();
   const navigate = useNavigate();
-  const { name: zone, zone: zoneRow } = useZone();
-  const zoneLabel = zoneRow?.display_name || zone;
+  const { id: zone, zone: zoneRow } = useZone();
+  const zoneLabel = zoneRow?.name || zone;
   const all = useMcpServers();
   // Every zone is fetched so an edit page finds any record; the list shows the header zone.
   const list = { ...all, data: all.data?.filter((s) => s.zone === zone) };

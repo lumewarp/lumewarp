@@ -330,7 +330,7 @@ function MemberEditor({ scope, label, modelType, members, onChange, shape, error
 export function RouterEdit() {
   const { routerId } = useParams({ strict: false }) as { routerId?: string };
   const list = useRouters();
-  const { name: zone } = useZone();
+  const { id: zone } = useZone();
   const strategies = useStrategies(zone);
   const models = useModels();
   const existing = routerId ? list.data?.find((r) => r.id === routerId) : undefined;
@@ -348,7 +348,7 @@ export function RouterEdit() {
 
 function RouterForm({ existing, strategies, models }: { existing?: Router; strategies: Plugin[]; models: Model[] }) {
   const navigate = useNavigate();
-  const { name: zone, zone: zoneRow } = useZone();
+  const { id: zone, zone: zoneRow } = useZone();
   const modelName = useNames(models);
   const modelById = useById(models);
   const [submitted, setSubmitted] = useState(false);
@@ -493,7 +493,7 @@ function RouterForm({ existing, strategies, models }: { existing?: Router; strat
         await navigate({ to: "/routers" });
       }}
     >
-      {existing && unavailableHere(existing, zone) && <NotAvailableWarning what="router" zoneLabel={zoneRow?.display_name || zone} />}
+      {existing && unavailableHere(existing, zone) && <NotAvailableWarning what="router" zoneLabel={zoneRow?.name || zone} />}
       <Section title="Router">
         <TextField label="Name" value={v.name} onChange={(x) => form.set("name", x)} error={form.errors.name} autoFocus={!existing} hint="Must be unique across models, aliases and routers." />
         <ComboboxField

@@ -127,7 +127,7 @@ export function PolicyFields({ values, errors, set, isTeam, team, parent }: Prop
       <McpGrants isTeam={isTeam} access={values.mcp_access} onAccess={(a) => set("mcp_access", a)} selected={values.mcp_servers} onSelected={(grants) => set("mcp_servers", grants)} scope={targets.mcp} error={errors.mcp_access ?? errors.mcp_servers} />
       <AgentGrants isTeam={isTeam} access={values.a2a_access} onAccess={(a) => set("a2a_access", a)} selected={values.a2a_agents} onSelected={(names) => set("a2a_agents", names)} scope={targets.agents} error={errors.a2a_access ?? errors.a2a_agents} />
       <div className="flex items-center gap-1 border-t pt-3 text-sm font-semibold" data-testid="limits-heading">
-        Limits in {zone.zone?.display_name || zone.name}
+        Limits in {zone.zone?.name || zone.id}
         <HelpTip text="Limits and budget apply to this zone only; switch zones in the header to set another." label="Limits" />
       </div>
       <NumberField label="Requests per minute" value={values.rpm_limit} onChange={(v) => set("rpm_limit", v)} error={errors.rpm_limit} hint="Shared across gateways that use the same Redis namespace; otherwise counted per gateway." />
@@ -154,7 +154,7 @@ function models(p: PolicyOut) {
 
 /** One-line summary of a level's policy for tables; limits are the header zone's. */
 export function PolicySummary({ p }: { p: PolicyOut & { limits_by_zone?: Record<string, ZoneLimitsOut> } }) {
-  const zone = useZone().name;
+  const zone = useZone().id;
   const limits = zoneLimits(p, zone);
   const parts = [
     p.model_access === "list" ? models(p) : p.model_access === "all" ? "all models" : "inherits models",
@@ -168,7 +168,7 @@ export function PolicySummary({ p }: { p: PolicyOut & { limits_by_zone?: Record<
 }
 
 export function Budget({ p }: { p: { limits_by_zone?: Record<string, ZoneLimitsOut> } }) {
-  const zone = useZone().name;
+  const zone = useZone().id;
   return <span className="tabular-nums">{fmtUsd(zoneLimits(p, zone).budget_nano_usd, "no limit")}</span>;
 }
 

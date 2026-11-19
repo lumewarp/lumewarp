@@ -23,8 +23,8 @@ export function CardBadge({ agent }: { agent: A2aAgent }) {
 export function A2aAgents() {
   const perms = useCan();
   const navigate = useNavigate();
-  const { name: zone, zone: zoneRow } = useZone();
-  const zoneLabel = zoneRow?.display_name || zone;
+  const { id: zone, zone: zoneRow } = useZone();
+  const zoneLabel = zoneRow?.name || zone;
   const all = useA2aAgents();
   // Every zone is fetched so an edit page finds any record; the list shows the header zone.
   const list = { ...all, data: all.data?.filter((a) => a.zone === zone) };

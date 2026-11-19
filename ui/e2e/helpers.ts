@@ -154,6 +154,8 @@ export async function moreFilters(page: Page) {
 
 /** The account menu at the top right holds the theme and Sign out. */
 export async function accountMenu(page: Page) {
+  // A menu still running its close animation is visible but detaches under a click; let it go first.
+  await expect(page.locator('[role="menu"][data-state="closed"]')).toHaveCount(0);
   const menu = page.getByRole("menu");
   // A sheet that just closed hands focus back to its opener a moment later, which dismisses a menu
   // opened in between; open it again until it stays.
@@ -170,4 +172,5 @@ export async function signOut(page: Page) {
 
 export async function chooseTheme(page: Page, label: "Auto" | "Light" | "Dark") {
   await (await accountMenu(page)).getByRole("menuitemradio", { name: label }).click();
+  await expect(page.getByRole("menu")).toHaveCount(0);
 }

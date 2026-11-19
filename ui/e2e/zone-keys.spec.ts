@@ -4,7 +4,7 @@ import { dialog } from "./helpers";
 import { Admin, signIn, VIEWER, VIEWER_EMAIL } from "./selfService";
 
 /*
- * Keys, limits, usage and the Playground per zone. A second zone is made through the API; the viewer is a plain
+ * Keys, limits, usage and the Playground per zone. A second zone is declared by serve.py; the viewer is a plain
  * member of the teams below, the break-glass admin edits limits. The zone stays (it holds a key by then).
  */
 
@@ -15,21 +15,18 @@ let admin: Admin;
 
 test.beforeEach(async ({ request }) => {
   admin = await Admin.login(request);
-  const listed = await admin.get<{ items: { name: string }[] }>("/zones?limit=200");
-  if (!listed.items.some((zone) => zone.name === ZONE)) {
-    await admin.post("/zones", {
-      name: ZONE,
-      display_name: LABEL,
-      color: "violet",
-      key_min_creator_role: "member",
-      key_max_lifetime_seconds: 7 * 86_400,
-      key_expiry_required: false,
-      key_max_per_member: null,
-      service_account_keys_allowed: true,
-      playground_allowed: false,
-      playground_gateway_url: null,
-    });
-  }
+  // zk-b is declared by serve.py; give it the rules this spec needs (idempotent).
+  await admin.patch(`/zones/${ZONE}`, {
+    name: LABEL,
+    color: "violet",
+    key_min_creator_role: "member",
+    key_max_lifetime_seconds: 7 * 86_400,
+    key_expiry_required: false,
+    key_max_per_member: null,
+    service_account_keys_allowed: true,
+    playground_allowed: false,
+    playground_gateway_url: null,
+  });
 });
 
 /** The header zone of this tab, set before the app loads. */

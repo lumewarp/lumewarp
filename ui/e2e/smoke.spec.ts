@@ -117,8 +117,8 @@ test("cookie session: CSRF on writes, inline member errors, key owner state, log
       json: {
         items: [
           {
+            id: "default",
             name: "default",
-            display_name: "default",
             color: "gray",
             archived_at: null,
             created_at: "2026-10-01T00:00:00Z",

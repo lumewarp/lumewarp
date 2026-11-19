@@ -179,7 +179,7 @@ export function useNames(rows: { id: string; name: string }[] | undefined) {
 
 /** The caller's keys in the header zone. */
 export function useOwnKeys(includeServiceAccounts = false) {
-  const zone = useZone().name;
+  const zone = useZone().id;
   return useQuery({ queryKey: ["own-keys", includeServiceAccounts, zone], queryFn: () => api.ownKeys(includeServiceAccounts, zone) });
 }
 
@@ -199,15 +199,15 @@ export const usePlugins = (kind?: PluginKind, enabled = true, refetchInterval?: 
  * what the page shows; the user may still switch the header afterwards without moving the page.
  */
 export function useCatalogZone(record: { id: string; zone: string } | undefined) {
-  const { name, zones, setZone } = useZone();
+  const { id, zones, setZone } = useZone();
   const recordZone = record?.zone;
   useEffect(() => {
-    if (recordZone && recordZone !== name) setZone(recordZone);
+    if (recordZone && recordZone !== id) setZone(recordZone);
     // Only when a different record opens.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [record?.id]);
-  const zone = recordZone ?? name;
-  return { zone, zoneLabel: zones.find((z) => z.name === zone)?.display_name || zone };
+  const zone = recordZone ?? id;
+  return { zone, zoneLabel: zones.find((z) => z.id === zone)?.name || zone };
 }
 export const useStrategies = (zone?: string) => usePlugins("router-strategy", true, undefined, zone);
 export const useCatalog = (enabled = true) => useQuery({ queryKey: ["catalog"], queryFn: () => api.catalog(), enabled });
@@ -301,12 +301,12 @@ export const ALL_ZONES = "*";
 export function useZoneFilter() {
   const header = useZone();
   const [choice, setChoice] = useState<string | null>(null);
-  useEffect(() => setChoice(null), [header.name]);
-  const value = choice ?? header.name;
+  useEffect(() => setChoice(null), [header.id]);
+  const value = choice ?? header.id;
   const all = value === ALL_ZONES;
   const options = [
     { value: ALL_ZONES, label: "All zones" },
-    ...header.zones.map((zone) => ({ value: zone.name, label: zone.display_name || zone.name })),
+    ...header.zones.map((zone) => ({ value: zone.id, label: zone.name || zone.id })),
   ];
   return { value, all, param: all ? undefined : value, set: setChoice, options, zones: header.zones };
 }

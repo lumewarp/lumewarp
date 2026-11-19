@@ -1,3 +1,5 @@
+import type { ReactNode } from "react";
+
 /*
  * The one place where a domain value becomes a widget value and back, shared by SelectField (Radix
  * Select) and ComboboxField (cmdk). Widgets only ever see an opaque key; the domain value is the single
@@ -14,6 +16,8 @@
 export interface ChoiceOption<T> {
   value: T;
   label: string;
+  /** Drawn before the label in a select (a colour swatch); the label stays the accessible text. */
+  icon?: ReactNode;
 }
 
 /** A row that means "no value": picking it calls `onSelect`; it is shown as chosen while the value is undefined. */

@@ -27,8 +27,8 @@ export function Models() {
   const [type, setType] = useState<ModelType | "">("");
   const [deleting, setDeleting] = useState<Model | null>(null);
   const remove = useMut((id: string) => api.deleteModel(id), "Model deleted");
-  const { name: zone, zone: zoneRow, zones } = useZone();
-  const zoneLabel = zoneRow?.display_name || zone;
+  const { id: zone, zone: zoneRow, zones } = useZone();
+  const zoneLabel = zoneRow?.name || zone;
   const here = (m: Model) => (m.deployments ?? []).find((d) => d.zone === zone);
   const mapped = (m: Model) => {
     const d = here(m);
@@ -96,7 +96,7 @@ export function Models() {
                 {(r.deployments ?? []).length === 0 && <span className="text-muted-foreground">nowhere</span>}
                 {(r.deployments ?? []).map((d) => (
                   <span key={d.zone} className={d.zone === zone ? "font-semibold" : "text-muted-foreground"} data-current={d.zone === zone ? "true" : undefined}>
-                    <ZoneBadge zone={zones.find((z) => z.name === d.zone) ?? { name: d.zone, display_name: "", color: "gray" }} />
+                    <ZoneBadge zone={zones.find((z) => z.id === d.zone) ?? { id: d.zone, name: "", color: "gray" }} />
                   </span>
                 ))}
               </span>

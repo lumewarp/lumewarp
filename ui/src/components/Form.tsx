@@ -146,6 +146,7 @@ export function SelectControl<T>({ value, onChange, options, unset, placeholder 
         {unset && <SelectItem value={UNSET_KEY}>{unset.label}</SelectItem>}
         {options.map((o, i) => (
           <SelectItem key={i} value={optionKey(i)}>
+            {o.icon}
             {o.label}
           </SelectItem>
         ))}

@@ -32,7 +32,6 @@ export type Plugin = Schemas["PluginOut"];
 export type PluginKind = Schemas["PluginKind"];
 /** One gateway process and the token its latest Hello used. */
 export type Gateway = Schemas["GatewayOut"];
-export type GatewayToken = Schemas["GatewayTokenOut"];
 export type McpServer = Schemas["McpServerOut"];
 export type McpDefinition = Schemas["McpDefinitionOut"];
 export type McpDefinitionState = Schemas["McpDefinitionState"];
@@ -281,10 +280,6 @@ export const api = {
     listAll((c) => unwrap(client.GET("/api/v1/audit", { params: { query: { ...query, ...q(c) } } }))),
 
   gateways: (zone?: string) => listAll((c) => unwrap(client.GET("/api/v1/gateways", { params: { query: { ...q(c), zone } } }))),
-  gatewayTokens: (zone?: string) => listAll((c) => unwrap(client.GET("/api/v1/gateway-tokens", { params: { query: { ...q(c), zone } } }))),
-  createGatewayToken: (body: Schemas["GatewayTokenCreate"]) => unwrap(client.POST("/api/v1/gateway-tokens", { body })),
-  revokeGatewayToken: (tokenId: string) =>
-    unwrap(client.POST("/api/v1/gateway-tokens/{token_id}/revoke", { params: { path: { token_id: tokenId } } })),
 
   configVersions: (zone?: string) => listAll((c) => unwrap(client.GET("/api/v1/config/versions", { params: { query: { ...q(c), zone } } }))),
   /** Installation-wide: the catalog restores for every zone; `zone` names the version list the version came from. */
@@ -296,9 +291,10 @@ export const api = {
   putZoneMemberDefaults: (zone: string, body: Schemas["ZoneMemberDefaultsSet"]) =>
     unwrap(client.PUT("/api/v1/zones/{zone}/member-defaults", { params: { path: { zone } }, body })),
   zones: (includeArchived = false) => unwrap(client.GET("/api/v1/zones", { params: { query: { include_archived: includeArchived } } })).then((page) => page.items),
-  createZone: (body: Schemas["ZoneCreate"]) => unwrap(client.POST("/api/v1/zones", { body })),
-  updateZone: (name: string, body: Schemas["ZoneUpdate"]) => unwrap(client.PATCH("/api/v1/zones/{name}", { params: { path: { name } }, body })),
-  archiveZone: (name: string) => unwrap(client.DELETE("/api/v1/zones/{name}", { params: { path: { name } } })),
+  updateZone: (zone: string, body: Schemas["ZoneUpdate"]) => unwrap(client.PATCH("/api/v1/zones/{zone}", { params: { path: { zone } }, body })),
+  deleteGateway: (zone: string, gatewayId: string) =>
+    unwrap(client.DELETE("/api/v1/gateways/{zone}/{gateway_id}", { params: { path: { zone, gateway_id: gatewayId } } })),
+  archiveZone: (zone: string) => unwrap(client.DELETE("/api/v1/zones/{zone}", { params: { path: { zone } } })),
 
   a2aAgents: () => listAll((c) => unwrap(client.GET("/api/v1/a2a-agents", { params: { query: q(c) } }))),
   createA2aAgent: (body: Schemas["A2aAgentCreate"]) => unwrap(client.POST("/api/v1/a2a-agents", { body })),

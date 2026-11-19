@@ -77,7 +77,7 @@ function RollbackDialog({ version, zone, onClose }: { version: number | null; zo
 }
 
 export function Config() {
-  const { name: zone } = useZone();
+  const { id: zone } = useZone();
   const list = useQuery({ queryKey: ["config-versions", zone], queryFn: () => api.configVersions(zone) });
   const [target, setTarget] = useState<number | null>(null);
   const current = list.data?.reduce((m, v) => Math.max(m, v.version), 0);

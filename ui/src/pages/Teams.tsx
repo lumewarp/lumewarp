@@ -27,7 +27,7 @@ export function Teams() {
   const [creating, setCreating] = useState(false);
   const [deleting, setDeleting] = useState<TeamAny | null>(null);
   const form = useForm<Values>(blank, { name: required("Name") });
-  const zone = useZone().name;
+  const zone = useZone().id;
   const create = useMut(
     async (v: Values) => {
       const saved = await api.createTeam({ org_id: v.org_id || orgs.data?.[0]?.id || "", name: v.name, ...policyBody(v) });

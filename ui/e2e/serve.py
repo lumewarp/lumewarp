@@ -1,8 +1,8 @@
 """Start the control plane against a fresh, migrated Postgres database for the Playwright smoke test.
 
 Run via `uv run --project ../control-plane python e2e/serve.py` (see playwright.config.ts). Creates
-`lumewarp_test_e2e_<hex>` on the dev Postgres (or LUMEWARP_TEST_DATABASE_URL), migrates and
-bootstraps it, seeds the users the UI specs sign in as (each with a known cookie session), serves
+`lumewarp_test_e2e_<hex>` on the dev Postgres (or LUMEWARP_TEST_DATABASE_URL), migrates it,
+seeds the users the UI specs sign in as (each with a known cookie session), serves
 until signalled, then drops the database.
 """
 
@@ -28,7 +28,6 @@ from lumewarp_control_plane.models import (
     UsageState,
     GatewayPlugin,
     GatewaySession,
-    GatewayToken,
     User,
     UserIdentity,
     UserSession,
@@ -39,6 +38,8 @@ from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
 
+# zone-catalog.spec.ts takes one zone of this pool per test; an archived zone is never reused.
+ZC_POOL = 6
 HTTP_PORT = os.environ.get("E2E_HTTP_PORT", "8992")
 GRPC_PORT = os.environ.get("E2E_GRPC_PORT", "50952")
 BREAK_GLASS_PASSWORD = "e2e-break-glass-password"
@@ -376,9 +377,8 @@ def plugin_descriptors() -> dict[str, dict]:
 
 
 async def seed_gateways(url: str) -> None:
-    """The specs' fleet: two connected gateways, each using its own token and sharing a Redis
-    namespace, plus one disconnected gateway on the primary token. Only the primary token's
-    gateway reports the plugins the specs use. Done after the server is up: serving marks every
+    """The specs' fleet: two connected gateways sharing a Redis namespace, plus one disconnected
+    gateway. Only e2e-gw reports the plugins the specs use. Done after the server is up: serving marks every
     stored gateway disconnected, and only connected gateways make a plugin "missing"."""
     from sqlalchemy import func, select
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -388,33 +388,16 @@ async def seed_gateways(url: str) -> None:
     engine = create_async_engine(url)
     try:
         async with AsyncSession(engine) as session, session.begin():
-            token_a = await session.scalar(
-                select(GatewayToken).where(GatewayToken.name == "primary")
-            )
-            assert token_a is not None
-            token_a.display_prefix = "lwg-e2ea"
-            token_b = await session.scalar(
-                select(GatewayToken).where(GatewayToken.name == "secondary")
-            )
-            if token_b is None:
-                token_b = GatewayToken(
-                    zone=token_a.zone,
-                    name="secondary",
-                    token_hash=uuid.uuid4().bytes * 2,
-                    display_prefix="lwg-e2eb",
-                )
-                session.add(token_b)
-                await session.flush()
             latest = await session.scalar(select(func.max(ConfigVersion.version))) or 1
             descriptors = plugin_descriptors()
-            # (token, gateway id, connected, shared limits, build)
+            # (gateway id, connected, shared limits, build)
             fleet = [
-                (token_a, "e2e-gw", True, True, "e2e"),
-                (token_b, "e2e-gw-b", True, True, "e2e"),
-                (token_a, "e2e-gw-old", False, False, "e2e-old"),
+                ("e2e-gw", True, True, "e2e"),
+                ("e2e-gw-b", True, True, "e2e"),
+                ("e2e-gw-old", False, False, "e2e-old"),
             ]
-            for n, (token, gateway_id, connected, shared, version) in enumerate(fleet):
-                names = [name for name in descriptors if token is token_a or name not in ONLY_ON_A]
+            for n, (gateway_id, connected, shared, version) in enumerate(fleet):
+                names = [name for name in descriptors if gateway_id != "e2e-gw-b" or name not in ONLY_ON_A]
                 capabilities = [
                     *BUILTIN_CAPABILITIES,
                     *[
@@ -435,9 +418,8 @@ async def seed_gateways(url: str) -> None:
                 ]
                 session.add(
                     GatewaySession(
-                        zone=token.zone,
+                        zone="default",
                         gateway_id=gateway_id,
-                        token_id=token.id,
                         connected=connected,
                         gateway_version=version,
                         capabilities=capabilities,
@@ -451,21 +433,20 @@ async def seed_gateways(url: str) -> None:
                     )
                 )
             await session.flush()
-            for token, gateway_id, connected, _, _ in fleet:
+            for gateway_id, connected, _, _ in fleet:
                 if not connected:
                     continue
                 for name, descriptor in descriptors.items():
-                    if token is not token_a and name in ONLY_ON_A:
+                    if gateway_id == "e2e-gw-b" and name in ONLY_ON_A:
                         continue
                     session.add(
                         GatewayPlugin(
-                            zone=token.zone,
+                            zone="default",
                             gateway_id=gateway_id,
                             kind=PluginKind(descriptor["kind"]),
                             name=name,
                             digest="e2e" + name.replace("_", "")[:20],
                             descriptor=descriptor,
-                            token_id=token.id,
                             seen_at=now,
                         )
                     )
@@ -685,7 +666,7 @@ async def published_versions(url: str) -> dict[str, int]:
                 zone_rows = list(
                     (
                         await session.execute(
-                            select(Zone.name, Zone.source_revision).where(
+                            select(Zone.id, Zone.source_revision).where(
                                 Zone.archived_at.is_(None)
                             )
                         )
@@ -738,11 +719,10 @@ async def seed_docs(url: str) -> None:
         "PATCH", "/zones/default", {"playground_gateway_url": "https://gateway-default.example.com"}
     )
     api.call(
-        "POST",
-        "/zones",
+        "PATCH",
+        "/zones/prod",
         {
-            "name": "prod",
-            "display_name": "Production",
+            "name": "Production",
             "color": "blue",
             "playground_gateway_url": "https://gateway-prod.example.com",
         },
@@ -851,30 +831,16 @@ async def seed_docs(url: str) -> None:
                     user_id=uuid.UUID(users[SHOTS_EMAIL]), role=InstallationRole.PROXY_ADMIN
                 )
             )
-            token = await session.scalar(select(GatewayToken).where(GatewayToken.name == "primary"))
-            assert token is not None
-            token.name = "default"
-            token.display_prefix = "lwg-docs"
-            token.last_used_at = datetime.now(UTC)
-            prod_token = GatewayToken(
-                zone="prod",
-                name="production",
-                token_hash=uuid.uuid4().bytes * 2,
-                display_prefix="lwg-prd",
-            )
-            session.add(prod_token)
-            await session.flush()
             gateways = {
-                "default": (token, ["gw-a-7f3c1d2e", "gw-a-9b1e4c6a", "gw-a-2d8f5b0c"]),
-                "prod": (prod_token, ["gw-prod-6a3c2b1d"]),
+                "default": ["gw-a-7f3c1d2e", "gw-a-9b1e4c6a", "gw-a-2d8f5b0c"],
+                "prod": ["gw-prod-6a3c2b1d"],
             }
-            for zone, (zone_token, gateway_ids) in gateways.items():
+            for zone, gateway_ids in gateways.items():
                 for n, gateway_id in enumerate(gateway_ids, start=1):
                     session.add(
                         GatewaySession(
                             zone=zone,
                             gateway_id=gateway_id,
-                            token_id=zone_token.id,
                             connected=True,
                             gateway_version="0.1.0",
                             capabilities=BUILTIN_CAPABILITIES,
@@ -958,6 +924,17 @@ def cp(*args: str, env: dict[str, str]) -> None:
     subprocess.run([sys.executable, "-m", "lumewarp_control_plane", *args], env=env, check=True)
 
 
+def zone_tokens() -> dict[str, str]:
+    """The zones this server declares: a zone exists because `LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN` is set.
+    The default zone has no token in the specs' mode, so its "No gateway token" note can be checked; the
+    docs mode gives it one."""
+    ids = ["prod", "default"] if DOCS else ["zdev", "zk-b", *[f"zc-b{n}" for n in range(1, ZC_POOL + 1)]]
+    return {
+        f"LUMEWARP_GATEWAY_ZONE_{zone.upper().replace('-', '_')}_TOKEN": f"e2e-{zone}-token-0123456789abcdef0123456789"
+        for zone in ids
+    }
+
+
 def main() -> None:
     name = f"lumewarp_test_e2e_{uuid.uuid4().hex[:12]}"
     asyncio.run(admin(f'CREATE DATABASE "{name}"'))
@@ -973,11 +950,11 @@ def main() -> None:
         "LUMEWARP_METRICS_BIND": "",
         "LUMEWARP_HTTP_BIND": f"127.0.0.1:{HTTP_PORT}",
         "LUMEWARP_GRPC_BIND": f"127.0.0.1:{GRPC_PORT}",
+        **zone_tokens(),
     }
     server: subprocess.Popen[bytes] | None = None
     try:
         cp("migrate", env=env)
-        cp("bootstrap", "--name", "primary", env=env)
         asyncio.run(seed_users(url))
         server = subprocess.Popen(
             [sys.executable, "-m", "lumewarp_control_plane", "serve"], env=env
