@@ -2,6 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 
 import { chooseTheme, confirmDialog, dialog, keyPrefix, pick, shot, signOut } from "./helpers";
 import { myKeyRow } from "./selfService";
+import { createModel } from "./catalog-helpers";
 
 const BREAK_GLASS = "e2e-break-glass-password";
 const VIEWER = "e2e-viewer-session-0123456789abcdef";
@@ -107,6 +108,30 @@ test("cookie session: CSRF on writes, inline member errors, key owner state, log
         manages_grants: true,
         teams: [{ team_id: teamId, team_name: "Cookie Team", role: "admin" }],
         admin_orgs: [],
+      },
+    }),
+  );
+  // The header's zone switcher reads the zone list; this session is mocked, so the list is too.
+  await page.route("**/api/v1/zones*", (route) =>
+    route.fulfill({
+      json: {
+        items: [
+          {
+            name: "default",
+            display_name: "default",
+            color: "gray",
+            archived_at: null,
+            created_at: "2026-10-01T00:00:00Z",
+            playground_gateway_url: null,
+            key_min_creator_role: "member",
+            key_max_lifetime_seconds: null,
+            key_expiry_required: false,
+            key_max_per_member: null,
+            service_account_keys_allowed: true,
+            playground_allowed: true,
+          },
+        ],
+        next_cursor: null,
       },
     }),
   );
@@ -538,7 +563,7 @@ test("router edit: retry, ordered fallback and a traffic split shown as percenta
   const upstream = await post("/upstreams", { name: "smoke-up", kind: "vllm", base_url: "http://127.0.0.1:9/v1" });
   const deps: Record<string, string> = {};
   for (const name of ["smoke-stable", "smoke-canary", "smoke-backup"]) {
-    deps[name] = (await post("/models", { name, upstream_id: upstream.id, upstream_model: "m", model_type: "llm" })).id;
+    deps[name] = (await createModel(request, admin, { name, upstream_id: upstream.id, upstream_model: "m", model_type: "llm" })).id;
   }
   const main = await post("/routers", { name: "smoke-main", members: [{ model_id: deps["smoke-stable"] }] });
 

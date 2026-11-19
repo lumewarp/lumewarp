@@ -7,6 +7,7 @@ import { ConfirmDialog } from "../components/Confirm";
 import { CreateButton, RowActions } from "../components/RowActions";
 import { DataTable } from "../components/Table";
 import { useCan, useMcpServers, useMut } from "../hooks";
+import { useZone } from "../zone";
 
 /** The review mode as an administrator reads it. */
 export const REVIEW_LABELS: Record<McpServer["review_mode"], string> = {
@@ -50,7 +51,11 @@ export function AuthBadges({ server }: { server: Pick<McpServer, "auth" | "confi
 export function McpServers() {
   const perms = useCan();
   const navigate = useNavigate();
-  const list = useMcpServers();
+  const { name: zone, zone: zoneRow } = useZone();
+  const zoneLabel = zoneRow?.display_name || zone;
+  const all = useMcpServers();
+  // Every zone is fetched so an edit page finds any record; the list shows the header zone.
+  const list = { ...all, data: all.data?.filter((s) => s.zone === zone) };
   const [deleting, setDeleting] = useState<McpServer | null>(null);
   const remove = useMut((id: string) => api.deleteMcpServer(id), "MCP server archived");
 
@@ -71,7 +76,7 @@ export function McpServers() {
         error={list.error}
         onRetry={() => void list.refetch()}
         rowKey={(s) => s.id}
-        empty="No MCP servers yet."
+        empty={`No MCP servers in ${zoneLabel} yet.`}
         columns={[
           {
             key: "name",

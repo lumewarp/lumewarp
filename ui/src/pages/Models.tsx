@@ -15,6 +15,7 @@ import { matches } from "../lib/catalog";
 import { MODEL_TYPES, type ModelType, typeLabel } from "../lib/modelType";
 import { SelectControl } from "../components/Form";
 import { HealthBadge } from "./Upstreams";
+import { useZone, ZoneBadge } from "../zone";
 
 export function Models() {
   const perms = useCan();
@@ -26,12 +27,12 @@ export function Models() {
   const [type, setType] = useState<ModelType | "">("");
   const [deleting, setDeleting] = useState<Model | null>(null);
   const remove = useMut((id: string) => api.deleteModel(id), "Model deleted");
-  // Z6 replaces this with a per-zone deployment view; until then the first deployment stands
-  // for the model and a model with none shows as unmapped.
-  const deployment = (m: Model) => m.deployments?.[0];
+  const { name: zone, zone: zoneRow, zones } = useZone();
+  const zoneLabel = zoneRow?.display_name || zone;
+  const here = (m: Model) => (m.deployments ?? []).find((d) => d.zone === zone);
   const mapped = (m: Model) => {
-    const d = deployment(m);
-    return d ? `${d.upstream_name}/${d.upstream_model}` : "not deployed";
+    const d = here(m);
+    return d ? `${d.upstream_name}/${d.upstream_model}` : "";
   };
 
   const rows = useMemo(
@@ -72,11 +73,38 @@ export function Models() {
             ),
           },
           { key: "type", header: "Type", sort: (a, b) => a.model_type.localeCompare(b.model_type), cell: (r) => <TypeBadge type={r.model_type} /> },
-          { key: "maps", header: "Mapped name", sort: (a, b) => mapped(a).localeCompare(mapped(b)), cell: (r) => <code className="text-muted-foreground">{mapped(r)}</code> },
-          { key: "health", header: "Health", cell: (r) => <HealthBadge health={deployment(r)?.health ?? "not_probed"} probe={deployment(r)?.probe ?? null} /> },
+          {
+            key: "maps",
+            header: `Mapped name in ${zoneLabel}`,
+            sort: (a, b) => mapped(a).localeCompare(mapped(b)),
+            cell: (r) =>
+              here(r) ? (
+                <code className="text-muted-foreground">{mapped(r)}</code>
+              ) : (
+                <span className="text-muted-foreground" data-testid={`not-deployed-${r.name}`}>
+                  not deployed in {zoneLabel}
+                </span>
+              ),
+          },
+          { key: "health", header: `Health in ${zoneLabel}`, cell: (r) => (here(r) ? <HealthBadge health={here(r)!.health} probe={here(r)!.probe} /> : <span className="text-muted-foreground">—</span>) },
+          {
+            key: "zones",
+            header: "Deployed in",
+            hideBelow: "md",
+            cell: (r) => (
+              <span className="inline-flex flex-wrap gap-x-3 gap-y-1" data-testid={`deployments-${r.name}`}>
+                {(r.deployments ?? []).length === 0 && <span className="text-muted-foreground">nowhere</span>}
+                {(r.deployments ?? []).map((d) => (
+                  <span key={d.zone} className={d.zone === zone ? "font-semibold" : "text-muted-foreground"} data-current={d.zone === zone ? "true" : undefined}>
+                    <ZoneBadge zone={zones.find((z) => z.name === d.zone) ?? { name: d.zone, display_name: "", color: "gray" }} />
+                  </span>
+                ))}
+              </span>
+            ),
+          },
           { key: "length", header: "Input / Output length", align: "right", hideBelow: "lg", cell: (r) => <Length model={r} /> },
           { key: "price", header: "Input / Output price", align: "right", hideBelow: "lg", cell: (r) => <Price model={r} /> },
-          { key: "actions", header: "", cell: (r) => <RowActions extra={perms.isInstallationAdmin && <TestModelAction model={r} />} canEdit={perms.isInstallationAdmin} canDelete={perms.isInstallationAdmin} onEdit={() => void navigate({ to: "/models/$modelId", params: { modelId: r.id } })} onDelete={() => setDeleting(r)} /> },
+          { key: "actions", header: "", cell: (r) => <RowActions extra={perms.isInstallationAdmin && <TestModelAction model={r} zone={zone} />} canEdit={perms.isInstallationAdmin} canDelete={perms.isInstallationAdmin} onEdit={() => void navigate({ to: "/models/$modelId", params: { modelId: r.id } })} onDelete={() => setDeleting(r)} /> },
         ]}
       />
       <ConfirmDialog open={!!deleting} title="Delete model" message={`Delete “${deleting?.name}”? It must not be used by any router, fallback or alias.`} onConfirm={() => remove.mutateAsync(deleting!.id)} onClose={() => setDeleting(null)} />
@@ -85,12 +113,12 @@ export function Models() {
 }
 
 /** Sends a short probe request to the saved model from the control plane and reports in a toast. */
-function TestModelAction({ model }: { model: Model }) {
+function TestModelAction({ model, zone }: { model: Model; zone: string }) {
   const toast = useToast();
   const qc = useQueryClient();
-  const first = model.deployments?.[0];
+  const first = (model.deployments ?? []).find((d) => d.zone === zone);
   const run = useMutation({
-    mutationFn: () => api.testModel({ model_type: model.model_type, upstream_id: first!.upstream_id, upstream_model: first!.upstream_model, default_body: model.default_body ?? null, model_id: model.id, zone: first!.zone }),
+    mutationFn: () => api.testModel({ model_type: model.model_type, upstream_id: first!.upstream_id, upstream_model: first!.upstream_model, default_body: model.default_body ?? null, model_id: model.id, zone }),
     onSettled: () => void qc.invalidateQueries({ queryKey: ["models"] }),
     onSuccess: (r) => {
       const { probe, reply } = r;

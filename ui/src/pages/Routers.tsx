@@ -10,6 +10,8 @@ import { useAliases, useById, useCan, useModels, useMut, useNames, useRouters, u
 import { matches, routerUpstreamModels } from "../lib/catalog";
 import { typeLabel } from "../lib/modelType";
 import { settingTitles, strategyTitle } from "../lib/schema";
+import { useZone } from "../zone";
+import { Alert, AlertDescription } from "../components/ui/alert";
 
 /** Share of each split as a percentage string ("90%", "33.3%"). */
 export function splitShares(weights: number[]): string[] {
@@ -31,6 +33,31 @@ function memberSummary(m: { model_id: string; weight: number; params: Record<str
       {(strategy?.uses_weight ?? true) && m.weight !== 1 && <span className="text-muted-foreground">×{m.weight}</span>}
       {extras && <span className="text-xs text-muted-foreground">{extras}</span>}
     </div>
+  );
+}
+
+/** True when the header zone cannot serve this router or alias (`unavailable_in` from the API). */
+export const unavailableHere = (item: { unavailable_in?: string[] }, zone: string) => (item.unavailable_in ?? []).includes(zone);
+
+/** "not available in <zone>": no member of a router, or the target of an alias, is deployed there. */
+export function NotAvailableBadge({ zoneLabel }: { zoneLabel: string }) {
+  return (
+    <span data-testid="not-available">
+      <Badge tone="warn">not available in {zoneLabel}</Badge>
+    </span>
+  );
+}
+
+/** The inline warning on a router's or alias's edit page. */
+export function NotAvailableWarning({ what, zoneLabel }: { what: "router" | "alias"; zoneLabel: string }) {
+  return (
+    <Alert variant="warn" data-testid="not-available-warning">
+      <AlertDescription>
+        {what === "router"
+          ? `Not available in ${zoneLabel}: none of this router's models is deployed there, so the gateways of this zone do not serve it.`
+          : `Not available in ${zoneLabel}: the target is not deployed there, so the gateways of this zone do not serve this alias.`}
+      </AlertDescription>
+    </Alert>
   );
 }
 
@@ -58,7 +85,9 @@ export function Routers() {
   const list = useRouters();
   const models = useModels();
   const aliases = useAliases();
-  const strategies = useStrategies();
+  const { name: zone, zone: zoneRow } = useZone();
+  const zoneLabel = zoneRow?.display_name || zone;
+  const strategies = useStrategies(zone);
   const modelName = useNames(models.data);
   const modelById = useById(models.data);
   const [search, setSearch] = useState("");
@@ -157,7 +186,12 @@ export function Routers() {
           {
             key: "health",
             header: "Health",
-            cell: (r) => <Health router={r} strategy={strategyByName.get(r.strategy)} />,
+            cell: (r) => (
+              <div className="flex flex-col items-start gap-1">
+                <Health router={r} strategy={strategyByName.get(r.strategy)} />
+                {unavailableHere(r, zone) && <NotAvailableBadge zoneLabel={zoneLabel} />}
+              </div>
+            ),
           },
           {
             key: "fallback",

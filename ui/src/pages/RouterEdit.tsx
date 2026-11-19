@@ -12,9 +12,10 @@ import { CatalogMultiSelect, CatalogChoiceControl } from "../components/CatalogP
 import { ComboboxField } from "../components/ui/combobox-field";
 import { Label } from "../components/ui/label";
 import { useById, useModels, useMut, useNames, useRouters, useStrategies } from "../hooks";
+import { useZone } from "../zone";
 import { typeOfFirst } from "../lib/modelType";
 import { parseSchema, sameJson, strategyDescription, strategyTitle, unknownKeys, validateValues, type ParsedSchema, type Values as Params } from "../lib/schema";
-import { splitShares } from "./Routers";
+import { NotAvailableWarning, splitShares, unavailableHere } from "./Routers";
 
 /** Level names the API accepts. */
 const LEVEL_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$/;
@@ -329,7 +330,8 @@ function MemberEditor({ scope, label, modelType, members, onChange, shape, error
 export function RouterEdit() {
   const { routerId } = useParams({ strict: false }) as { routerId?: string };
   const list = useRouters();
-  const strategies = useStrategies();
+  const { name: zone } = useZone();
+  const strategies = useStrategies(zone);
   const models = useModels();
   const existing = routerId ? list.data?.find((r) => r.id === routerId) : undefined;
   if ((routerId && list.isPending) || strategies.isPending || models.isPending) return <PageLoading />;
@@ -346,6 +348,7 @@ export function RouterEdit() {
 
 function RouterForm({ existing, strategies, models }: { existing?: Router; strategies: Plugin[]; models: Model[] }) {
   const navigate = useNavigate();
+  const { name: zone, zone: zoneRow } = useZone();
   const modelName = useNames(models);
   const modelById = useById(models);
   const [submitted, setSubmitted] = useState(false);
@@ -490,6 +493,7 @@ function RouterForm({ existing, strategies, models }: { existing?: Router; strat
         await navigate({ to: "/routers" });
       }}
     >
+      {existing && unavailableHere(existing, zone) && <NotAvailableWarning what="router" zoneLabel={zoneRow?.display_name || zone} />}
       <Section title="Router">
         <TextField label="Name" value={v.name} onChange={(x) => form.set("name", x)} error={form.errors.name} autoFocus={!existing} hint="Must be unique across models, aliases and routers." />
         <ComboboxField

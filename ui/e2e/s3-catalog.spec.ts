@@ -1,6 +1,7 @@
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 
 import { pick } from "./helpers";
+import { createModel } from "./catalog-helpers";
 
 /*
  * The Combobox on a page: the alias form's "Points to".
@@ -39,7 +40,7 @@ for (const [label, viewport] of [["desktop", { width: 1280, height: 800 }], ["39
     await page.setViewportSize(viewport);
     const up = await post(request, "/upstreams", { name: "s3c-up", kind: "vllm", base_url: "http://127.0.0.1:9/v1" });
     const models: { id: string; name: string }[] = [];
-    for (let i = 0; i < 65; i++) models.push(await post(request, "/models", { name: `s3c/${String(i).padStart(2, "0")}`, upstream_id: up.id, upstream_model: "m", model_type: "llm" }));
+    for (let i = 0; i < 65; i++) models.push(await createModel(request, admin, { name: `s3c/${String(i).padStart(2, "0")}`, upstream_id: up.id, upstream_model: "m", model_type: "llm" }));
     await page.context().addCookies((await request.storageState()).cookies);
     await page.goto("/aliases");
     const sent: any[] = [];

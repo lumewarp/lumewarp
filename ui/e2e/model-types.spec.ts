@@ -1,6 +1,7 @@
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 
 import { moreFilters, optionNames, pick } from "./helpers";
+import { createModel } from "./catalog-helpers";
 
 /*
  * Model types: the type select on the model page decides which settings show, the list filters by type,
@@ -36,7 +37,7 @@ async function post(request: APIRequestContext, path: string, data: object) {
 
 async function seed(request: APIRequestContext) {
   const up = await post(request, "/upstreams", { name: "mt-up", kind: "vllm", base_url: "http://127.0.0.1:9/v1" });
-  const make = (name: string, model_type: string) => post(request, "/models", { name, upstream_id: up.id, upstream_model: "m", model_type });
+  const make = (name: string, model_type: string) => createModel(request, admin, { name, upstream_id: up.id, upstream_model: "m", model_type });
   return {
     up,
     llm: await make("mt-llm", "llm"),
@@ -78,7 +79,7 @@ test("the type is required and decides which settings the model page shows", asy
   await expect(main.getByLabel("JSON object")).toBeVisible();
   await expect(price("Input price (USD / 1M tokens)")).toBeVisible();
   await expect(price("Output price (USD / 1M tokens)")).toHaveCount(0);
-  await expect(main.getByText("Periodic health check", { exact: true })).toBeVisible();
+  await expect(main.getByText("Check periodically", { exact: true })).toBeVisible();
   await expect(main.getByRole("button", { name: "Test now" })).toBeEnabled();
 
   await pick(main, "Type", "Transcription");

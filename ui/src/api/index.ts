@@ -207,8 +207,13 @@ export const api = {
   testSavedUpstream: (id: string) =>
     unwrap(client.POST("/api/v1/upstreams/{upstream_id}/test", { params: { path: { upstream_id: id } } })),
   testModel: (body: Schemas["ModelTestIn"]) => unwrap(client.POST("/api/v1/models/test", { body })),
-  testSavedModel: (id: string) =>
-    unwrap(client.POST("/api/v1/models/{model_id}/test", { params: { path: { model_id: id } } })),
+  /** Saved-settings Test now of a model's deployment in one zone; the result is kept on the deployment. */
+  testDeployment: (id: string, zone: string) =>
+    unwrap(client.POST("/api/v1/models/{model_id}/deployments/{zone}/test", { params: { path: { model_id: id, zone } } })),
+  putModelDeployment: (id: string, zone: string, body: Schemas["ModelDeploymentIn"]) =>
+    unwrap(client.PUT("/api/v1/models/{model_id}/deployments/{zone}", { params: { path: { model_id: id, zone } }, body })),
+  deleteModelDeployment: (id: string, zone: string) =>
+    unwrap(client.DELETE("/api/v1/models/{model_id}/deployments/{zone}", { params: { path: { model_id: id, zone } } })),
 
   models: () => listAll((c) => unwrap(client.GET("/api/v1/models", { params: { query: q(c) } }))),
   createModel: (body: Schemas["ModelCreate"]) => unwrap(client.POST("/api/v1/models", { body })),
