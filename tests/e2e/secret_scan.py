@@ -5,8 +5,9 @@ tokens, cookie sessions, CSRF tokens, the OIDC state/nonce/PKCE verifier, the br
 password and any env-referenced upstream key). Each stack is dumped with
 `pg_dump` before its disposable database is dropped, and the dump is searched for:
 
-1. **Full token shapes**: `lw-`, `lwp-` or `lwg-` followed by exactly 43 urlsafe-base64
-   characters (the 32 random bytes `security.generate_secret` encodes). A stored
+1. **Full token shapes**: `lw-` (a virtual API key) or `lwp-` (a personal access token)
+   followed by exactly 43 urlsafe-base64 characters (the 32 random bytes
+   `security.generate_secret` encodes). A stored
    `display_prefix` is the prefix plus six characters, so it never matches. The search
    also decodes every `\\x...` bytea value in the COPY data and runs the token pattern on
    the decoded bytes, so a token stored as binary is a hit too.
@@ -59,10 +60,10 @@ import subprocess
 import sys
 from urllib.parse import quote, quote_plus
 
-# `lwp-` and `lwg-` have a four-character prefix; the lookarounds keep a full token from
-# matching inside a longer run of token characters (and a display prefix has only 6).
-TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_-])(lwp-|lwg-|lw-)[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])")
-TOKEN_BYTES_RE = re.compile(rb"(?<![A-Za-z0-9_-])(lwp-|lwg-|lw-)[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])")
+# `lwp-` has a four-character prefix; the lookarounds keep a full token from matching inside
+# a longer run of token characters (and a display prefix has only 6).
+TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_-])(lwp-|lw-)[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])")
+TOKEN_BYTES_RE = re.compile(rb"(?<![A-Za-z0-9_-])(lwp-|lw-)[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])")
 COPY_RE = re.compile(r"^COPY (?:\S+\.)?(\S+)(?: \([^)]*\))? FROM stdin;$", re.MULTILINE)
 # A bytea column is `\\x` followed by the hex of its bytes in a plain-format dump: COPY
 # escapes the backslash of PostgreSQL's hex format, so the dump text has two of them.

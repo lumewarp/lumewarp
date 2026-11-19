@@ -117,20 +117,18 @@ def test_response_state_unknown_catalog_value_is_still_scanned(tmp_path, monkeyp
     assert [item["value"] for item in load_literals(str(log))] == [SHORT_VALUE]
 
 
-def test_a_full_token_of_every_kind_is_a_hit():
+def test_a_full_token_of_each_kind_is_a_hit():
     keys = [
         full_token(prefix, salt)
-        for prefix, salt in (("lw-", "a"), ("lwp-", "b"), ("lwg-", "c"))
+        for prefix, salt in (("lw-", "a"), ("lwp-", "b"))
     ]
     text = dump(
         ("api_keys", f"1\t{keys[0]}"),
         ("personal_access_tokens", f"1\t{keys[1]}"),
-        ("gateway_tokens", f"1\t{keys[2]}"),
     )
     hits = scan_text(text, [])
     assert positions(hits) == [
         ("full token lw-", "api_keys", 5),
-        ("full token lwg-", "gateway_tokens", 11),
         ("full token lwp-", "personal_access_tokens", 8),
     ]
     report = describe(hits)
@@ -150,7 +148,6 @@ def test_display_prefixes_hashes_and_literal_prefixes_pass():
             "personal_access_tokens",
             f"1\tlwp-AbCdEf\t{base64.urlsafe_b64encode(digest).decode()}",
         ),
-        ("gateway_tokens", "1\tlwg-AbCdEf"),
     )
     # The full token is recorded, but only its 6-character display form and its hash are
     # stored: neither may trip the scanner.
@@ -242,13 +239,13 @@ def test_a_url_encoded_literal_is_found():
 
 
 def test_a_token_outside_a_copy_section_still_fails_without_a_table():
-    token = full_token("lwg-", "outside")
+    token = full_token("lw-", "outside")
     text = (
         "CREATE FUNCTION e2e_changed() RETURNS trigger LANGUAGE plpgsql AS $$\n"
         f"BEGIN PERFORM '{token}'; RETURN NULL; END $$;\n"
     )
     [hit] = scan_text(text, [])
-    assert hit["kind"] == "full token lwg-"
+    assert hit["kind"] == "full token lw-"
     assert hit["table"] is None
     assert "outside a table" in describe([hit])
 
@@ -276,7 +273,7 @@ def test_hits_are_json_serialisable_without_the_secret():
     assert json.loads(encoded) == hits
 
 
-@pytest.mark.parametrize("prefix", ["lw-", "lwp-", "lwg-"])
+@pytest.mark.parametrize("prefix", ["lw-", "lwp-"])
 def test_a_short_body_is_not_a_full_token(prefix):
     # The display prefix plus a few characters, as a name or a prefix column could hold.
     assert scan_text(dump(("api_keys", f"1\t{prefix}abcdefgh")), []) == []
@@ -319,7 +316,7 @@ def test_stack_api_and_ok_record_the_secret_they_return(tmp_path, monkeypatch):
     log = tmp_path / "secrets.jsonl"
     log.touch()
     monkeypatch.setenv("E2E_SECRET_LOG", str(log))
-    first, second = full_token("lwp-", "api"), full_token("lwg-", "ok")
+    first, second = full_token("lwp-", "api"), full_token("lw-", "ok")
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/ok"):
@@ -342,12 +339,12 @@ def test_stack_api_and_ok_record_the_secret_they_return(tmp_path, monkeypatch):
     assert len(recorded) == 2
     leaked = dump(
         ("personal_access_tokens", f"1\t{base64.b64encode(first.encode()).decode()}"),
-        ("gateway_tokens", f"1\t{base64.b64encode(second.encode()).decode()}"),
+        ("api_keys", f"1\t{base64.b64encode(second.encode()).decode()}"),
     )
     hits = scan_text(leaked, recorded)
     assert {hit["table"] for hit in hits} == {
         "personal_access_tokens",
-        "gateway_tokens",
+        "api_keys",
     }
 
 

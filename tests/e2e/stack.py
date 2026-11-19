@@ -5,6 +5,7 @@ upstream and gateway, all real processes on ephemeral ports.
 import asyncio
 import json
 import os
+import secrets
 import shutil
 import signal
 import socket
@@ -34,6 +35,11 @@ BREAK_GLASS_PASSWORD = "e2e-break-glass-password"
 ENCRYPTION_KEY = "e2e-lumewarp-encryption-key-0123456789abcdef"
 ZONE = "e2e"
 FORBIDDEN_PORTS = {9000, 5432, 8080, 8081}
+
+
+def zone_token_env(zone: str) -> str:
+    """The control-plane env var holding one zone's fixed gateway token."""
+    return f"LUMEWARP_GATEWAY_ZONE_{zone.upper().replace('-', '_')}_TOKEN"
 
 
 def run_id() -> str:
@@ -291,7 +297,7 @@ class Proc:
 
 
 def gateway_host(env: dict[str, str]) -> str:
-    """The host part of the id `gateway_id.rs` derives from HOSTNAME."""
+    """The host part of the id the control plane assigns from Hello.hostname."""
     cleaned = "".join(
         char
         for char in env.get("HOSTNAME", "")
@@ -318,9 +324,10 @@ class Gateway:
             f"server:\n  listen: '127.0.0.1:{self.port}'\n"
             f"  admin_listen: '127.0.0.1:{self.admin_port}'\n  shutdown_grace_ms: 1000\n"
         )
+        token_env = zone_token_env(ZONE)
         env = {
             **stack.base_env,
-            "E2E_GATEWAY_TOKEN": token,
+            token_env: token,
             "LUMEWARP_ENCRYPTION_KEY": ENCRYPTION_KEY,
             "RUST_LOG": "info",
         }
@@ -336,7 +343,7 @@ class Gateway:
                 "--control-plane",
                 f"http://127.0.0.1:{stack.grpc_port}",
                 "--gateway-token-env",
-                "E2E_GATEWAY_TOKEN",
+                token_env,
                 "--state-dir",
                 str(state_dir),
                 "--zone",
@@ -443,6 +450,7 @@ class Stack:
         self.gateways: list[Gateway] = []
         self.extra_mocks: list[Proc] = []
         self.api_url = f"http://127.0.0.1:{self.http_port}/api/v1"
+        self.gateway_token = secrets.token_urlsafe(36)
         base, _, _ = PG_DSN.rpartition("/")
         self.dsn = f"{base}/{self.db_name}"
         self.sa_url = self.dsn.replace("postgresql://", "postgresql+asyncpg://", 1)
@@ -460,6 +468,7 @@ class Stack:
             "LUMEWARP_SECRET_KEY": "e2e-lumewarp-secret-key-0123456789abcdef",
             "LUMEWARP_ENCRYPTION_KEY": ENCRYPTION_KEY,
             "LUMEWARP_ZONE": ZONE,
+            zone_token_env(ZONE): self.gateway_token,
             "LUMEWARP_HTTP_BIND": f"127.0.0.1:{self.http_port}",
             "LUMEWARP_GRPC_BIND": f"127.0.0.1:{self.grpc_port}",
             "LUMEWARP_METRICS_BIND": f"127.0.0.1:{self.metrics_port}",
@@ -484,7 +493,6 @@ class Stack:
             self.dir,
         )
         self.admin = httpx.Client(timeout=15)
-        self.gateway_token = ""
         # Every stack has one org for the tests' teams (there is no implicit default).
         self.org_id = ""
 
@@ -503,10 +511,6 @@ class Stack:
         pg(PG_DSN, f'CREATE DATABASE "{self.db_name}"')
         self.db_created = True
         self._run_cli("migrate")
-        out = self._run_cli("bootstrap", "--name", "e2e", "--zone", ZONE)
-        self.gateway_token = out.strip().splitlines()[-1]
-        assert self.gateway_token.startswith("lwg-"), out
-        record_secret(self.gateway_token, "gateway token")
         record_secret(BREAK_GLASS_PASSWORD, "break-glass password")
         record_secret(ENCRYPTION_KEY, "LUMEWARP_ENCRYPTION_KEY")
         self.mock.start()

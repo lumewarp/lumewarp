@@ -386,7 +386,8 @@ def test_max_parallel_holds_across_three_gateways(stack, redis):
             "base_url": f"http://127.0.0.1:{slow_port}/v1",
         },
     )
-    model = stack.create_model({
+    model = stack.create_model(
+        {
             "name": "slow-a",
             "upstream_id": upstream["id"],
             "upstream_model": "mock",
@@ -559,7 +560,8 @@ def test_killed_gateway_frees_its_parallel_slots(stack, redis, request):
             "base_url": f"http://127.0.0.1:{slow_port}/v1",
         },
     )
-    model = stack.create_model({
+    model = stack.create_model(
+        {
             "name": "slow-a",
             "upstream_id": upstream["id"],
             "upstream_model": "mock",
@@ -577,15 +579,9 @@ def test_killed_gateway_frees_its_parallel_slots(stack, redis, request):
     rows = _wait_gateways(stack, namespace)
     _wait_acked(stack, version)
     _wait_fallback(gateways, 0, 10, "shared mode on every gateway")
-    victim_id = next(
-        row["gateway_id"] for row in rows if row["gateway_id"].startswith("gw-kill-1-")
-    )
-    survivor_id = next(
-        row["gateway_id"] for row in rows if row["gateway_id"].startswith("gw-kill-2-")
-    )
-    third_id = next(
-        row["gateway_id"] for row in rows if row["gateway_id"].startswith("gw-kill-3-")
-    )
+    # Redis fields are each process's internal instance key (`<HOSTNAME>-<8 hex>`), not
+    # the control-plane-assigned gateway id; the rows only prove all three connected.
+    assert len(rows) == GATEWAYS, rows
 
     # One slow request per gateway: every gateway's 20 ms sync catches the
     # in-flight slot, so all three learn the scope and keep publishing their
@@ -595,12 +591,27 @@ def test_killed_gateway_frees_its_parallel_slots(stack, redis, request):
         warm = [pool.submit(gateway.chat, seeded.a.secret, model="slow") for gateway in gateways]
         assert [future.result(timeout=15).status_code for future in warm] == [200] * GATEWAYS
     scope = f"key:{seeded.a.id}"
+
+    def _keys_by_prefix() -> dict[str, str]:
+        fields = _inflight(redis, namespace, scope)
+        return {
+            prefix: field
+            for prefix in ("gw-kill-1-", "gw-kill-2-", "gw-kill-3-")
+            for field in fields
+            if field.startswith(prefix)
+        }
+
     wait_for(
-        lambda: set(_inflight(redis, namespace, scope)) == {victim_id, survivor_id, third_id},
+        lambda: (
+            len(_keys_by_prefix()) == GATEWAYS
+            and len(_inflight(redis, namespace, scope)) == GATEWAYS
+        ),
         5,
         "every gateway publishes its in-flight entry",
         interval=0.02,
     )
+    keys = _keys_by_prefix()
+    victim_id, survivor_id = keys["gw-kill-1-"], keys["gw-kill-2-"]
     # The warm-up held every slot, so the last sync divided zero headroom: give
     # the sync task a few intervals to divide it again before taking the slots.
     time.sleep(3 * SYNC_MS / 1000)

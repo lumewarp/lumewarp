@@ -133,12 +133,13 @@ scan-result file, a missing `pg_dump`, or a failed env-reference query is a hard
 (the scan cannot claim to have looked). The harness records every secret it issues or
 receives at the API boundary: `Stack.api`/`Stack.ok` and `identity.cookie_api` record
 any returned `secret` or known token field before the value reaches the caller, so key
-create, key rotate, catalog keys, PATs, gateway tokens and the load rotation are covered
-without each test remembering. `stack.record_secret` additionally records the gateway
-token from `bootstrap`, the break-glass password, session and CSRF cookies, the OIDC
-state/nonce/PKCE verifier (from the redirect and the sealed login-state cookie), the OIDC
-authorization code, and the values of `cp_env` names containing `SECRET`, `PASSWORD`,
-`TOKEN` or `API_KEY` (for example `LUMEWARP_SECRET_KEY` and the OIDC client secret).
+create, key rotate, catalog keys, PATs and the load rotation are covered without each test
+remembering. `stack.record_env_secrets` records the values of `cp_env` names containing
+`SECRET`, `PASSWORD`, `TOKEN` or `API_KEY` (for example the zone token
+`LUMEWARP_GATEWAY_ZONE_<ZONE>_TOKEN`, `LUMEWARP_SECRET_KEY` and the OIDC client secret);
+`stack.record_secret` records the break-glass password, session and CSRF cookies, the OIDC
+state/nonce/PKCE verifier (from the redirect and the sealed login-state cookie) and the OIDC
+authorization code.
 Upstream `api_key_ref` values are read from the database's environment references and
 searched for too.
 
@@ -152,7 +153,7 @@ know about (then registers them so the reaper drops them), verifies that every d
 the run created has a result, and fails the script on any hit, missing scan or scan
 error.
 
-The scan looks for full `lw-`/`lwp-`/`lwg-` tokens (prefix + 43 urlsafe characters, so a
+The scan looks for full `lw-`/`lwp-` tokens (prefix + 43 urlsafe characters, so a
 stored `display_prefix` never matches) and for every recorded literal plain, base64,
 percent-encoded, hex, and as `pg_dump` writes it in COPY text and as JSON inside that
 COPY text (backslash, TAB, newline, quote and other escapes). Each `\\x...` bytea value in

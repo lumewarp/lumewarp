@@ -93,6 +93,10 @@ spec:
             - name: metrics
               containerPort: 9465
               protocol: TCP
+          envFrom:
+            # Every key is a LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN; see global.gatewayTokens.
+            - secretRef:
+                name: lumewarp-gateway-tokens
           env:
             - name: LUMEWARP_DATABASE_URL
               valueFrom:

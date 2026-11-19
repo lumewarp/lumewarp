@@ -15,10 +15,12 @@ helm install lumewarp deploy/helm/lumewarp-stack -n lumewarp --create-namespace 
   --set global.encryptionKey.secretName=lumewarp-encryption   # Secret with encryption-key, 32+ chars
 ```
 
-The control plane starts after the migration Job. Then create the gateway token as the
-install notes say: sign in to the Admin UI and use **Gateways → New gateway token**, or use
-`kubectl exec ... bootstrap` without the UI, and put the secret in a Secret named
-`lumewarp-gateway`.
+The control plane starts after the migration Job and both components authenticate with the
+chart-created per-zone tokens. The Secret `lumewarp-gateway-tokens` (or
+`global.gatewayTokens.secretName`) holds one `LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN` key for
+`global.zone` and every zone in `global.gatewayTokens.zones`; the gateway reads the key of
+the zone it serves. The install notes print the command to read it. Set
+`global.gatewayTokens.secretName` to use an existing Secret with those keys instead.
 
 ## Bundled PostgreSQL: evaluation and small installs only
 

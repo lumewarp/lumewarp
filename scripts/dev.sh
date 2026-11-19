@@ -124,9 +124,9 @@ prepare() {
     uv sync -q
     uv run -q lumewarp-control-plane migrate
   )
-  local token
-  token="$(cd "$root/control-plane" && uv run -q lumewarp-control-plane bootstrap \
-    --name gw-dev 2>/dev/null)"
+  command -v openssl >/dev/null || die "openssl is required to generate the development gateway token"
+  local gateway_token
+  gateway_token="$(openssl rand -base64 48 | tr -d '\n')"
   {
     echo "export LUMEWARP_DEV_MODE=true"
     echo "export LUMEWARP_PLAYGROUND_GATEWAY_URL=http://127.0.0.1:4000"
@@ -134,7 +134,7 @@ prepare() {
     echo "export LUMEWARP_ENCRYPTION_KEY=dev-only-lumewarp-encryption-key-0123456789"
     printf 'export LUMEWARP_BREAK_GLASS_PASSWORD=%q\n' "$break_glass_password"
     echo "export LUMEWARP_INITIAL_ADMIN_EMAIL=alice@example.com"
-    echo "export LUMEWARP_GATEWAY_TOKEN=$token"
+    echo "export LUMEWARP_GATEWAY_ZONE_DEFAULT_TOKEN=$gateway_token"
     # Without an id key the gateway answers 503 on /mcp and /a2a.
     echo "export LUMEWARP_GATEWAY_ID_KEY=ZGV2LW9ubHktbHVtZXdhcnAtZ2F0ZXdheS1pZC1rZXktMDEyMzQ1Njc4OQ=="
     echo "export LUMEWARP_GATEWAY_PUBLIC_URL=http://127.0.0.1:4000"
@@ -213,7 +213,7 @@ run_service() { # mock | mcp | a2a | cp | gw | gw2 | ui
       [[ $1 == gw2 ]] && n=2
       wait_http "$cp_url/healthz" "control plane" # avoids connect-retry warnings at startup
       exec "$root/gateway/target/release/lumewarp" --control-plane http://127.0.0.1:50051 \
-        --gateway-token-env LUMEWARP_GATEWAY_TOKEN --state-dir "$state/gateway$n" \
+        --gateway-token-env LUMEWARP_GATEWAY_ZONE_DEFAULT_TOKEN --state-dir "$state/gateway$n" \
         --zone default --local-config "$state/gateway$n.yaml"
       ;;
     ui) exec pnpm --dir "$root/ui" dev --host 127.0.0.1 --port 5173 --strictPort ;;

@@ -8,6 +8,7 @@ test keeps its retried requests at or below that.
 """
 
 import json
+import uuid
 
 import httpx
 from database_events import DatabaseEvents
@@ -109,20 +110,20 @@ def test_alias_and_direct_model_through_the_control_plane(stack):
 
 
 def _offline_gateway_with(stack, strategy: str) -> None:
-    gateway = "offline-with-strategy"
-    token = stack.ok("POST", "/gateway-tokens", json={"name": gateway})["token"]["id"]
+    # A disconnected row as a real stream leaves it; the id would have been assigned by the
+    # control plane at handshake.
+    gateway = f"offline-with-strategy-{uuid.uuid4().hex[:8]}"
     pg(
         stack.dsn,
-        "INSERT INTO gateway_sessions (zone, gateway_id, token_id, connected, last_seen_at)"
-        " VALUES ('e2e', $1, $2::uuid, false, now())",
+        "INSERT INTO gateway_sessions (zone, gateway_id, connected, last_seen_at)"
+        " VALUES ('e2e', $1, false, now())",
         gateway,
-        token,
     )
     pg(
         stack.dsn,
         "INSERT INTO gateway_plugins"
-        " (zone, gateway_id, kind, name, digest, descriptor, token_id, seen_at)"
-        " VALUES ('e2e', $1, 'router-strategy', $2, 'aa', $3::jsonb, $4::uuid, now())",
+        " (zone, gateway_id, kind, name, digest, descriptor, seen_at)"
+        " VALUES ('e2e', $1, 'router-strategy', $2, 'aa', $3::jsonb, now())",
         gateway,
         strategy,
         json.dumps(
@@ -139,7 +140,6 @@ def _offline_gateway_with(stack, strategy: str) -> None:
                 "schema_problems": [],
             }
         ),
-        token,
     )
 
 

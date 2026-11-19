@@ -74,6 +74,10 @@ spec:
               containerPort: {{ .Values.controlPlane.service.metricsPort }}
               protocol: TCP
             {{- end }}
+          envFrom:
+            # Every key is a LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN; see global.gatewayTokens.
+            - secretRef:
+                name: {{ include "lumewarp.gatewayTokens.secretName" . }}
           env:
             - name: LUMEWARP_DATABASE_URL
               valueFrom:

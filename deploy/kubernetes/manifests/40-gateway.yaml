@@ -109,8 +109,8 @@ spec:
             - name: LUMEWARP_GATEWAY_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: lumewarp-gateway
-                  key: token
+                  name: lumewarp-gateway-tokens
+                  key: LUMEWARP_GATEWAY_ZONE_DEFAULT_TOKEN
             - name: LUMEWARP_ENCRYPTION_KEY
               valueFrom:
                 secretKeyRef:

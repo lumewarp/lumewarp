@@ -18,7 +18,7 @@ else
 fi
 
 common=(
-  --set gateway.token.secretName=gw-token
+  --set global.gatewayTokens.secretName=gw-token
   --set gateway.controlPlaneUrl=http://cp:50051
   --set controlPlane.enabled=false
   --set gateway.otel.endpoint=http://otel:4317

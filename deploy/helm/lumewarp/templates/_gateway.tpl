@@ -7,9 +7,9 @@ missed in the other:
                             per pod from a volumeClaimTemplate, so a restarted pod keeps
                             its cached snapshot
 
-Every pod is a gateway: each process generates its own id at startup and they share one
-token. Rate limits are counted per gateway unless they share a Redis (valkey.enabled or
-gateway.sharedLimits.redis.existingSecret).
+Every pod is a gateway: the control plane assigns each stream an id at handshake and the
+pods share the zone token. Rate limits are counted per gateway unless they share a Redis
+(valkey.enabled or gateway.sharedLimits.redis.existingSecret).
 
 Usage: include "lumewarp.gateway.workload" (dict "root" $ "kind" "Deployment")
 */}}
@@ -32,6 +32,9 @@ Usage: include "lumewarp.gateway.workload" (dict "root" $ "kind" "Deployment")
 {{- end -}}
 {{- $scheme := ternary "https" "http" $root.Values.controlPlane.grpcTls.enabled -}}
 {{- $controlPlaneUrl = printf "%s://%s:%v" $scheme (include "lumewarp.controlPlane.name" $root) $root.Values.controlPlane.service.grpcPort -}}
+{{- end -}}
+{{- if and (not $root.Values.controlPlane.enabled) (not $root.Values.global.gatewayTokens.secretName) -}}
+{{- fail "global.gatewayTokens.secretName is required when controlPlane.enabled=false: the external control plane issues the zone token" -}}
 {{- end -}}
 {{- $zone := $root.Values.global.zone -}}
 {{- $plugins := $values.plugins -}}
@@ -139,8 +142,8 @@ spec:
             - name: LUMEWARP_GATEWAY_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ required "gateway.token.secretName is required" $values.token.secretName }}
-                  key: {{ $values.token.key }}
+                  name: {{ include "lumewarp.gatewayTokens.secretName" $root }}
+                  key: {{ include "lumewarp.gatewayTokenKey" (dict "zone" $zone) }}
             {{- with $values.otel.endpoint }}
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ . | quote }}
