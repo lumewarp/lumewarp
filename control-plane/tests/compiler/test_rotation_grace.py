@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime, timedelta
 
-from lumewarp_control_plane.compiler import compile_scope
+from lumewarp_control_plane.compiler import compile_zone
 from lumewarp_control_plane.models import KeyLifecycle
 from lumewarp_control_plane.security import hash_secret
 from tests import factories
@@ -11,7 +11,7 @@ from tests.compiler.helpers import SCOPE, seed_scope
 
 async def _compiled(factory, now: datetime | None = None):
     async with factory() as session:
-        return await compile_scope(session, SCOPE, now=now, require_local_membership=True)
+        return await compile_zone(session, SCOPE, now=now, require_local_membership=True)
 
 
 def _key(compiled, key_id: str):

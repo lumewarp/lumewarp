@@ -16,11 +16,12 @@ from lumewarp_control_plane.models import (
     ApiKey,
     ConfigOutbox,
     KeyOwnerKind,
-    Scope,
     ScopeType,
     Team,
     TrafficKind,
     UsageTotal,
+    Zone,
+    ZoneLimit,
 )
 from lumewarp_control_plane.models import (
     UsageEvent as UsageEventRow,
@@ -67,20 +68,25 @@ async def _seed(
 ) -> tuple[str, ApiKey]:
     scope_name = f"usage-{uuid7().hex}"
     suffix = uuid7().hex[-12:]
-    async with factory() as session, session.begin():
-        session.add(Scope(name=scope_name))
-        team = await factories.make_team(
-            session,
-            name=f"usage-team-{suffix}",
-            budget_nano_usd=hard_budget,
-        )
-        if owner_kind is KeyOwnerKind.USER:
-            owner = await factories.make_user(session)
-            await factories.make_member(session, team, owner)
-        else:
-            owner = await factories.make_service_account(session, team)
-        key = await factories.make_key(session, team, owner)
-        key_id = key.id
+    previous = factories.DEFAULT_ZONE
+    factories.DEFAULT_ZONE = scope_name
+    try:
+        async with factory() as session, session.begin():
+            session.add(Zone(name=scope_name))
+            team = await factories.make_team(
+                session,
+                name=f"usage-team-{suffix}",
+                budget_nano_usd=hard_budget,
+            )
+            if owner_kind is KeyOwnerKind.USER:
+                owner = await factories.make_user(session)
+                await factories.make_member(session, team, owner)
+            else:
+                owner = await factories.make_service_account(session, team)
+            key = await factories.make_key(session, team, owner)
+            key_id = key.id
+    finally:
+        factories.DEFAULT_ZONE = previous
     async with factory() as session:
         key = await session.get(ApiKey, key_id)
         assert key is not None
@@ -113,7 +119,7 @@ async def test_duplicate_batch_replay_counts_once(session_factory: SessionFactor
 
     for _ in range(2):
         async with session_factory() as session, session.begin():
-            assert await ingest(session, "gateway-a", [event], scope_name=scope_name) == 1
+            assert await ingest(session, "gateway-a", [event], zone=scope_name) == 1
 
     async with session_factory() as session:
         total = await session.scalar(
@@ -143,7 +149,7 @@ async def test_duplicate_batch_replay_counts_once(session_factory: SessionFactor
     changed = usage_pb2.UsageEvent.FromString(event.SerializeToString())
     changed.cost_nano_usd += 1
     async with session_factory() as session, session.begin():
-        assert await ingest(session, "gateway-a", [changed], scope_name=scope_name) == 0
+        assert await ingest(session, "gateway-a", [changed], zone=scope_name) == 0
     async with session_factory() as session:
         stored = await session.scalar(
             select(UsageEventRow).where(UsageEventRow.request_id == uuid.UUID(event.request_id))
@@ -156,13 +162,13 @@ async def test_conflicting_replay_skips_only_that_event(session_factory: Session
     scope_name, key = await _seed(session_factory)
     existing = _event(key, cost=10)
     async with session_factory() as session, session.begin():
-        await ingest(session, "gateway-a", [existing], scope_name=scope_name)
+        await ingest(session, "gateway-a", [existing], zone=scope_name)
 
     changed = usage_pb2.UsageEvent.FromString(existing.SerializeToString())
     changed.requested = "different-requested"
     other = _event(key, cost=20)
     async with session_factory() as session, session.begin():
-        assert await ingest(session, "gateway-a", [other, changed], scope_name=scope_name) == 1
+        assert await ingest(session, "gateway-a", [other, changed], zone=scope_name) == 1
 
     async with session_factory() as session:
         assert (
@@ -193,7 +199,7 @@ async def test_concurrent_reports_flip_budget_once(session_factory: SessionFacto
 
     async def report(event: usage_pb2.UsageEvent) -> int:
         async with session_factory() as session, session.begin():
-            return await ingest(session, "gateway-a", [event], scope_name=scope_name)
+            return await ingest(session, "gateway-a", [event], zone=scope_name)
 
     assert await asyncio.gather(*(report(event) for event in events)) == [1, 1]
     async with session_factory() as session:
@@ -211,7 +217,7 @@ async def test_concurrent_reports_flip_budget_once(session_factory: SessionFacto
                 select(func.count())
                 .select_from(ConfigOutbox)
                 .where(
-                    ConfigOutbox.scope == scope_name,
+                    ConfigOutbox.zone == scope_name,
                     ConfigOutbox.reason == "usage budget exceeded",
                 )
             )
@@ -224,17 +230,19 @@ async def test_budget_raise_crossing_recompiles_again(session_factory: SessionFa
     scope_name, key = await _seed(session_factory, hard_budget=100)
     first = _event(key, cost=120)
     async with session_factory() as session, session.begin():
-        await ingest(session, "gateway-a", [first], scope_name=scope_name)
+        await ingest(session, "gateway-a", [first], zone=scope_name)
 
     async with session_factory() as session, session.begin():
-        team = await session.get(Team, key.team_id)
-        assert team is not None
-        team.budget_nano_usd = 200
-        await outbox.enqueue_recompile(session, scope_name, "api.budget.update")
+        limit = await session.scalar(
+            select(ZoneLimit).where(ZoneLimit.zone == scope_name, ZoneLimit.team_id == key.team_id)
+        )
+        assert limit is not None
+        limit.budget_nano_usd = 200
+        await outbox.enqueue_recompile(session, "api.budget.update", scope_name)
 
     second = _event(key, cost=100)
     async with session_factory() as session, session.begin():
-        await ingest(session, "gateway-a", [second], scope_name=scope_name)
+        await ingest(session, "gateway-a", [second], zone=scope_name)
 
     async with session_factory() as session:
         assert (
@@ -242,7 +250,7 @@ async def test_budget_raise_crossing_recompiles_again(session_factory: SessionFa
                 select(func.count())
                 .select_from(ConfigOutbox)
                 .where(
-                    ConfigOutbox.scope == scope_name,
+                    ConfigOutbox.zone == scope_name,
                     ConfigOutbox.reason.in_(("usage budget exceeded", "api.budget.update")),
                 )
             )
@@ -258,7 +266,7 @@ async def test_late_previous_month_event_uses_its_event_window(session_factory: 
     event = _event(key, timestamp=previous, cost=2)
 
     async with session_factory() as session, session.begin():
-        assert await ingest(session, "gateway-a", [event], scope_name=scope_name) == 1
+        assert await ingest(session, "gateway-a", [event], zone=scope_name) == 1
 
     previous_window = month_window(previous)[0]
     async with session_factory() as session:
@@ -287,7 +295,7 @@ async def test_late_previous_month_event_uses_its_event_window(session_factory: 
                 select(func.count())
                 .select_from(ConfigOutbox)
                 .where(
-                    ConfigOutbox.scope == scope_name,
+                    ConfigOutbox.zone == scope_name,
                     ConfigOutbox.reason == "usage budget exceeded",
                 )
             )
@@ -314,7 +322,7 @@ async def test_invalid_events_do_not_cost_the_rest_of_the_batch(
 
     async with session_factory() as session, session.begin():
         # valid and its identical duplicate count; the four invalid events are skipped.
-        assert await ingest(session, "gateway-a", batch, scope_name=scope_name) == 2
+        assert await ingest(session, "gateway-a", batch, zone=scope_name) == 2
 
     async with session_factory() as session:
         rows = (
@@ -355,7 +363,7 @@ async def test_rejected_events_may_omit_requested_and_model(session_factory: Ses
 
     batch = [completed, unauthenticated, rate_limited, completed_without_model]
     async with session_factory() as session, session.begin():
-        assert await ingest(session, "gateway-a", batch, scope_name=scope_name) == 3
+        assert await ingest(session, "gateway-a", batch, zone=scope_name) == 3
 
     async with session_factory() as session:
         stored = {
@@ -402,7 +410,7 @@ async def test_an_mcp_event_is_stored_with_kind_target_method_and_tool(
     event = _mcp_event(key)
     llm = _event(key, cost=5)
     async with session_factory() as session, session.begin():
-        assert await ingest(session, "gateway-a", [event, llm], scope_name=scope_name) == 2
+        assert await ingest(session, "gateway-a", [event, llm], zone=scope_name) == 2
 
     async with session_factory() as session:
         stored = {
@@ -447,7 +455,7 @@ async def test_a_non_llm_event_may_not_carry_llm_fields(session_factory: Session
     llm.method = "tools/call"
     carried.append(llm)
     async with session_factory() as session, session.begin():
-        assert await ingest(session, "gateway-a", carried, scope_name=scope_name) == 0
+        assert await ingest(session, "gateway-a", carried, zone=scope_name) == 0
     async with session_factory() as session:
         assert (
             await session.scalar(
@@ -466,7 +474,7 @@ async def test_an_unspecified_kind_is_an_llm_event(session_factory: SessionFacto
     event = _event(key)
     assert event.kind == usage_pb2.TRAFFIC_KIND_UNSPECIFIED
     async with session_factory() as session, session.begin():
-        assert await ingest(session, "gateway-a", [event], scope_name=scope_name) == 1
+        assert await ingest(session, "gateway-a", [event], zone=scope_name) == 1
     async with session_factory() as session:
         row = await session.scalar(
             select(UsageEventRow).where(UsageEventRow.request_id == uuid.UUID(event.request_id))
@@ -480,7 +488,7 @@ async def test_monthly_rollover_runs_on_startup(session_factory: SessionFactory,
 
     scope_name = f"rollover-{uuid7().hex}"
     async with session_factory() as session, session.begin():
-        session.add(Scope(name=scope_name))
+        session.add(Zone(name=scope_name))
     from lumewarp_control_plane.settings import Settings
 
     rolled_over = asyncio.Event()
@@ -491,7 +499,7 @@ async def test_monthly_rollover_runs_on_startup(session_factory: SessionFactory,
         rolled_over.set()
 
     monkeypatch.setattr(usage, "_rollover_once", rollover)
-    task = asyncio.create_task(rollover_scheduler(Settings(scope=scope_name), session_factory))
+    task = asyncio.create_task(rollover_scheduler(Settings(zone=scope_name), session_factory))
     try:
         async with asyncio.timeout(2):
             await rolled_over.wait()
@@ -500,7 +508,7 @@ async def test_monthly_rollover_runs_on_startup(session_factory: SessionFactory,
                 select(func.count())
                 .select_from(ConfigOutbox)
                 .where(
-                    ConfigOutbox.scope == scope_name,
+                    ConfigOutbox.zone == scope_name,
                     ConfigOutbox.reason == "monthly budget rollover",
                 )
             )
@@ -516,7 +524,7 @@ async def test_key_supplies_owner_and_exactly_two_totals(session_factory, owner_
     scope_name, key = await _seed(session_factory, owner_kind=owner_kind)
     event = _event(key, cost=17)
     async with session_factory() as session, session.begin():
-        assert await ingest(session, "gateway-owner", [event], scope_name=scope_name) == 1
+        assert await ingest(session, "gateway-owner", [event], zone=scope_name) == 1
     async with session_factory() as session:
         stored = await session.scalar(
             select(UsageEventRow).where(UsageEventRow.request_id == uuid.UUID(event.request_id))
@@ -557,7 +565,7 @@ async def test_late_usage_for_an_archived_team_still_attributes_owner_and_totals
         team.deleted_at = datetime.now(UTC)
     event = _event(key, cost=23)
     async with session_factory() as session, session.begin():
-        assert await ingest(session, "gateway-archive", [event], scope_name=scope_name) == 1
+        assert await ingest(session, "gateway-archive", [event], zone=scope_name) == 1
     async with session_factory() as session:
         stored = await session.scalar(
             select(UsageEventRow).where(UsageEventRow.request_id == uuid.UUID(event.request_id))
@@ -584,9 +592,7 @@ async def test_batch_at_configured_maximum_is_ingested(session_factory: SessionF
     events.reverse()
     async with session_factory() as session, session.begin():
         assert (
-            await ingest(
-                session, "gateway-a", events, scope_name=scope_name, max_batch_events=maximum
-            )
+            await ingest(session, "gateway-a", events, zone=scope_name, max_batch_events=maximum)
             == maximum
         )
     async with session_factory() as session:
@@ -601,9 +607,7 @@ async def test_batch_at_configured_maximum_is_ingested(session_factory: SessionF
     # Replaying the full batch is idempotent.
     async with session_factory() as session, session.begin():
         assert (
-            await ingest(
-                session, "gateway-a", events, scope_name=scope_name, max_batch_events=maximum
-            )
+            await ingest(session, "gateway-a", events, zone=scope_name, max_batch_events=maximum)
             == maximum
         )
     with pytest.raises(InvalidUsageBatch, match="maximum"):
@@ -612,7 +616,7 @@ async def test_batch_at_configured_maximum_is_ingested(session_factory: SessionF
                 session,
                 "gateway-a",
                 [*events, _event(key)],
-                scope_name=scope_name,
+                zone=scope_name,
                 max_batch_events=maximum,
             )
 
@@ -634,14 +638,14 @@ async def test_zero_budget_recompiles_once_for_zero_cost_batches(session_factory
         event.cost_known = False
         event.usage_state = usage_pb2.USAGE_STATE_MISSING
         async with session_factory() as session, session.begin():
-            await ingest(session, "gateway-a", [event], scope_name=scope_name)
+            await ingest(session, "gateway-a", [event], zone=scope_name)
     async with session_factory() as session:
         assert (
             await session.scalar(
                 select(func.count())
                 .select_from(ConfigOutbox)
                 .where(
-                    ConfigOutbox.scope == scope_name,
+                    ConfigOutbox.zone == scope_name,
                     ConfigOutbox.reason == "usage budget exceeded",
                 )
             )
@@ -675,7 +679,7 @@ async def test_ingest_reports_bounded_skip_reasons(session_factory: SessionFacto
     skipped: Counter[str] = Counter()
     async with session_factory() as session, session.begin():
         accepted = await ingest(
-            session, "gateway-a", _skip_batch(key), scope_name=scope_name, skipped=skipped
+            session, "gateway-a", _skip_batch(key), zone=scope_name, skipped=skipped
         )
     assert accepted == 2
     assert skipped == {"key_mismatch": 2, "invalid_event": 2, "request_id_conflict": 1}
@@ -684,14 +688,12 @@ async def test_ingest_reports_bounded_skip_reasons(session_factory: SessionFacto
     # A different stored event under a known request id is a conflict, too.
     stored = _event(key)
     async with session_factory() as session, session.begin():
-        await ingest(session, "gateway-a", [stored], scope_name=scope_name)
+        await ingest(session, "gateway-a", [stored], zone=scope_name)
     changed = usage_pb2.UsageEvent.FromString(stored.SerializeToString())
     changed.cost_nano_usd = 99
     skipped.clear()
     async with session_factory() as session, session.begin():
-        accepted = await ingest(
-            session, "gateway-a", [changed], scope_name=scope_name, skipped=skipped
-        )
+        accepted = await ingest(session, "gateway-a", [changed], zone=scope_name, skipped=skipped)
     assert accepted == 0
     assert skipped == {"request_id_conflict": 1}
 
@@ -719,7 +721,7 @@ async def test_usage_report_metrics_count_committed_events(
         async def abort(self, code, details):
             raise Aborted(details)
 
-    service = grpc_module._UsageService(Settings(scope=scope_name), session_factory, metrics)
+    service = grpc_module._UsageService(Settings(zone=scope_name), session_factory, metrics)
     response = await service.Report(
         usage_pb2.ReportRequest(gateway_id="gateway-a", events=_skip_batch(key)), Context()
     )
@@ -735,7 +737,7 @@ async def test_usage_report_metrics_count_committed_events(
     # A batch-level rejection commits nothing and counts nothing.
     too_many = [_event(key) for _ in range(3)]
     small = grpc_module._UsageService(
-        Settings(scope=scope_name, max_usage_batch_events=2), session_factory, metrics
+        Settings(zone=scope_name, max_usage_batch_events=2), session_factory, metrics
     )
     with pytest.raises(Aborted):
         await small.Report(
@@ -778,7 +780,7 @@ async def test_provenance_fields_are_stored_with_rejected_requests(
     rejected.outcome = usage_pb2.REQUEST_OUTCOME_REJECTED
     batch = [event, rejected]
     async with session_factory() as session, session.begin():
-        assert await ingest(session, "gateway-a", batch, scope_name=scope_name) == 2
+        assert await ingest(session, "gateway-a", batch, zone=scope_name) == 2
         row = await session.scalar(
             select(UsageEventRow).where(UsageEventRow.request_id == uuid.UUID(event.request_id))
         )

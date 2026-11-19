@@ -10,7 +10,7 @@ import { CheckField, NumberField, SelectField, TextField, useForm } from "../com
 import { PluginRefFields, targetNameProblem } from "../components/PluginRefFields";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
-import { useMcpServers, useMut, usePlugins } from "../hooks";
+import { useCatalogZone, useMcpServers, useMut, usePlugins } from "../hooks";
 import { parseSchema, sameJson, validateValues, type Values as Params } from "../lib/schema";
 import { PageLoading } from "./Access";
 import { McpDefinitions } from "./McpDefinitions";
@@ -138,6 +138,7 @@ export function McpServerEdit() {
   const { serverId } = useParams({ strict: false }) as { serverId?: string };
   const list = useMcpServers();
   const existing = serverId ? list.data?.find((s) => s.id === serverId) : undefined;
+  const { zone, zoneLabel } = useCatalogZone(existing);
   if (serverId && list.isPending) return <PageLoading />;
   if (serverId && !existing) {
     return (
@@ -146,12 +147,12 @@ export function McpServerEdit() {
       </Alert>
     );
   }
-  return <McpServerForm key={existing?.id ?? "new"} existing={existing} />;
+  return <McpServerForm key={`${existing?.id ?? "new"}@${zone}`} existing={existing} zone={zone} zoneLabel={zoneLabel} />;
 }
 
-function McpServerForm({ existing }: { existing?: McpServer }) {
+function McpServerForm({ existing, zone, zoneLabel }: { existing?: McpServer; zone: string; zoneLabel: string }) {
   const navigate = useNavigate();
-  const plugins = usePlugins("upstream-auth");
+  const plugins = usePlugins("upstream-auth", true, undefined, zone);
   const initial = existing ? fromServer(existing) : blank;
   const [submitted, setSubmitted] = useState(false);
   const [jsonProblem, setJsonProblem] = useState<string | null>(null);
@@ -179,13 +180,14 @@ function McpServerForm({ existing }: { existing?: McpServer }) {
   const schemaErrors = parsed ? Object.fromEntries(Object.entries(validateValues(parsed.fields, v.params)).map(([path, message]) => [`params.${path}`, message])) : {};
 
   const save = useMut(
-    (values: Values) => (existing ? api.updateMcpServer(existing.id, body(values, existing, missing.length > 0)) : api.createMcpServer(createBody(values, missing.length > 0))),
+    (values: Values) => (existing ? api.updateMcpServer(existing.id, body(values, existing, missing.length > 0)) : api.createMcpServer({ ...createBody(values, missing.length > 0), zone })),
     existing ? "MCP server saved" : "MCP server created",
   );
 
   return (
     <EditPage
-      title={existing ? existing.name : "New MCP server"}
+      title={existing ? existing.name : `New MCP server in ${zoneLabel}`}
+      description={existing ? `Zone ${zoneLabel}` : undefined}
       back="/mcp-servers"
       backLabel="MCP servers"
       dirty={dirty}
@@ -212,6 +214,7 @@ function McpServerForm({ existing }: { existing?: McpServer }) {
       <Section title="Auth" hint="Sent to the upstream on every request; the client's own credentials are never forwarded.">
         <PluginRefFields
           kind="upstream-auth"
+          zone={zone}
           value={{ plugin: v.plugin, params: v.params, timeout_ms: v.plugin_timeout_ms ?? 0 }}
           onChange={(next) => {
             form.set("plugin", next.plugin);

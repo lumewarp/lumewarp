@@ -360,6 +360,7 @@ class Action(StrEnum):
     # Upstreams, models, aliases, routers, strategies: prices and routing details.
     ROUTING_READ = "routing.read"
     GATEWAY_TOKEN_MANAGE = "gateway_token.manage"
+    ZONE_MANAGE = "zone.manage"  # create, edit, archive zones
     GATEWAY_READ = "gateway.read"
     CONFIG_READ = "config.read"  # config versions
     CONFIG_ROLLBACK = "config.rollback"
@@ -400,6 +401,7 @@ MATRIX: dict[Action, Rule] = {
             Action.ROUTING_MANAGE,
             Action.ROUTING_READ,
             Action.GATEWAY_TOKEN_MANAGE,
+            Action.ZONE_MANAGE,
             Action.GATEWAY_READ,
             Action.CONFIG_READ,
             Action.CONFIG_ROLLBACK,

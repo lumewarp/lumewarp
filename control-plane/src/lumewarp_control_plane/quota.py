@@ -5,9 +5,11 @@ is validated against is the same value the gateway enforces:
 
 - models: the intersection down the chain (`ModelAccess.INHERIT`/`ALL` keep the parent,
   `LIST` intersects). An org is the root and is never INHERIT.
-- limits: the minimum down the chain. A member's exception value wins over the team's
-  `member_*_default`; the result is still clamped by the team. Service accounts have no
-  member default: only their own policy (INHERIT by default) applies.
+- limits: the minimum down the chain, resolved per zone. The same grants apply in every
+  zone, but an org/team/member/service-account level may set different limits in each
+  (`zone_limits`). A member's exception value wins over the team's per-zone member
+  defaults (`zone_member_defaults`); the result is still clamped by the team's zone limit.
+  Service accounts have no member default: only their own zone limit applies.
 - budgets: not combined into one number. Each level keeps its own monthly budget and
   spend; the remaining amount is `min(org, team, owner)` of each level's own remaining
   (see `remaining_nano_usd`).
@@ -36,6 +38,8 @@ from lumewarp_control_plane.models import (
     ScopeType,
     ServiceAccount,
     Team,
+    ZoneLimit,
+    ZoneMemberDefaults,
 )
 
 # None means the universal model set (every name in the catalog).
@@ -107,21 +111,26 @@ class Effective:
 
 
 PolicyRow = Org | Team | MemberPolicy | ServiceAccount
+# A zone limit row, or a team's member defaults: both carry the three limiter values.
+LimitRow = ZoneLimit | ZoneMemberDefaults | None
 
 
-def policy_of(row: PolicyRow) -> Policy:
-    """The row's own (stored) policy. `allowed_models`, `allowed_groups` and
-    `granted_models` (direct names plus group members) are loaded columns.
+def policy_of(row: PolicyRow, limits: LimitRow = None) -> Policy:
+    """The row's own (stored) policy in one zone.
+
+    `allowed_models`, `allowed_groups` and `granted_models` (direct names plus group
+    members) are loaded columns and global; limits and the budget come from the zone's
+    `zone_limits` row (`None` = no limit in this zone).
     """
     return Policy(
         model_access=row.model_access,
         allowed_models=tuple(row.allowed_models or ()),
         allowed_groups=tuple(row.allowed_groups or ()),
         group_models=tuple(row.granted_models or ()),
-        rpm_limit=row.rpm_limit,
-        tpm_limit=row.tpm_limit,
-        max_parallel=row.max_parallel,
-        budget_nano_usd=row.budget_nano_usd,
+        rpm_limit=getattr(limits, "rpm_limit", None),
+        tpm_limit=getattr(limits, "tpm_limit", None),
+        max_parallel=getattr(limits, "max_parallel", None),
+        budget_nano_usd=getattr(limits, "budget_nano_usd", None),
         mcp_access=row.mcp_access,
         mcp_grants=tuple(
             McpGrant(
@@ -137,12 +146,12 @@ def policy_of(row: PolicyRow) -> Policy:
 
 
 def apply_policy(row: PolicyRow, policy: Policy) -> None:
-    """Scalar policy columns; `save_grants` writes the lists once the row has its id."""
+    """The grant columns; `save_grants` writes the lists once the row has its id.
+
+    Limits and budgets are not on this row any more: callers write `zone_limits` through
+    `api.zone_limits`.
+    """
     row.model_access = policy.model_access
-    row.rpm_limit = policy.rpm_limit
-    row.tpm_limit = policy.tpm_limit
-    row.max_parallel = policy.max_parallel
-    row.budget_nano_usd = policy.budget_nano_usd
     row.mcp_access = policy.mcp_access
     row.a2a_access = policy.a2a_access
 
@@ -241,44 +250,46 @@ def effective(parent: Effective | None, policy: Policy) -> Effective:
     )
 
 
-def org_effective(org: Org) -> Effective:
-    """The root of the hierarchy; an org cannot inherit."""
-    return effective(None, policy_of(org))
+def org_effective(org: Org, limits: ZoneLimit | None = None) -> Effective:
+    """The root of the hierarchy in one zone; an org cannot inherit."""
+    return effective(None, policy_of(org, limits))
 
 
-def team_effective(org_effective_policy: Effective, team: Team) -> Effective:
-    return effective(org_effective_policy, policy_of(team))
+def team_effective(
+    org_effective_policy: Effective, team: Team, limits: ZoneLimit | None = None
+) -> Effective:
+    return effective(org_effective_policy, policy_of(team, limits))
 
 
-def member_defaults(team: Team) -> Policy:
-    """The member level's default limits, as a policy with no models and no budget."""
+def member_defaults(defaults: ZoneMemberDefaults | None) -> Policy:
+    """The member level's default limits in one zone, as a policy with no models/budget."""
     return Policy(
         model_access=ModelAccess.INHERIT,
         allowed_models=(),
-        rpm_limit=team.member_rpm_default,
-        tpm_limit=team.member_tpm_default,
-        max_parallel=team.member_max_parallel_default,
+        rpm_limit=getattr(defaults, "rpm_limit", None),
+        tpm_limit=getattr(defaults, "tpm_limit", None),
+        max_parallel=getattr(defaults, "max_parallel", None),
     )
 
 
 def owner_effective(
     team_effective_policy: Effective,
-    team: Team,
+    defaults: ZoneMemberDefaults | None,
     policy: Policy | None,
     *,
     service_account: bool,
 ) -> Effective:
-    """One key owner's effective policy: `exception ?? default`, clamped by the team.
+    """One key owner's effective policy in a zone: `exception ?? default`, clamped by team.
 
     `policy is None` is the external-backend case: there is no `member_policies` row, so
-    the team's member defaults and model set apply. A service account never takes the
-    member defaults; its own row (INHERIT by default) narrows the team.
+    the zone's member defaults and the team's model set apply. A service account never
+    takes the member defaults; its own row (INHERIT by default) narrows the team.
     """
     own = policy if policy is not None else Policy(ModelAccess.INHERIT, ())
     resolved = effective(team_effective_policy, own)
     if service_account:
         return resolved
-    default = member_defaults(team)
+    default = member_defaults(defaults)
     return Effective(
         models=resolved.models,
         rpm_limit=_limit(
@@ -333,13 +344,16 @@ def resolve_effective(
     org: Org,
     team: Team,
     *,
+    org_limits: ZoneLimit | None = None,
+    team_limits: ZoneLimit | None = None,
+    defaults: ZoneMemberDefaults | None = None,
     owner_policy: Policy | None = None,
     service_account: bool = False,
 ) -> Effective:
-    """The one resolver: org -> team -> owner. See the module docstring."""
+    """The one resolver for one zone: org -> team -> owner. See the module docstring."""
     return owner_effective(
-        team_effective(org_effective(org), team),
-        team,
+        team_effective(org_effective(org, org_limits), team, team_limits),
+        defaults,
         owner_policy,
         service_account=service_account,
     )

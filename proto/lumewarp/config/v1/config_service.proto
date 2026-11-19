@@ -10,7 +10,7 @@ import "lumewarp/config/v1/snapshot.proto";
 // At most one update per stream is un-ACKed at a time. ACK means the version
 // is validated, durably persisted and active. See docs/config-protocol.md.
 // The gateway authenticates with `authorization: Bearer <gateway token>`
-// metadata; the token authenticates its scope, and any number of gateways may
+// metadata; the token authenticates its zone, and any number of gateways may
 // use one token.
 service ConfigService {
   // buf:lint:ignore RPC_REQUEST_STANDARD_NAME
@@ -92,8 +92,8 @@ message Hello {
   // Diagnostic only.
   string gateway_version = 3;
   repeated string supported_capabilities = 4;
-  // Scope of the on-disk snapshot, empty if none.
-  string scope = 5;
+  // Zone of the on-disk snapshot, empty if none.
+  string zone = 5;
   // ConfigUpdate.target_digest of the on-disk snapshot (empty if none). The
   // control plane sends a delta only if this equals the digest it stored for
   // have_version; otherwise (e.g. after a control-plane restore) a full.
@@ -118,7 +118,7 @@ message SharedLimits {
   // True when the gateway shares its counters with other gateways, instead of
   // counting per process.
   bool enabled = 1;
-  // The shared counters' namespace (the scope in control-plane mode); empty when
+  // The shared counters' namespace (the zone in control-plane mode); empty when
   // disabled.
   string namespace = 2;
 }
@@ -225,11 +225,11 @@ enum NackCode {
   // Delta base != gateway's version; control plane answers with a full.
   NACK_CODE_BASE_MISMATCH = 1;
   // Snapshot failed validation; the control plane quarantines the version for
-  // the whole scope, so no gateway in it is sent that version until a newer
+  // the whole zone, so no gateway in it is sent that version until a newer
   // one exists.
   NACK_CODE_INVALID_CONFIG = 2;
   // The gateway lacks a plugin or capability the snapshot needs; only that
-  // gateway skips the version, the others in the scope still receive it.
+  // gateway skips the version, the others in the zone still receive it.
   NACK_CODE_UNSUPPORTED_FEATURE = 3;
   // Could not persist to disk; control plane may retry with backoff.
   NACK_CODE_PERSIST_FAILED = 4;

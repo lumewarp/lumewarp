@@ -69,10 +69,12 @@ interface Props {
   wasmOnly?: boolean;
   /** A JSON editor problem, or null once the text parses again. */
   onProblem?: (message: string | null) => void;
+  /** The zone whose gateways report the plugins; default: the default zone. */
+  zone?: string;
 }
 
-export function PluginRefFields({ kind, value, onChange, errors = {}, allowNone = false, wasmOnly = false, onProblem }: Props) {
-  const plugins = usePlugins(kind);
+export function PluginRefFields({ kind, value, onChange, errors = {}, allowNone = false, wasmOnly = false, onProblem, zone }: Props) {
+  const plugins = usePlugins(kind, true, undefined, zone);
   const listed = plugins.data;
   const allowed = useMemo(() => (listed ?? []).filter((p) => !wasmOnly || !p.builtin), [listed, wasmOnly]);
   const current = useMemo(() => listed?.find((p) => p.name === value.plugin), [listed, value.plugin]);

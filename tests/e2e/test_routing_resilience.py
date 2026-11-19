@@ -57,7 +57,7 @@ def test_unregistered_custom_strategy_nacks_and_keeps_last_snapshot(stack):
         assert "force" in refused.text
         stack.ok("POST", "/routers", json={**body, "force": True})
         revision = pg(
-            stack.dsn, "SELECT source_revision FROM scopes WHERE name = 'e2e'"
+            stack.dsn, "SELECT source_revision FROM zones WHERE name = 'e2e'"
         )[0][0]
         events.wait(
             lambda: pg(
@@ -113,7 +113,7 @@ def _offline_gateway_with(stack, strategy: str) -> None:
     token = stack.ok("POST", "/gateway-tokens", json={"name": gateway})["token"]["id"]
     pg(
         stack.dsn,
-        "INSERT INTO gateway_sessions (scope, gateway_id, token_id, connected, last_seen_at)"
+        "INSERT INTO gateway_sessions (zone, gateway_id, token_id, connected, last_seen_at)"
         " VALUES ('e2e', $1, $2::uuid, false, now())",
         gateway,
         token,
@@ -121,7 +121,7 @@ def _offline_gateway_with(stack, strategy: str) -> None:
     pg(
         stack.dsn,
         "INSERT INTO gateway_plugins"
-        " (scope, gateway_id, kind, name, digest, descriptor, token_id, seen_at)"
+        " (zone, gateway_id, kind, name, digest, descriptor, token_id, seen_at)"
         " VALUES ('e2e', $1, 'router-strategy', $2, 'aa', $3::jsonb, $4::uuid, now())",
         gateway,
         strategy,
@@ -164,10 +164,7 @@ def _bad_upstream(stack, **settings) -> str:
 
 
 def _model(stack, name: str, upstream_id: str, **settings) -> str:
-    return stack.ok(
-        "POST",
-        "/models",
-        json={
+    return stack.create_model({
             "name": name,
             "upstream_id": upstream_id,
             "upstream_model": "mock",
@@ -389,7 +386,7 @@ def test_uri_contract_snapshot_is_accepted_by_gateway(stack):
             },
         )
         revision = pg(
-            stack.dsn, "SELECT source_revision FROM scopes WHERE name = 'e2e'"
+            stack.dsn, "SELECT source_revision FROM zones WHERE name = 'e2e'"
         )[0][0]
         events.wait(
             lambda: (
@@ -471,6 +468,6 @@ def test_failing_model_chat_check_takes_only_that_model_out(stack):
     assert _attempts(gw, "bad-a") == 0, "an unhealthy model gets no traffic"
     assert _attempts(gw, "good-a") == 20
 
-    health = lambda mid: stack.ok("GET", f"/models/{mid}")["health"]  # noqa: E731
+    health = lambda mid: stack.deployment(mid)["health"]  # noqa: E731
     wait_for(lambda: health(bad_id) == "unhealthy", 15, "bad-a reported unhealthy")
     wait_for(lambda: health(good_id) == "healthy", 15, "good-a reported healthy")

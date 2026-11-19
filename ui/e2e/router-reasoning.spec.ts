@@ -1,5 +1,6 @@
 import { expect, test, type APIRequestContext } from "@playwright/test";
 
+import { createModel } from "./catalog-helpers";
 import { control, pick, shot } from "./helpers";
 import { signIn, VIEWER } from "./selfService";
 
@@ -22,12 +23,7 @@ test.afterEach(async ({ request }) => {
 
 async function mappedModel(request: APIRequestContext, upstreamId: string, name: string, levels: string[]) {
   const fragments = Object.fromEntries(levels.map((l) => [l, { chat_template_kwargs: { enable_thinking: l !== "none" } }]));
-  const response = await request.post("/api/v1/models", {
-    headers: admin,
-    data: { model_type: "llm", name, upstream_id: upstreamId, upstream_model: "qwen", reasoning: { mode: "mapped", fragments, default_level: null } },
-  });
-  expect(response.status()).toBe(201);
-  return (await response.json()) as { id: string };
+  return createModel(request, admin, { model_type: "llm", name, upstream_id: upstreamId, upstream_model: "qwen", reasoning: { mode: "mapped", fragments, default_level: null } });
 }
 
 test("router reasoning: the default level is limited to the shared levels and persists", async ({ page, request }) => {

@@ -21,7 +21,7 @@ from tests.api.helpers import ADMIN_AUTH, auth, suffix, user_with_token
 
 def _version(scope: str, version: int, *, kind=ConfigVersionKind.COMPILE, rollback_of=None):
     return ConfigVersion(
-        scope=scope,
+        zone=scope,
         version=version,
         payload=b"{}",
         digest=b"x" * 32,
@@ -36,7 +36,7 @@ def _version(scope: str, version: int, *, kind=ConfigVersionKind.COMPILE, rollba
 def _token(scope: str, name: str) -> GatewayToken:
     secret = generate_secret(SecretKind.GATEWAY_TOKEN)
     return GatewayToken(
-        scope=scope,
+        zone=scope,
         name=name,
         token_hash=secret.hash,
         display_prefix=secret.display_prefix,
@@ -62,7 +62,7 @@ async def test_gateway_tokens(client, committed, api_scope) -> None:
     # A session row is one gateway, and it names the token it authenticated with.
     committed.add(
         GatewaySession(
-            scope=api_scope,
+            zone=api_scope,
             gateway_id=f"gw-{suffix()}",
             token_id=token["id"],
             connected=True,
@@ -187,7 +187,7 @@ async def test_gateways_are_listed_one_per_process_connected_first(
     committed.add_all(
         [
             GatewaySession(
-                scope=api_scope,
+                zone=api_scope,
                 gateway_id=connected_id,
                 token_id=token.id,
                 connected=True,
@@ -205,7 +205,7 @@ async def test_gateways_are_listed_one_per_process_connected_first(
                 shared_limits_namespace="team-ns",
             ),
             GatewaySession(
-                scope=api_scope,
+                zone=api_scope,
                 gateway_id=offline_id,
                 token_id=token.id,
                 connected=False,
@@ -250,7 +250,7 @@ async def test_config_version_marks_the_scope_quarantined_version(
     client, committed, api_scope
 ) -> None:
     committed.add_all([_version(api_scope, 101), _version(api_scope, 102)])
-    committed.add(GatewayQuarantine(scope=api_scope, quarantined_version=102))
+    committed.add(GatewayQuarantine(zone=api_scope, quarantined_version=102))
     await committed.commit()
     try:
         listed = client.get("/api/v1/config/versions?limit=500", headers=ADMIN_AUTH).json()
@@ -259,6 +259,6 @@ async def test_config_version_marks_the_scope_quarantined_version(
         assert flags[102] is True
     finally:
         await committed.execute(
-            delete(GatewayQuarantine).where(GatewayQuarantine.scope == api_scope)
+            delete(GatewayQuarantine).where(GatewayQuarantine.zone == api_scope)
         )
         await committed.commit()

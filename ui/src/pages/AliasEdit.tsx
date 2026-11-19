@@ -7,6 +7,8 @@ import { EditPage, Section } from "../components/EditPage";
 import { required, TextField, useForm } from "../components/Form";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { useAliases, useMut } from "../hooks";
+import { useZone } from "../zone";
+import { NotAvailableWarning, unavailableHere } from "./Routers";
 
 interface Values {
   name: string;
@@ -31,6 +33,7 @@ export function AliasEdit() {
 
 function AliasForm({ existing }: { existing?: Alias }) {
   const navigate = useNavigate();
+  const { name: zone, zone: zoneRow } = useZone();
   const [initial] = useState<Values>(() => (existing ? { name: existing.name, target: existing.target } : blank));
   const form = useForm<Values>(initial, {
     name: required("Name"),
@@ -59,6 +62,7 @@ function AliasForm({ existing }: { existing?: Alias }) {
         await navigate({ to: "/aliases" });
       }}
     >
+      {existing && unavailableHere(existing, zone) && <NotAvailableWarning what="alias" zoneLabel={zoneRow?.display_name || zone} />}
       <Section title="Alias">
         <TextField label="Name" value={v.name} onChange={(x) => form.set("name", x)} error={form.errors.name} autoFocus={!existing} hint="Must be unique across models, aliases and routers." />
         <CatalogFilter

@@ -25,7 +25,7 @@ from tests.usage.test_catalog_provenance import TS, key_for, wire
 @pytest.mark.parametrize("kind", ["llm", "embedding", "transcription", "decision"])
 def test_explicit_type_round_trip(client, kind):
     up = _upstream(client)
-    body = {"name": suffix(), "upstream_id": up["id"], "upstream_model": "m"}
+    body = {"name": suffix()}
     assert client.post("/api/v1/models", json=body, headers=ADMIN_AUTH).status_code == 422
     model = _model(client, up, model_type=kind)
     assert model["model_type"] == kind
@@ -62,13 +62,7 @@ def test_explicit_type_round_trip(client, kind):
 )
 def test_invalid_type_settings_on_create_and_patch(client, kind, settings):
     up = _upstream(client)
-    body = {
-        "name": suffix(),
-        "upstream_id": up["id"],
-        "upstream_model": "m",
-        "model_type": kind,
-        **settings,
-    }
+    body = {"name": suffix(), "model_type": kind, **settings}
     assert client.post("/api/v1/models", json=body, headers=ADMIN_AUTH).status_code == 422
     model = _model(client, up, model_type=kind)
     response = client.patch(f"/api/v1/models/{model['id']}", json=settings, headers=ADMIN_AUTH)
@@ -102,7 +96,6 @@ def test_valid_type_prices(client, kind, settings):
 
 def test_type_change_merges_settings_before_any_autoflush(client):
     up = _upstream(client)
-    other = _upstream(client)
     model = _model(client, up, max_output_tokens=10, reasoning={"mode": "strip"})
     alias = client.post(
         "/api/v1/aliases", json={"name": suffix(), "target": model["id"]}, headers=ADMIN_AUTH
@@ -111,7 +104,6 @@ def test_type_change_merges_settings_before_any_autoflush(client):
         f"/api/v1/models/{model['id']}",
         json={
             "model_type": "embedding",
-            "upstream_id": other["id"],
             "max_output_tokens": None,
             "reasoning": None,
             "price_input_nano_usd_per_mtok": 1,
@@ -128,7 +120,6 @@ def test_type_change_merges_settings_before_any_autoflush(client):
         f"/api/v1/models/{model['id']}",
         json={
             "model_type": "transcription",
-            "upstream_id": up["id"],
             "price_input_nano_usd_per_mtok": None,
             "price_nano_usd_per_audio_second": 1,
         },
@@ -245,10 +236,10 @@ def test_snapshot_type_validation(problem):
         validate_snapshot(snap, max_bytes=1 << 26, max_keys=100)
 
 
-async def test_audio_ingest_dimensions_and_filters(client, committed):
+async def test_audio_ingest_dimensions_and_filters(client, committed, api_scope):
     key = await key_for(committed)
     event = wire(key, timestamp=TS, endpoint="audio_transcriptions", audio_ms=1250)
-    await ingest(committed, "gw", [event])
+    await ingest(committed, "gw", [event], zone=api_scope)
     await committed.commit()
     stored = await committed.scalar(
         select(UsageEvent).where(UsageEvent.request_id == event.request_id)

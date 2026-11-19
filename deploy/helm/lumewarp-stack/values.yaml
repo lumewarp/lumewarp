@@ -2,13 +2,13 @@
 # Values for the lumewarp chart go under `lumewarp:`; its full reference is the lumewarp
 # chart's values.yaml and docs/operations/helm.md.
 
-# Shared with the lumewarp chart: image tag, pull secrets, labels, scope and the encryption key.
+# Shared with the lumewarp chart: image tag, pull secrets, labels, zone and the encryption key.
 # Empty imageTag = the chart appVersion.
 global:
   imageTag: ""
   imagePullSecrets: []
   commonLabels: {}
-  scope: default
+  zone: default
   # Existing Secret with LUMEWARP_ENCRYPTION_KEY (32+ characters); required once an upstream stores an API key.
   encryptionKey:
     secretName: ""

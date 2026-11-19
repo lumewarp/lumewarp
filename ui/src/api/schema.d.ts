@@ -643,8 +643,9 @@ export interface paths {
         put?: never;
         /**
          * Create Model
-         * @description Create a model: one name served by one upstream model. Requires an installation admin. The
-         *     name shares one namespace with aliases and routers.
+         * @description Create a model definition. Requires an installation admin. The name shares one
+         *     namespace with aliases and routers. A model is served only where it has a deployment
+         *     (`PUT /models/{id}/deployments/{zone}`); creating it does not make it callable.
          */
         post: operations["createModel"];
         delete?: never;
@@ -707,6 +708,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/models/{model_id}/deployments/{zone}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Test Deployment
+         * @description Probe a saved deployment now with the configuration in the database. Without a WASM
+         *     auth plugin on its upstream the control plane calls the typed endpoint directly; with
+         *     one, a gateway of that zone connected to this control-plane process that advertises
+         *     `upstream_probe` and reports the plugin runs it. No such gateway is 409
+         *     `no_gateway_for_plugin`, no answer in time is 504 `probe_timeout`, and the reply is
+         *     never returned (the gateway sends no body).
+         */
+        post: operations["testDeployment"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/models/{model_id}/test": {
         parameters: {
             query?: never;
@@ -718,14 +744,39 @@ export interface paths {
         put?: never;
         /**
          * Test Saved Model
-         * @description Probe a saved model now with the configuration in the database. Without a WASM auth
-         *     plugin on its upstream the control plane calls the typed endpoint directly; with one, a
-         *     gateway connected to this control-plane process that advertises `upstream_probe` and
-         *     reports the plugin runs it. No such gateway is 409 `no_gateway_for_plugin`, no answer in
-         *     time is 504 `probe_timeout`, and the reply is never returned (the gateway sends no body).
+         * @description Probe the model's deployment in the default zone now. The same as
+         *     `POST /models/{id}/deployments/{zone}/test` for the default zone; a client that knows
+         *     the deployment's zone uses that endpoint.
          */
         post: operations["testSavedModel"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/models/{model_id}/deployments/{zone}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Put Model Deployment
+         * @description Create or replace the model's deployment in one zone: the upstream model that serves
+         *     it there. Requires an installation admin. The upstream must belong to the same zone;
+         *     changing it clears the deployment's stored Test now result. Only that zone recompiles.
+         */
+        put: operations["putModelDeployment"];
+        post?: never;
+        /**
+         * Delete Model Deployment
+         * @description Remove the model's deployment in one zone: it stops being callable there and that
+         *     zone recompiles. Requires an installation admin.
+         */
+        delete: operations["deleteModelDeployment"];
         options?: never;
         head?: never;
         patch?: never;
@@ -1474,10 +1525,12 @@ export interface paths {
         };
         /**
          * List Gateways
-         * @description One row per gateway process, connected ones first and then by gateway id.
+         * @description One row per gateway process of one zone, connected ones first and then by gateway
+         *     id.
          *
          *     Requires an installation admin. A disconnected gateway stays visible for 24 h after its
-         *     stream ended. Each row names the token its latest Hello authenticated with.
+         *     stream ended. Each row names the token its latest Hello authenticated with. Omit `zone`
+         *     for the default zone.
          */
         get: operations["listGateways"];
         put?: never;
@@ -1497,17 +1550,18 @@ export interface paths {
         };
         /**
          * List Gateway Tokens
-         * @description Gateway tokens of the config scope, newest first, with their connected gateway count.
+         * @description Gateway tokens of one zone, newest first, with their connected gateway count.
          *
-         *     Requires an installation admin. A revoked token stays listed.
+         *     Requires an installation admin. A revoked token stays listed. Omit `zone` for the default
+         *     zone.
          */
         get: operations["listGatewayTokens"];
         put?: never;
         /**
          * Create Gateway Token
-         * @description Create a gateway token (`lwg-…`) with a label. It is not bound to a gateway id, so any
-         *     number of gateways may use it. The secret is in this response only. Requires an
-         *     installation admin.
+         * @description Create a gateway token (`lwg-…`) with a label in a zone (default: the default zone).
+         *     It is not bound to a gateway id, so any number of gateways may use it. The secret is in
+         *     this response only. Requires an installation admin.
          */
         post: operations["createGatewayToken"];
         delete?: never;
@@ -1546,9 +1600,10 @@ export interface paths {
         };
         /**
          * List Config Versions
-         * @description Compiled config versions, newest first. Requires an installation admin.
+         * @description Compiled config versions of one zone, newest first. Requires an installation admin.
          *
-         *     `quarantined` marks the version a gateway rejected; no gateway of the scope is sent it.
+         *     `quarantined` marks the version a gateway rejected; no gateway of the zone is sent it.
+         *     Omit `zone` for the default zone.
          */
         get: operations["listConfigVersions"];
         put?: never;
@@ -1571,11 +1626,115 @@ export interface paths {
         /**
          * Rollback Config
          * @description Restore the routing catalog (upstreams, models, aliases, routers, MCP servers, A2A
-         *     agents) of an earlier version, by id, and publish it as a new version. Requires an
-         *     installation admin. Teams, keys, policies and key states stay as they are now. Answers
-         *     422 when a plugin connected now rejects the restored settings, unless `force` is set.
+         *     agents) of an earlier version, by id, installation-wide: every live zone is recompiled and
+         *     gets the restored catalog as a new version. Requires an installation admin. Teams, keys,
+         *     policies and key states stay as they are now. Answers 422 when a plugin connected now
+         *     rejects the restored settings, unless `force` is set.
          */
         post: operations["rollbackConfig"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/zones": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Zones
+         * @description The config zones. Any signed-in caller sees the live ones; an installation admin may
+         *     ask for archived zones too. Archived zones are read-only history.
+         */
+        get: operations["listZones"];
+        put?: never;
+        /**
+         * Create Zone
+         * @description Create a config zone. It starts empty: no gateway serves it and no upstream,
+         *     key or snapshot belongs to it yet. Requires an installation admin.
+         */
+        post: operations["createZone"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/zones/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Archive Zone
+         * @description Archive a zone: revoke its gateway tokens and stop compiling it. Requires an
+         *     installation admin. Refused (409) for the default zone (`LUMEWARP_ZONE`), while a
+         *     gateway session is still connected, and while a key of the zone is not revoked.
+         */
+        delete: operations["archiveZone"];
+        options?: never;
+        head?: never;
+        /**
+         * Update Zone
+         * @description Change a zone's display name, colour, Playground URL or key rules. The zone's `name`
+         *     is immutable. Requires an installation admin.
+         */
+        patch: operations["updateZone"];
+        trace?: never;
+    };
+    "/api/v1/zones/{zone}/limits": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Put Zone Limits
+         * @description Set one owner's rate limits and monthly budget in one zone.
+         *
+         *     The owner is an org, a team, a member (`team_id` + `user_id`) or a service account
+         *     (`team_id` + `service_account_id`). Requires the same role as the old inline edit: an
+         *     installation admin for an org, an org admin for a team, a team admin for a member or
+         *     service account. A changed value may not exceed its parent's effective value in this
+         *     zone. Sending every limit as null removes the row (no limit at this level).
+         */
+        put: operations["putZoneLimits"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/zones/{zone}/member-defaults": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Put Zone Member Defaults
+         * @description Set a team's default member limits in one zone (team-admin write).
+         *
+         *     The defaults are the member level's fallback when a member has no exception of their
+         *     own; a changed default may not exceed the team's effective limit in this zone. Sending
+         *     every value as null deletes the row.
+         */
+        put: operations["putZoneMemberDefaults"];
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1741,6 +1900,11 @@ export interface components {
              */
             name: string;
             /**
+             * Zone
+             * @description Config zone the agent belongs to; null = the default zone.
+             */
+            zone?: string | null;
+            /**
              * Url
              * @description URL of the upstream agent.
              */
@@ -1778,6 +1942,8 @@ export interface components {
              * Format: uuid
              */
             id: string;
+            /** Zone */
+            zone: string;
             /** Name */
             name: string;
             /** Url */
@@ -1900,6 +2066,11 @@ export interface components {
             target_kind: components["schemas"]["CatalogKind"];
             /** Target Name */
             target_name: string;
+            /**
+             * Unavailable In
+             * @description Zones where the alias is absent from the snapshot because its target has no deployment there.
+             */
+            unavailable_in?: string[];
             /**
              * Created At
              * Format: date-time
@@ -2037,8 +2208,8 @@ export interface components {
         };
         /** ConfigVersionOut */
         ConfigVersionOut: {
-            /** Scope */
-            scope: string;
+            /** Zone */
+            zone: string;
             /** Version */
             version: number;
             /** Digest */
@@ -2062,7 +2233,7 @@ export interface components {
             compacted_at: string | null;
             /**
              * Quarantined
-             * @description A gateway rejected this version, so it is withheld from the whole scope.
+             * @description A gateway rejected this version, so it is withheld from the whole zone.
              */
             quarantined: boolean;
         };
@@ -2091,6 +2262,11 @@ export interface components {
          * @description One gateway process: its config stream, version and status.
          */
         GatewayOut: {
+            /**
+             * Zone
+             * @description Config zone this gateway's token serves (`Hello.zone`).
+             */
+            zone: string;
             /**
              * Gateway Id
              * @description `Hello.gateway_id`: the process, stable for its lifetime.
@@ -2177,6 +2353,11 @@ export interface components {
              * @default
              */
             name: string;
+            /**
+             * Zone
+             * @description Config zone the record belongs to; omitted = the default zone.
+             */
+            zone?: string | null;
         };
         /** GatewayTokenCreated */
         GatewayTokenCreated: {
@@ -2191,6 +2372,8 @@ export interface components {
              * Format: uuid
              */
             id: string;
+            /** Zone */
+            zone: string;
             /** Name */
             name: string;
             /** Display Prefix */
@@ -2332,23 +2515,28 @@ export interface components {
              */
             expires_at?: string | null;
             /**
+             * Zone
+             * @description Config zone the record belongs to; omitted = the default zone.
+             */
+            zone?: string | null;
+            /**
              * Service Account Id
              * @description The service account that owns the key; omit for a key owned by the caller.
              */
             service_account_id?: string | null;
             /**
              * Rpm Limit
-             * @description Requests per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             * @description Requests per minute in this zone; null = no limit at this level.
              */
             rpm_limit?: number | null;
             /**
              * Tpm Limit
-             * @description Tokens per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             * @description Tokens per minute in this zone; null = no limit at this level.
              */
             tpm_limit?: number | null;
             /**
              * Max Parallel
-             * @description Concurrent requests at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             * @description Concurrent requests in this zone; null = no limit at this level.
              */
             max_parallel?: number | null;
             /**
@@ -2380,6 +2568,14 @@ export interface components {
          * @enum {string}
          */
         KeyLifecycle: "active" | "suspended" | "revoked";
+        /**
+         * KeyMinCreatorRole
+         * @description The lowest team role that may create a key in a zone (a zone's key rule).
+         *
+         *     Installation admins and org admins count as team admins; a member is the lowest.
+         * @enum {string}
+         */
+        KeyMinCreatorRole: "member" | "team_admin" | "org_admin";
         /** KeyOut */
         KeyOut: {
             /**
@@ -2392,6 +2588,10 @@ export interface components {
              * Format: uuid
              */
             team_id: string;
+            /** Zone */
+            zone: string;
+            /** Rule Violations */
+            rule_violations?: string[];
             /** Rpm Limit */
             rpm_limit: number | null;
             /** Tpm Limit */
@@ -2572,17 +2772,17 @@ export interface components {
             lifecycle?: components["schemas"]["KeyLifecycle"] | null;
             /**
              * Rpm Limit
-             * @description Requests per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             * @description Requests per minute in this zone; null = no limit at this level.
              */
             rpm_limit?: number | null;
             /**
              * Tpm Limit
-             * @description Tokens per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             * @description Tokens per minute in this zone; null = no limit at this level.
              */
             tpm_limit?: number | null;
             /**
              * Max Parallel
-             * @description Concurrent requests at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
+             * @description Concurrent requests in this zone; null = no limit at this level.
              */
             max_parallel?: number | null;
             /**
@@ -2782,6 +2982,11 @@ export interface components {
              */
             name: string;
             /**
+             * Zone
+             * @description Config zone the server belongs to; null = the default zone.
+             */
+            zone?: string | null;
+            /**
              * Url
              * @description URL of the upstream MCP server.
              */
@@ -2812,6 +3017,8 @@ export interface components {
              * Format: uuid
              */
             id: string;
+            /** Zone */
+            zone: string;
             /** Name */
             name: string;
             /** Url */
@@ -2954,6 +3161,29 @@ export interface components {
             key_count: number;
         };
         /**
+         * MeKeyRulesOut
+         * @description The key rules that apply to a key this member creates in one zone.
+         */
+        MeKeyRulesOut: {
+            key_min_creator_role: components["schemas"]["KeyMinCreatorRole"];
+            /**
+             * Key Max Lifetime Seconds
+             * @description The effective cap for a member key: min(zone, team); null = none.
+             */
+            key_max_lifetime_seconds: number | null;
+            /** Key Expiry Required */
+            key_expiry_required: boolean;
+            /**
+             * Key Max Per Member
+             * @description The effective per-member cap in this zone: min(zone, team); null = none.
+             */
+            key_max_per_member: number | null;
+            /** Service Account Keys Allowed */
+            service_account_keys_allowed: boolean;
+            /** Playground Allowed */
+            playground_allowed: boolean;
+        };
+        /**
          * MeLimitsOut
          * @description Effective rate limits for a key the caller could create in this team.
          */
@@ -3054,6 +3284,29 @@ export interface components {
             limits: components["schemas"]["MeLimitsOut"];
             key_limits: components["schemas"]["MeKeyLimitsOut"];
             budget: components["schemas"]["MeBudgetOut"];
+            /** By Zone */
+            by_zone?: {
+                [key: string]: components["schemas"]["MeZoneOut"];
+            };
+        };
+        /**
+         * MeZoneOut
+         * @description The caller's effective policy in one zone for one team.
+         */
+        MeZoneOut: {
+            /** Zone */
+            zone: string;
+            /** Display Name */
+            display_name: string;
+            /** Color */
+            color: string;
+            limits: components["schemas"]["MeLimitsOut"];
+            key_rules: components["schemas"]["MeKeyRulesOut"];
+            /** Key Count */
+            key_count: number;
+            budget: components["schemas"]["MeBudgetOut"];
+            /** Playground Gateway Url */
+            playground_gateway_url?: string | null;
         };
         /** MemberCreate */
         MemberCreate: {
@@ -3083,26 +3336,6 @@ export interface components {
              * @description A2A agent names granted when `a2a_access` is `list`; empty denies all.
              */
             a2a_agents?: string[] | null;
-            /**
-             * Rpm Limit
-             * @description Requests per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            rpm_limit?: number | null;
-            /**
-             * Tpm Limit
-             * @description Tokens per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            tpm_limit?: number | null;
-            /**
-             * Max Parallel
-             * @description Concurrent requests at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            max_parallel?: number | null;
-            /**
-             * Budget Nano Usd
-             * @description Budget per UTC calendar month in nano-USD (1e-9 USD); null = no budget at this level.
-             */
-            budget_nano_usd?: number | null;
             /** @description `admin` or `member`. */
             role: components["schemas"]["TeamRole"];
             /**
@@ -3149,13 +3382,20 @@ export interface components {
             /** A2A Agents */
             a2a_agents: string[];
             /** Rpm Limit */
-            rpm_limit: number | null;
+            rpm_limit?: number | null;
             /** Tpm Limit */
-            tpm_limit: number | null;
+            tpm_limit?: number | null;
             /** Max Parallel */
-            max_parallel: number | null;
+            max_parallel?: number | null;
             /** Budget Nano Usd */
-            budget_nano_usd: number | null;
+            budget_nano_usd?: number | null;
+            /**
+             * Limits By Zone
+             * @description This level's own limits and budget in every zone that sets one.
+             */
+            limits_by_zone?: {
+                [key: string]: components["schemas"]["ZoneLimitsOut"];
+            };
             /**
              * Team Id
              * Format: uuid
@@ -3223,26 +3463,6 @@ export interface components {
              * @description A2A agent names granted when `a2a_access` is `list`; empty denies all.
              */
             a2a_agents?: string[] | null;
-            /**
-             * Rpm Limit
-             * @description Requests per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            rpm_limit?: number | null;
-            /**
-             * Tpm Limit
-             * @description Tokens per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            tpm_limit?: number | null;
-            /**
-             * Max Parallel
-             * @description Concurrent requests at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            max_parallel?: number | null;
-            /**
-             * Budget Nano Usd
-             * @description Budget per UTC calendar month in nano-USD (1e-9 USD); null = no budget at this level.
-             */
-            budget_nano_usd?: number | null;
             /** @description `admin` or `member`. */
             role?: components["schemas"]["TeamRole"] | null;
         };
@@ -3274,26 +3494,6 @@ export interface components {
              * @description A2A agent names granted when `a2a_access` is `list`; empty denies all.
              */
             a2a_agents?: string[] | null;
-            /**
-             * Rpm Limit
-             * @description Requests per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            rpm_limit?: number | null;
-            /**
-             * Tpm Limit
-             * @description Tokens per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            tpm_limit?: number | null;
-            /**
-             * Max Parallel
-             * @description Concurrent requests at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            max_parallel?: number | null;
-            /**
-             * Budget Nano Usd
-             * @description Budget per UTC calendar month in nano-USD (1e-9 USD); null = no budget at this level.
-             */
-            budget_nano_usd?: number | null;
             /** @description `admin` or `member`. */
             role: components["schemas"]["TeamRole"];
         };
@@ -3306,11 +3506,15 @@ export interface components {
          *     LIST: exactly the `policy_grants` of this level, intersected with the parent; an empty
          *     list is deny-all.
          *     Resolve INHERIT first; a key whose effective set is still universal gets
-         *     allow_all_models (see compiler.compile_scope).
+         *     allow_all_models (see compiler.compile_zone).
          * @enum {string}
          */
         ModelAccess: "inherit" | "all" | "list";
-        /** ModelCreate */
+        /**
+         * ModelCreate
+         * @description A model definition: a callable name and its type-wide settings. It is served only
+         *     where it has a deployment (`PUT /models/{id}/deployments/{zone}`).
+         */
         ModelCreate: {
             /**
              * Max Input Tokens
@@ -3346,17 +3550,6 @@ export interface components {
              */
             name: string;
             /**
-             * Upstream Id
-             * Format: uuid
-             * @description The upstream that serves the model.
-             */
-            upstream_id: string;
-            /**
-             * Upstream Model
-             * @description The model name sent to the upstream.
-             */
-            upstream_model: string;
-            /**
              * Price Input Nano Usd Per Mtok
              * @description Price of a million input tokens in nano-USD. Set the input and output prices together, or leave both null (cost unknown).
              */
@@ -3366,6 +3559,63 @@ export interface components {
              * @description Price of a million output tokens in nano-USD. Set the input and output prices together, or leave both null (cost unknown).
              */
             price_output_nano_usd_per_mtok?: number | null;
+        };
+        /**
+         * ModelDeploymentIn
+         * @description The deployment to create or replace in one zone.
+         */
+        ModelDeploymentIn: {
+            /**
+             * Upstream Id
+             * Format: uuid
+             * @description An upstream of the deployment's zone.
+             */
+            upstream_id: string;
+            /**
+             * Upstream Model
+             * @description The model name sent to the upstream.
+             */
+            upstream_model: string;
+            /** @description Periodic type-specific probe sent by every gateway through this deployment; while it fails the model gets no traffic there. null = not probed (Test now still works). Probes may incur upstream charges. */
+            chat_check?: components["schemas"]["ChatCheckIn"] | null;
+        };
+        /**
+         * ModelDeploymentOut
+         * @description One zone that serves a model, through one upstream model.
+         */
+        ModelDeploymentOut: {
+            /** Zone */
+            zone: string;
+            /**
+             * Upstream Id
+             * Format: uuid
+             */
+            upstream_id: string;
+            /** Upstream Name */
+            upstream_name: string;
+            /** Upstream Model */
+            upstream_model: string;
+            /** @description Periodic type-specific probe sent through this deployment; null = not probed. */
+            chat_check?: components["schemas"]["ChatCheckOut"] | null;
+            /**
+             * Health
+             * @description Chat check as this zone's connected gateways report it: unhealthy if any says so, unknown when none has reported it yet.
+             * @default not_probed
+             * @enum {string}
+             */
+            health: "healthy" | "unhealthy" | "unknown" | "not_probed";
+            /** @description The last Test now of this deployment from the control plane, if any. */
+            probe?: components["schemas"]["ProbeResultOut"] | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
         };
         /** ModelGroupCreate */
         ModelGroupCreate: {
@@ -3469,13 +3719,6 @@ export interface components {
             id: string;
             /** Name */
             name: string;
-            /**
-             * Upstream Id
-             * Format: uuid
-             */
-            upstream_id: string;
-            /** Upstream Model */
-            upstream_model: string;
             /** Price Input Nano Usd Per Mtok */
             price_input_nano_usd_per_mtok: number | null;
             /** Price Output Nano Usd Per Mtok */
@@ -3489,16 +3732,11 @@ export interface components {
                 [key: string]: unknown;
             } | null;
             reasoning: components["schemas"]["ReasoningOut"];
-            chat_check: components["schemas"]["ChatCheckOut"] | null;
             /**
-             * Health
-             * @description Chat check as connected gateways report it: unhealthy if any says so, unknown when none has reported it yet.
-             * @default not_probed
-             * @enum {string}
+             * Deployments
+             * @description The zones that serve this model, one deployment each; empty = defined but not served anywhere.
              */
-            health: "healthy" | "unhealthy" | "unknown" | "not_probed";
-            /** @description The last Test now of the saved settings from the control plane, if any. */
-            probe?: components["schemas"]["ProbeResultOut"] | null;
+            deployments?: components["schemas"]["ModelDeploymentOut"][];
             /**
              * Created At
              * Format: date-time
@@ -3540,6 +3778,11 @@ export interface components {
              * @description A saved model; the result is kept on it when the form matches it.
              */
             model_id?: string | null;
+            /**
+             * Zone
+             * @description With `model_id`: the deployment whose Test now result this is; null = do not record it.
+             */
+            zone?: string | null;
         };
         /** ModelTestOut */
         ModelTestOut: {
@@ -3600,16 +3843,6 @@ export interface components {
              * @description The name clients call, without whitespace. Models, aliases and routers share one namespace.
              */
             name?: string | null;
-            /**
-             * Upstream Id
-             * @description The upstream that serves the model.
-             */
-            upstream_id?: string | null;
-            /**
-             * Upstream Model
-             * @description The model name sent to the upstream.
-             */
-            upstream_model?: string | null;
             /**
              * Price Input Nano Usd Per Mtok
              * @description Price of a million input tokens in nano-USD. Set the input and output prices together, or leave both null (cost unknown).
@@ -3695,26 +3928,6 @@ export interface components {
              */
             a2a_agents?: string[] | null;
             /**
-             * Rpm Limit
-             * @description Requests per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            rpm_limit?: number | null;
-            /**
-             * Tpm Limit
-             * @description Tokens per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            tpm_limit?: number | null;
-            /**
-             * Max Parallel
-             * @description Concurrent requests at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            max_parallel?: number | null;
-            /**
-             * Budget Nano Usd
-             * @description Budget per UTC calendar month in nano-USD (1e-9 USD); null = no budget at this level.
-             */
-            budget_nano_usd?: number | null;
-            /**
              * Name
              * @description Display name, 1 to 200 characters.
              */
@@ -3745,13 +3958,20 @@ export interface components {
             /** A2A Agents */
             a2a_agents: string[];
             /** Rpm Limit */
-            rpm_limit: number | null;
+            rpm_limit?: number | null;
             /** Tpm Limit */
-            tpm_limit: number | null;
+            tpm_limit?: number | null;
             /** Max Parallel */
-            max_parallel: number | null;
+            max_parallel?: number | null;
             /** Budget Nano Usd */
-            budget_nano_usd: number | null;
+            budget_nano_usd?: number | null;
+            /**
+             * Limits By Zone
+             * @description This level's own limits and budget in every zone that sets one.
+             */
+            limits_by_zone?: {
+                [key: string]: components["schemas"]["ZoneLimitsOut"];
+            };
             /**
              * Id
              * Format: uuid
@@ -3782,6 +4002,11 @@ export interface components {
          * @description One team's usage inside an org, aggregated from `usage_events` at query time.
          */
         OrgTeamUsageOut: {
+            /**
+             * Zone
+             * @description The zone filter, null = all zones.
+             */
+            zone?: string | null;
             /**
              * Team Id
              * Format: uuid
@@ -3833,26 +4058,6 @@ export interface components {
              */
             a2a_agents?: string[] | null;
             /**
-             * Rpm Limit
-             * @description Requests per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            rpm_limit?: number | null;
-            /**
-             * Tpm Limit
-             * @description Tokens per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            tpm_limit?: number | null;
-            /**
-             * Max Parallel
-             * @description Concurrent requests at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            max_parallel?: number | null;
-            /**
-             * Budget Nano Usd
-             * @description Budget per UTC calendar month in nano-USD (1e-9 USD); null = no budget at this level.
-             */
-            budget_nano_usd?: number | null;
-            /**
              * Name
              * @description Display name, 1 to 200 characters.
              */
@@ -3860,6 +4065,11 @@ export interface components {
         };
         /** OrgUsageOut */
         OrgUsageOut: {
+            /**
+             * Zone
+             * @description The zone filter, null = all zones.
+             */
+            zone?: string | null;
             /**
              * Org Id
              * Format: uuid
@@ -4064,6 +4274,13 @@ export interface components {
             /** Next Cursor */
             next_cursor?: string | null;
         };
+        /** Page[ZoneOut] */
+        Page_ZoneOut_: {
+            /** Items */
+            items: components["schemas"]["ZoneOut"][];
+            /** Next Cursor */
+            next_cursor?: string | null;
+        };
         /** PlaygroundKey */
         PlaygroundKey: {
             /**
@@ -4071,6 +4288,8 @@ export interface components {
              * Format: uuid
              */
             id: string;
+            /** Zone */
+            zone: string;
             /** Name */
             name: string;
             /** Display Prefix */
@@ -4151,10 +4370,12 @@ export interface components {
          * PluginOut
          * @description A gateway plugin of any kind (docs/plugins.md).
          *
-         *     Everything but `kind`, `name` and `builtin` is data from a gateway: render it as plain
-         *     text. `uses_weight`, `needs` and `member_schema` are for router strategies only.
+         *     Everything but `zone`, `kind`, `name` and `builtin` is data from a gateway: render it as
+         *     plain text. `uses_weight`, `needs` and `member_schema` are for router strategies only.
          */
         PluginOut: {
+            /** Zone */
+            zone: string;
             kind: components["schemas"]["PluginKind"];
             /** Name */
             name: string;
@@ -4352,6 +4573,8 @@ export interface components {
              * Format: date-time
              */
             ts: string;
+            /** Zone */
+            zone: string;
             kind: components["schemas"]["TrafficKind"];
             /** Endpoint */
             endpoint: string;
@@ -4457,6 +4680,11 @@ export interface components {
              * @description The config version to restore.
              */
             version: number;
+            /**
+             * Zone
+             * @description Config zone the record belongs to; omitted = the default zone.
+             */
+            zone?: string | null;
             /**
              * Force
              * @description Save although connected gateways lack the plugin; they will NACK.
@@ -4610,6 +4838,11 @@ export interface components {
              */
             accepted_reasoning_levels: string[] | null;
             /**
+             * Unavailable In
+             * @description Zones where the router is absent from the snapshot because none of its members (or, with a traffic split, a split has none) has a deployment there.
+             */
+            unavailable_in?: string[];
+            /**
              * Config Invalid
              * @description Stored settings fail the strategy's current schema, or nothing reports it.
              */
@@ -4719,26 +4952,6 @@ export interface components {
              */
             a2a_agents?: string[] | null;
             /**
-             * Rpm Limit
-             * @description Requests per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            rpm_limit?: number | null;
-            /**
-             * Tpm Limit
-             * @description Tokens per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            tpm_limit?: number | null;
-            /**
-             * Max Parallel
-             * @description Concurrent requests at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            max_parallel?: number | null;
-            /**
-             * Budget Nano Usd
-             * @description Budget per UTC calendar month in nano-USD (1e-9 USD); null = no budget at this level.
-             */
-            budget_nano_usd?: number | null;
-            /**
              * Name
              * @description Display name, 1 to 200 characters.
              */
@@ -4775,13 +4988,20 @@ export interface components {
             /** A2A Agents */
             a2a_agents: string[];
             /** Rpm Limit */
-            rpm_limit: number | null;
+            rpm_limit?: number | null;
             /** Tpm Limit */
-            tpm_limit: number | null;
+            tpm_limit?: number | null;
             /** Max Parallel */
-            max_parallel: number | null;
+            max_parallel?: number | null;
             /** Budget Nano Usd */
-            budget_nano_usd: number | null;
+            budget_nano_usd?: number | null;
+            /**
+             * Limits By Zone
+             * @description This level's own limits and budget in every zone that sets one.
+             */
+            limits_by_zone?: {
+                [key: string]: components["schemas"]["ZoneLimitsOut"];
+            };
             /**
              * Id
              * Format: uuid
@@ -4839,26 +5059,6 @@ export interface components {
              * @description A2A agent names granted when `a2a_access` is `list`; empty denies all.
              */
             a2a_agents?: string[] | null;
-            /**
-             * Rpm Limit
-             * @description Requests per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            rpm_limit?: number | null;
-            /**
-             * Tpm Limit
-             * @description Tokens per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            tpm_limit?: number | null;
-            /**
-             * Max Parallel
-             * @description Concurrent requests at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            max_parallel?: number | null;
-            /**
-             * Budget Nano Usd
-             * @description Budget per UTC calendar month in nano-USD (1e-9 USD); null = no budget at this level.
-             */
-            budget_nano_usd?: number | null;
             /**
              * Name
              * @description Display name, 1 to 200 characters.
@@ -5002,21 +5202,6 @@ export interface components {
         /** TeamCreate */
         TeamCreate: {
             /**
-             * Member Rpm Default
-             * @description Requests per minute for each member who has no limit of their own; capped by the team's limit. null = none.
-             */
-            member_rpm_default?: number | null;
-            /**
-             * Member Tpm Default
-             * @description Tokens per minute for each member who has no limit of their own; capped by the team's limit. null = none.
-             */
-            member_tpm_default?: number | null;
-            /**
-             * Member Max Parallel Default
-             * @description Concurrent requests for each member who has no limit of their own; capped by the team's limit. null = none.
-             */
-            member_max_parallel_default?: number | null;
-            /**
              * Max Keys Per Member
              * @description How many keys one member may own in the team; null = unlimited. Service-account keys do not count.
              */
@@ -5052,26 +5237,6 @@ export interface components {
              * @description A2A agent names granted when `a2a_access` is `list`; empty denies all.
              */
             a2a_agents?: string[] | null;
-            /**
-             * Rpm Limit
-             * @description Requests per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            rpm_limit?: number | null;
-            /**
-             * Tpm Limit
-             * @description Tokens per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            tpm_limit?: number | null;
-            /**
-             * Max Parallel
-             * @description Concurrent requests at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            max_parallel?: number | null;
-            /**
-             * Budget Nano Usd
-             * @description Budget per UTC calendar month in nano-USD (1e-9 USD); null = no budget at this level.
-             */
-            budget_nano_usd?: number | null;
             /**
              * Name
              * @description Team name, unique among live teams.
@@ -5144,18 +5309,32 @@ export interface components {
             /** A2A Agents */
             a2a_agents: string[];
             /** Rpm Limit */
-            rpm_limit: number | null;
+            rpm_limit?: number | null;
             /** Tpm Limit */
-            tpm_limit: number | null;
+            tpm_limit?: number | null;
             /** Max Parallel */
-            max_parallel: number | null;
+            max_parallel?: number | null;
             /** Budget Nano Usd */
-            budget_nano_usd: number | null;
+            budget_nano_usd?: number | null;
+            /**
+             * Limits By Zone
+             * @description This level's own limits and budget in every zone that sets one.
+             */
+            limits_by_zone?: {
+                [key: string]: components["schemas"]["ZoneLimitsOut"];
+            };
             /**
              * Effective Models
              * @description The callable names this level allows after inheritance (groups expanded, intersected down from the org); null = every name in the catalog.
              */
             effective_models?: string[] | null;
+            /**
+             * Member Defaults By Zone
+             * @description This team's member-default limits in every zone that sets one.
+             */
+            member_defaults_by_zone?: {
+                [key: string]: components["schemas"]["ZoneMemberDefaultsOut"];
+            };
         };
         /**
          * TeamRole
@@ -5164,21 +5343,6 @@ export interface components {
         TeamRole: "admin" | "member";
         /** TeamUpdate */
         TeamUpdate: {
-            /**
-             * Member Rpm Default
-             * @description Requests per minute for each member who has no limit of their own; capped by the team's limit. null = none.
-             */
-            member_rpm_default?: number | null;
-            /**
-             * Member Tpm Default
-             * @description Tokens per minute for each member who has no limit of their own; capped by the team's limit. null = none.
-             */
-            member_tpm_default?: number | null;
-            /**
-             * Member Max Parallel Default
-             * @description Concurrent requests for each member who has no limit of their own; capped by the team's limit. null = none.
-             */
-            member_max_parallel_default?: number | null;
             /**
              * Max Keys Per Member
              * @description How many keys one member may own in the team; null = unlimited. Service-account keys do not count.
@@ -5215,26 +5379,6 @@ export interface components {
              * @description A2A agent names granted when `a2a_access` is `list`; empty denies all.
              */
             a2a_agents?: string[] | null;
-            /**
-             * Rpm Limit
-             * @description Requests per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            rpm_limit?: number | null;
-            /**
-             * Tpm Limit
-             * @description Tokens per minute at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            tpm_limit?: number | null;
-            /**
-             * Max Parallel
-             * @description Concurrent requests at this level; null = no limit here. A lower level may not exceed a higher one (org, team, owner, key).
-             */
-            max_parallel?: number | null;
-            /**
-             * Budget Nano Usd
-             * @description Budget per UTC calendar month in nano-USD (1e-9 USD); null = no budget at this level.
-             */
-            budget_nano_usd?: number | null;
             /**
              * Name
              * @description Team name, unique among live teams.
@@ -5354,6 +5498,11 @@ export interface components {
              */
             health_url?: string | null;
             /**
+             * Zone
+             * @description Config zone the upstream belongs to, set on create and never changed; null = the default zone.
+             */
+            zone?: string | null;
+            /**
              * Name
              * @description Unique upstream name.
              */
@@ -5437,6 +5586,8 @@ export interface components {
              * Format: uuid
              */
             id: string;
+            /** Zone */
+            zone: string;
             /** Name */
             name: string;
             kind: components["schemas"]["UpstreamKind"];
@@ -5595,6 +5746,11 @@ export interface components {
              */
             rank: number;
             /**
+             * Zone
+             * @description The zone this row was ranked in.
+             */
+            zone: string;
+            /**
              * Label
              * @description What the row names: the called name, the key's name or the owner's name; an unreadable key or owner is `Key #<rank>` or `Member #<rank>`.
              */
@@ -5682,6 +5838,11 @@ export interface components {
          *     monthly totals fast path (LLM requests only) reports both as 0.
          */
         UsageRowOut: {
+            /**
+             * Zone
+             * @description The request zone; null when the row is not grouped by zone.
+             */
+            zone?: string | null;
             /** Endpoint */
             endpoint?: string | null;
             model_type?: components["schemas"]["ModelType"] | null;
@@ -5826,6 +5987,249 @@ export interface components {
              * @description false deactivates the user: they cannot sign in and their keys are suspended.
              */
             is_active?: boolean | null;
+        };
+        /** ZoneCreate */
+        ZoneCreate: {
+            /**
+             * @description The lowest team role that may create a key in this zone: member, team_admin or org_admin (installation admins always may).
+             * @default member
+             */
+            key_min_creator_role: components["schemas"]["KeyMinCreatorRole"];
+            /**
+             * Key Max Lifetime Seconds
+             * @description Longest lifetime of a key created in this zone; null = only the team's own limit.
+             */
+            key_max_lifetime_seconds?: number | null;
+            /**
+             * Key Expiry Required
+             * @description Refuse a key created in this zone without an expiry.
+             * @default false
+             */
+            key_expiry_required: boolean;
+            /**
+             * Key Max Per Member
+             * @description How many keys one member may own in this zone; null = unlimited. Service-account keys do not count.
+             */
+            key_max_per_member?: number | null;
+            /**
+             * Service Account Keys Allowed
+             * @description Allow creating service-account keys in this zone.
+             * @default true
+             */
+            service_account_keys_allowed: boolean;
+            /**
+             * Playground Allowed
+             * @description Allow this zone's keys in the Playground.
+             * @default true
+             */
+            playground_allowed: boolean;
+            /**
+             * Name
+             * @description Display name, 1 to 200 characters.
+             */
+            name: string;
+            /**
+             * Display Name
+             * @description Shown in the Admin UI.
+             * @default
+             */
+            display_name: string;
+            /**
+             * Color
+             * @description One of the fixed palette names: gray, blue, green, amber, red, violet.
+             * @default gray
+             * @enum {string}
+             */
+            color: "gray" | "blue" | "green" | "amber" | "red" | "violet";
+            /**
+             * Playground Gateway Url
+             * @description Gateway base URL the Playground forwards to for keys of this zone; null = Playground unavailable there.
+             */
+            playground_gateway_url?: string | null;
+        };
+        /**
+         * ZoneLimitSet
+         * @description `PUT /zones/{zone}/limits`: the owner and its limits in that zone.
+         *
+         *     Exactly one owner shape: `org_id` alone, `team_id` alone, `team_id` + `user_id`, or
+         *     `team_id` + `service_account_id`. Every limit is optional; null (or omitting all four)
+         *     means no limit at this level in the zone.
+         */
+        ZoneLimitSet: {
+            /**
+             * Org Id
+             * @description The org this limit row or usage filter belongs to.
+             */
+            org_id?: string | null;
+            /**
+             * Team Id
+             * @description The team this limit row or filter belongs to.
+             */
+            team_id?: string | null;
+            /**
+             * User Id
+             * @description The member this limit row belongs to; requires team_id.
+             */
+            user_id?: string | null;
+            /**
+             * Service Account Id
+             * @description The service account this limit row belongs to; requires team_id.
+             */
+            service_account_id?: string | null;
+            /**
+             * Rpm Limit
+             * @description Requests per minute in this zone; null = no limit at this level.
+             */
+            rpm_limit?: number | null;
+            /**
+             * Tpm Limit
+             * @description Tokens per minute in this zone; null = no limit at this level.
+             */
+            tpm_limit?: number | null;
+            /**
+             * Max Parallel
+             * @description Concurrent requests in this zone; null = no limit at this level.
+             */
+            max_parallel?: number | null;
+            /**
+             * Budget Nano Usd
+             * @description Budget per UTC calendar month in nano-USD (1e-9 USD) in this zone; null = none.
+             */
+            budget_nano_usd?: number | null;
+        };
+        /**
+         * ZoneLimitsOut
+         * @description One level's own limits and budget in one zone. Both absent limits = none.
+         */
+        ZoneLimitsOut: {
+            /** Rpm Limit */
+            rpm_limit?: number | null;
+            /** Tpm Limit */
+            tpm_limit?: number | null;
+            /** Max Parallel */
+            max_parallel?: number | null;
+            /** Budget Nano Usd */
+            budget_nano_usd?: number | null;
+        };
+        /**
+         * ZoneMemberDefaultsOut
+         * @description A team's per-zone default limits for its members.
+         */
+        ZoneMemberDefaultsOut: {
+            /** Rpm Limit */
+            rpm_limit?: number | null;
+            /** Tpm Limit */
+            tpm_limit?: number | null;
+            /** Max Parallel */
+            max_parallel?: number | null;
+        };
+        /**
+         * ZoneMemberDefaultsSet
+         * @description `PUT /zones/{zone}/member-defaults`: a team's default limits for its members.
+         *
+         *     Null means "no default"; omitting every value deletes the row.
+         */
+        ZoneMemberDefaultsSet: {
+            /**
+             * Team Id
+             * Format: uuid
+             * @description The team this limit row or filter belongs to.
+             */
+            team_id: string;
+            /**
+             * Rpm Limit
+             * @description Requests per minute in this zone; null = no limit at this level.
+             */
+            rpm_limit?: number | null;
+            /**
+             * Tpm Limit
+             * @description Tokens per minute in this zone; null = no limit at this level.
+             */
+            tpm_limit?: number | null;
+            /**
+             * Max Parallel
+             * @description Concurrent requests in this zone; null = no limit at this level.
+             */
+            max_parallel?: number | null;
+        };
+        /** ZoneOut */
+        ZoneOut: {
+            /** Name */
+            name: string;
+            /** Is Default */
+            is_default: boolean;
+            /** Display Name */
+            display_name: string;
+            /** Color */
+            color: string;
+            /** Archived At */
+            archived_at: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Playground Gateway Url */
+            playground_gateway_url: string | null;
+            key_min_creator_role: components["schemas"]["KeyMinCreatorRole"];
+            /** Key Max Lifetime Seconds */
+            key_max_lifetime_seconds: number | null;
+            /** Key Expiry Required */
+            key_expiry_required: boolean;
+            /** Key Max Per Member */
+            key_max_per_member: number | null;
+            /** Service Account Keys Allowed */
+            service_account_keys_allowed: boolean;
+            /** Playground Allowed */
+            playground_allowed: boolean;
+        };
+        /**
+         * ZoneUpdate
+         * @description Only the supplied fields change. `name` is immutable.
+         */
+        ZoneUpdate: {
+            /**
+             * Display Name
+             * @description Shown in the Admin UI.
+             */
+            display_name?: string | null;
+            /**
+             * Color
+             * @description One of the fixed palette names: gray, blue, green, amber, red, violet.
+             */
+            color?: ("gray" | "blue" | "green" | "amber" | "red" | "violet") | null;
+            /**
+             * Playground Gateway Url
+             * @description Gateway base URL the Playground forwards to for keys of this zone; null = Playground unavailable there.
+             */
+            playground_gateway_url?: string | null;
+            /** @description The lowest team role that may create a key in this zone: member, team_admin or org_admin (installation admins always may). */
+            key_min_creator_role?: components["schemas"]["KeyMinCreatorRole"] | null;
+            /**
+             * Key Max Lifetime Seconds
+             * @description Longest lifetime of a key created in this zone; null = only the team's own limit.
+             */
+            key_max_lifetime_seconds?: number | null;
+            /**
+             * Key Expiry Required
+             * @description Refuse a key created in this zone without an expiry.
+             */
+            key_expiry_required?: boolean | null;
+            /**
+             * Key Max Per Member
+             * @description How many keys one member may own in this zone; null = unlimited. Service-account keys do not count.
+             */
+            key_max_per_member?: number | null;
+            /**
+             * Service Account Keys Allowed
+             * @description Allow creating service-account keys in this zone.
+             */
+            service_account_keys_allowed?: boolean | null;
+            /**
+             * Playground Allowed
+             * @description Allow this zone's keys in the Playground.
+             */
+            playground_allowed?: boolean | null;
         };
     };
     responses: never;
@@ -6725,6 +7129,8 @@ export interface operations {
             query?: {
                 from?: string | null;
                 to?: string | null;
+                /** @description Only this zone; omitted sums every zone. */
+                zone?: string | null;
             };
             header?: never;
             path: {
@@ -7501,6 +7907,8 @@ export interface operations {
                 user_id?: string | null;
                 service_account_id?: string | null;
                 lifecycle?: components["schemas"]["KeyLifecycle"] | null;
+                /** @description Only keys of this zone; omitted lists every zone. */
+                zone?: string | null;
                 limit?: number;
                 cursor?: string | null;
             };
@@ -7947,6 +8355,8 @@ export interface operations {
             query?: {
                 /** @description Also list the service-account keys of every live team the caller administers, including by org or installation inheritance. */
                 include_service_accounts?: boolean;
+                /** @description Only keys of this zone; omitted lists every zone. */
+                zone?: string | null;
                 limit?: number;
                 cursor?: string | null;
             };
@@ -9163,6 +9573,74 @@ export interface operations {
             };
         };
     };
+    testDeployment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                model_id: string;
+                zone: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelTestOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     testSavedModel: {
         parameters: {
             query?: never;
@@ -9182,6 +9660,144 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ModelTestOut"];
                 };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    putModelDeployment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                model_id: string;
+                zone: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ModelDeploymentIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelDeploymentOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    deleteModelDeployment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                model_id: string;
+                zone: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Missing or invalid credentials */
             401: {
@@ -11212,6 +11828,8 @@ export interface operations {
             query?: {
                 /** @description Only this kind; omitted lists all three. */
                 kind?: components["schemas"]["PluginKind"] | null;
+                /** @description Config zone to inspect. */
+                zone?: string | null;
             };
             header?: never;
             path?: never;
@@ -12244,6 +12862,8 @@ export interface operations {
                 target?: string | null;
                 method?: string | null;
                 tool?: string | null;
+                /** @description Only this zone; omitted reads every zone. */
+                zone?: string | null;
                 requested?: string | null;
                 model?: string | null;
                 upstream_model?: string | null;
@@ -12334,6 +12954,8 @@ export interface operations {
                 team_id?: string | null;
                 /** @description Gateway protocol to rank; `llm` by default. */
                 kind?: components["schemas"]["TrafficKind"];
+                /** @description Only this zone; omitted ranks every zone. */
+                zone?: string | null;
                 /** @description How many rows to return, 1 to 50; default 10. */
                 limit?: number;
             };
@@ -12420,6 +13042,8 @@ export interface operations {
                 alias?: string | null;
                 /** @description Only requests that went through this router name. */
                 router?: string | null;
+                /** @description Only requests of this zone; omitted reads every zone. */
+                zone?: string | null;
                 /** @description Only responses with this HTTP status. */
                 status?: number | null;
                 /** @description Only requests with this outcome. */
@@ -12577,6 +13201,7 @@ export interface operations {
             query?: {
                 limit?: number;
                 cursor?: string | null;
+                zone?: string | null;
             };
             header?: never;
             path?: never;
@@ -12645,6 +13270,7 @@ export interface operations {
             query?: {
                 limit?: number;
                 cursor?: string | null;
+                zone?: string | null;
             };
             header?: never;
             path?: never;
@@ -12849,6 +13475,7 @@ export interface operations {
             query?: {
                 limit?: number;
                 cursor?: string | null;
+                zone?: string | null;
             };
             header?: never;
             path?: never;
@@ -12932,6 +13559,423 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RollbackOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    listZones: {
+        parameters: {
+            query?: {
+                /** @description Installation admins also get archived zones. */
+                include_archived?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Page_ZoneOut_"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    createZone: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ZoneCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ZoneOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    archiveZone: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ZoneOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    updateZone: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ZoneUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ZoneOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    putZoneLimits: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                zone: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ZoneLimitSet"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ZoneLimitsOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    putZoneMemberDefaults: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                zone: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ZoneMemberDefaultsSet"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ZoneMemberDefaultsOut"];
                 };
             };
             /** @description Missing or invalid credentials */

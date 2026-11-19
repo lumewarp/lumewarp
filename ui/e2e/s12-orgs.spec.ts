@@ -179,9 +179,9 @@ test("org admin sees only its org, creates and archives a team there, and cannot
   // The API refuses the policy write, not only the missing button.
   const { context, csrf } = await memberSession(browser, ORG_ADMIN);
   try {
-    const denied = await context.request.patch(`/api/v1/orgs/${own.id}`, {
+    const denied = await context.request.put(`/api/v1/zones/default/limits`, {
       headers: { "X-Lumewarp-CSRF": csrf },
-      data: { budget_nano_usd: 1 },
+      data: { org_id: own.id, budget_nano_usd: 1 },
     });
     expect(denied.status()).toBe(403);
   } finally {
@@ -218,7 +218,7 @@ test("org admin is listed in its org's teams by inheritance and owns a key there
 
 test("team admin cannot edit team totals but edits member defaults and a member exception", async ({ page }) => {
   const team = await admin.ensureTeam("s12-settings");
-  await admin.patch(`/teams/${team.id}`, { rpm_limit: 100 });
+  await admin.zoneLimits({ team_id: team.id }, { rpm_limit: 100 });
   await admin.putMember(team.id, TEAM_ADMIN_EMAIL, "admin");
   await admin.putMember(team.id, VIEWER_EMAIL);
 
@@ -271,7 +271,7 @@ test("a service account is deactivated and reactivated by a team admin", async (
 
 test("a member edits an own key's limits within the cap and sees the 422 above it", async ({ page, browser }) => {
   const team = await admin.ensureTeam("s12-keylimits");
-  await admin.patch(`/teams/${team.id}`, { member_rpm_default: 5 });
+  await admin.put(`/zones/default/member-defaults`, { team_id: team.id, rpm_limit: 5 });
   await admin.putMember(team.id, VIEWER_EMAIL);
   const created = await memberKey(browser, VIEWER, team.id, "s12-limit-key");
 

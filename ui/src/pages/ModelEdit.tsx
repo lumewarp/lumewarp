@@ -6,7 +6,8 @@ import { useEffect, useState } from "react";
 import { api, ApiError, type Model, type ModelTest } from "../api";
 import { Badge, nanoToUsd, usdToNano } from "../components/Bits";
 import { EditPage, Section } from "../components/EditPage";
-import { CheckField, Field, NumberField, required, SelectField, TextField, useForm } from "../components/Form";
+import { DataTable } from "../components/Table";
+import { CheckField, Field, NumberField, required, SelectField, SwitchField, TextField, useForm } from "../components/Form";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { ComboboxField } from "../components/ui/combobox-field";
@@ -15,6 +16,7 @@ import { HelpTip } from "../components/ui/help-tip";
 import { Input } from "../components/ui/input";
 import { Textarea } from "../components/ui/textarea";
 import { useAliases, useModels, useMut, useNames, useRouters, useUpstreams } from "../hooks";
+import { useZone, ZoneBadge } from "../zone";
 import { usedBy } from "../lib/catalog";
 import { MODEL_TYPES, type ModelType, typeLabel } from "../lib/modelType";
 import { PageLoading } from "./Access";
@@ -55,6 +57,8 @@ interface Values {
   model_type: ModelType | "";
   name: string;
   keep_old_name_as_alias: boolean;
+  /** Whether the model is deployed in the header zone; off removes this zone's deployment. */
+  deploy: boolean;
   upstream_id: string;
   upstream_model: string;
   max_input_tokens: number | null;
@@ -78,6 +82,7 @@ const blank: Values = {
   model_type: "",
   name: "",
   keep_old_name_as_alias: true,
+  deploy: true,
   upstream_id: "",
   upstream_model: "",
   max_input_tokens: null,
@@ -97,12 +102,15 @@ const blank: Values = {
   check_healthy: null,
 };
 
-const fromModel = (m: Model): Values => ({
+const fromModel = (m: Model, zone: string): Values => {
+  const deployment = (m.deployments ?? []).find((d) => d.zone === zone);
+  return {
   model_type: m.model_type,
   name: m.name,
   keep_old_name_as_alias: true,
-  upstream_id: m.upstream_id,
-  upstream_model: m.upstream_model,
+  deploy: !!deployment,
+  upstream_id: deployment?.upstream_id ?? "",
+  upstream_model: deployment?.upstream_model ?? "",
   max_input_tokens: m.max_input_tokens,
   max_output_tokens: m.max_output_tokens,
   price_in: nanoToUsd(m.price_input_nano_usd_per_mtok),
@@ -114,12 +122,13 @@ const fromModel = (m: Model): Values => ({
   reasoning_mode: m.reasoning.mode === "passthrough" && !m.reasoning.default_level ? blank.reasoning_mode : m.reasoning.mode,
   levels: rowsOf(Object.entries(m.reasoning.fragments ?? {}).map(([k, v]) => [k, Object.keys(v).length ? JSON.stringify(v, null, 1) : ""])),
   reasoning_default: m.reasoning.default_level ?? "",
-  check_enabled: !!m.chat_check,
-  check_interval_ms: m.chat_check?.interval_ms ?? blank.check_interval_ms,
-  check_timeout_ms: m.chat_check?.timeout_ms ?? blank.check_timeout_ms,
-  check_unhealthy: m.chat_check?.unhealthy_threshold ?? null,
-  check_healthy: m.chat_check?.healthy_threshold ?? null,
-});
+  check_enabled: !!deployment?.chat_check,
+  check_interval_ms: deployment?.chat_check?.interval_ms ?? blank.check_interval_ms,
+  check_timeout_ms: deployment?.chat_check?.timeout_ms ?? blank.check_timeout_ms,
+  check_unhealthy: deployment?.chat_check?.unhealthy_threshold ?? null,
+  check_healthy: deployment?.chat_check?.healthy_threshold ?? null,
+  };
+};
 
 /** An empty string is "not set"; anything else must be a JSON object without gateway-owned keys. */
 function jsonObjectProblem(text: string, reserved: string[] = RESERVED): string | undefined {
@@ -179,8 +188,6 @@ const body = (v: Values) => {
   return {
   model_type: type,
   name: v.name.trim(),
-  upstream_id: v.upstream_id,
-  upstream_model: v.upstream_model.trim(),
   price_input_nano_usd_per_mtok: usdToNano(v.price_in),
   price_output_nano_usd_per_mtok: shows.out ? usdToNano(v.price_out) : null,
   price_nano_usd_per_audio_second: shows.audio ? usdToNano(v.price_audio) : null,
@@ -189,11 +196,19 @@ const body = (v: Values) => {
   default_body: shows.body ? parseObject(v.default_body) : null,
   // Level names are free strings; schema.d.ts may still list the old literals.
   reasoning: shows.llm ? reasoning(v) : null,
-  chat_check: v.check_enabled
-    ? { interval_ms: v.check_interval_ms ?? 0, timeout_ms: v.check_timeout_ms ?? 0, unhealthy_threshold: v.check_unhealthy, healthy_threshold: v.check_healthy }
-    : null,
   };
 };
+
+/** The header zone's deployment as the API takes it. */
+const deploymentBody = (v: Values) => ({
+  upstream_id: v.upstream_id,
+  upstream_model: v.upstream_model.trim(),
+  chat_check: v.check_enabled
+    ? { interval_ms: v.check_interval_ms ?? 60000, timeout_ms: v.check_timeout_ms ?? 10000, unhealthy_threshold: v.check_unhealthy, healthy_threshold: v.check_healthy }
+    : null,
+});
+const DEPLOY_FIELDS = ["deploy", "upstream_id", "upstream_model", "check_enabled", "check_interval_ms", "check_timeout_ms", "check_unhealthy", "check_healthy"] as const;
+const deploymentChanged = (a: Values, b: Values) => DEPLOY_FIELDS.some((k) => a[k] !== b[k]);
 
 /** Leaf field names of 422 messages mapped to form fields. */
 const ALIAS = {
@@ -214,6 +229,8 @@ const ALIAS = {
 export function ModelEdit() {
   const { modelId } = useParams({ strict: false }) as { modelId?: string };
   const list = useModels();
+  const { name: zone, zone: zoneRow } = useZone();
+  const zoneLabel = zoneRow?.display_name || zone;
   const existing = modelId ? list.data?.find((m) => m.id === modelId) : undefined;
   if (modelId && list.isPending) return <PageLoading />;
   if (modelId && !existing) {
@@ -223,19 +240,21 @@ export function ModelEdit() {
       </Alert>
     );
   }
-  return <ModelForm key={existing?.id ?? "new"} existing={existing} />;
+  return <ModelForm key={`${existing?.id ?? "new"}@${zone}`} existing={existing} zone={zone} zoneLabel={zoneLabel} />;
 }
 
-function ModelForm({ existing }: { existing?: Model }) {
+function ModelForm({ existing, zone, zoneLabel }: { existing?: Model; zone: string; zoneLabel: string }) {
   const navigate = useNavigate();
-  const upstreams = useUpstreams();
+  const { zones, setZone } = useZone();
+  const allUpstreams = useUpstreams();
+  const upstreams = { ...allUpstreams, data: allUpstreams.data?.filter((u) => u.zone === zone) };
   const upstreamName = useNames(upstreams.data);
-  const initial = existing ? fromModel(existing) : blank;
+  const initial = existing ? fromModel(existing, zone) : blank;
   const form = useForm<Values>(initial, {
     model_type: required("Type"),
     name: required("Name"),
-    upstream_id: required("Upstream"),
-    upstream_model: required("Upstream model"),
+    upstream_id: (x, all) => (all.deploy ? required("Upstream")(x) : undefined),
+    upstream_model: (x, all) => (all.deploy ? required("Upstream model")(x) : undefined),
     // reasoning_effort has its own default below.
     default_body: (x, all) => (all.model_type && !SHOWS[all.model_type].body ? undefined : jsonObjectProblem(x, [...RESERVED, "reasoning_effort"])),
     levels: (x, all) => (hidesReasoning(all) ? undefined : all.reasoning_on && all.reasoning_mode === "mapped" ? levelsProblem(x) : undefined),
@@ -244,25 +263,34 @@ function ModelForm({ existing }: { existing?: Model }) {
       if (all.reasoning_mode === "mapped") return x && !all.levels.some((r) => r.name.trim() === x) ? "This level is not in the list" : undefined;
       return !x.trim() || LEVEL_NAME.test(x.trim()) ? undefined : "Letters, digits, . _ - (max 32)";
     },
-    check_interval_ms: (x, all) => (all.check_enabled && (x ?? 0) < 1000 ? "At least 1000 ms" : undefined),
-    check_timeout_ms: (x, all) => (all.check_enabled && ((x ?? 0) < 1 || (x ?? 0) >= (all.check_interval_ms ?? 0)) ? "Must be above 0 and below the interval" : undefined),
+    check_interval_ms: (x, all) => (all.deploy && all.check_enabled && (x ?? 0) < 1000 ? "At least 1000 ms" : undefined),
+    check_timeout_ms: (x, all) => (all.deploy && all.check_enabled && ((x ?? 0) < 1 || (x ?? 0) >= (all.check_interval_ms ?? 0)) ? "Must be above 0 and below the interval" : undefined),
   });
   const v = form.values;
   const shows = v.model_type ? SHOWS[v.model_type] : null;
   const dirty = JSON.stringify(v) !== JSON.stringify(initial);
   const selectedUpstream = upstreams.data?.find((u) => u.id === v.upstream_id);
-  const savedUpstream = existing ? upstreams.data?.find((u) => u.id === existing.upstream_id) : undefined;
+  const savedDeployment = existing?.deployments?.find((d) => d.zone === zone);
+  const otherDeployments = (existing?.deployments ?? []).filter((d) => d.zone !== zone);
+  const savedUpstream = savedDeployment
+    ? upstreams.data?.find((u) => u.id === savedDeployment.upstream_id)
+    : undefined;
   const pluginMode = !!selectedUpstream?.auth || !!savedUpstream?.auth;
   const saveFirst =
     pluginMode && (!existing || dirty)
       ? "Save the model first: Test now for an auth plugin upstream runs on a gateway with the saved configuration."
       : undefined;
-  const test = useChatTest(v, existing?.id, pluginMode, saveFirst, upstreams.isPending);
+  const test = useChatTest(v, existing?.id, pluginMode, saveFirst, upstreams.isPending, zone, !!savedDeployment);
   const renamed = !!existing && v.name.trim() !== existing.name;
-  const save = useMut(
-    (x: Values) => (existing ? api.updateModel(existing.id, { ...body(x), keep_old_name_as_alias: renamed && x.keep_old_name_as_alias }) : api.createModel(body(x))),
-    existing ? "Model saved" : "Model created",
-  );
+  // The definition is saved first, then this zone's deployment is put or removed.
+  const save = useMut(async (x: Values) => {
+    const model = existing
+      ? await api.updateModel(existing.id, { ...body(x), keep_old_name_as_alias: renamed && x.keep_old_name_as_alias })
+      : await api.createModel(body(x));
+    if (x.deploy && (!existing || deploymentChanged(x, initial))) await api.putModelDeployment(model.id, zone, deploymentBody(x));
+    else if (!x.deploy && savedDeployment) await api.deleteModelDeployment(model.id, zone);
+    return model;
+  }, existing ? "Model saved" : "Model created");
   // The upstream's own list feeds the picker; any name can still be typed.
   const offered = useQuery({ queryKey: ["upstream-models", v.upstream_id], queryFn: () => api.upstreamModels(v.upstream_id), enabled: !!v.upstream_id, retry: false, staleTime: 60_000 });
   const listed = offered.data?.models ?? [];
@@ -293,17 +321,17 @@ function ModelForm({ existing }: { existing?: Model }) {
 
   return (
     <EditPage
-      title={existing ? existing.name : "New model"}
-      description={v.upstream_id && v.upstream_model.trim() ? `${upstreamName(v.upstream_id)}/${v.upstream_model.trim()}` : undefined}
+      title={existing ? existing.name : `New model in ${zoneLabel}`}
+      description={v.deploy && v.upstream_id && v.upstream_model.trim() ? `${upstreamName(v.upstream_id)}/${v.upstream_model.trim()} in ${zoneLabel}` : undefined}
       back="/models"
       backLabel="Models"
       dirty={dirty}
       submitLabel={existing ? "Save" : "Create"}
       actions={
         <>
-          {existing && <HealthBadge health={existing.health} probe={existing.probe} />}
-          {test.button}
-          {test.hint && <HelpTip label="Test now" text={test.hint} />}
+          {savedDeployment && <HealthBadge health={savedDeployment.health} probe={savedDeployment.probe} />}
+          {v.deploy && test.button}
+          {v.deploy && test.hint && <HelpTip label="Test now" text={test.hint} />}
         </>
       }
       onSubmit={async () => {
@@ -334,22 +362,6 @@ function ModelForm({ existing }: { existing?: Model }) {
         />
         <TextField label="Name" value={v.name} onChange={(x) => form.set("name", x)} error={form.errors.name} autoFocus={!existing} hint="What clients send as model." />
         {renamed && <CheckField label="Keep old name as alias" checked={v.keep_old_name_as_alias} onChange={(c) => form.set("keep_old_name_as_alias", c)} />}
-        <ComboboxField label="Upstream" value={v.upstream_id} onChange={(x) => form.set("upstream_id", x)} error={form.errors.upstream_id} options={(upstreams.data ?? []).map((u) => ({ value: u.id, label: u.name }))} />
-        {saveFirst && (
-          <p className="text-xs text-muted-foreground" data-testid="test-now-hint">
-            {saveFirst}
-          </p>
-        )}
-        <ComboboxField
-          free
-          label="Upstream model"
-          value={v.upstream_model}
-          onChange={(x) => pickModel(String(x))}
-          error={form.errors.upstream_model}
-          placeholder="meta-llama/Llama-3.1-8B-Instruct"
-          options={modelOptions}
-          note={modelNote}
-        />
       </Section>
 
       <Section title="Limits and pricing">
@@ -439,22 +451,79 @@ function ModelForm({ existing }: { existing?: Model }) {
       </Section>}
 
       <Section
-        title="Periodic health check"
-        hint="While on, each gateway sends a short request of this model's type on this schedule, which the upstream may bill, and a failing model gets no traffic if another candidate is available."
-        toggle={{ label: "Check periodically", checked: v.check_enabled, onChange: (x) => form.set("check_enabled", x) }}
+        title={`Deployment in ${zoneLabel}`}
+        hint="The upstream and upstream model that serve this model in the header zone; the definition above is the same in every zone. Off removes this zone's deployment."
+        toggle={{ label: "Deploy in this zone", checked: v.deploy, onChange: (x) => form.set("deploy", x) }}
       >
-        {v.check_enabled && (
-          <div className="grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-3">
-            <NumberField label="Interval (ms)" value={v.check_interval_ms} onChange={(x) => form.set("check_interval_ms", x)} error={form.errors.check_interval_ms} min={1000} placeholder="60000" />
-            <NumberField label="Timeout (ms)" value={v.check_timeout_ms} onChange={(x) => form.set("check_timeout_ms", x)} error={form.errors.check_timeout_ms} min={1} placeholder="10000" />
-            <NumberField label="Failures to mark down" value={v.check_unhealthy} onChange={(x) => form.set("check_unhealthy", x)} error={form.errors.check_unhealthy} min={1} placeholder="3" />
-            <NumberField label="Successes to mark up" value={v.check_healthy} onChange={(x) => form.set("check_healthy", x)} error={form.errors.check_healthy} min={1} placeholder="1" />
-          </div>
+        {v.deploy ? (
+          <>
+        <ComboboxField label="Upstream" value={v.upstream_id} onChange={(x) => form.set("upstream_id", x)} error={form.errors.upstream_id} options={(upstreams.data ?? []).map((u) => ({ value: u.id, label: u.name }))} />
+        {saveFirst && (
+          <p className="text-xs text-muted-foreground" data-testid="test-now-hint">
+            {saveFirst}
+          </p>
+        )}
+        <ComboboxField
+          free
+          label="Upstream model"
+          value={v.upstream_model}
+          onChange={(x) => pickModel(String(x))}
+          error={form.errors.upstream_model}
+          placeholder="meta-llama/Llama-3.1-8B-Instruct"
+          options={modelOptions}
+          note={modelNote}
+        />
+            <DeploymentCheck values={v} errors={form.errors} set={form.set} />
+          </>
+        ) : (
+          <p className="text-sm text-muted-foreground" data-testid="not-deployed">
+            Not deployed in {zoneLabel}: the gateways of this zone do not serve this model.
+          </p>
         )}
       </Section>
 
+      {otherDeployments.length > 0 && (
+        <Section title="Deployments in other zones" hint="Read-only here; switch the header zone to change one.">
+          <DataTable
+            rows={otherDeployments}
+            rowKey={(d) => d.zone}
+            columns={[
+              { key: "zone", header: "Zone", cell: (d) => <ZoneBadge zone={zones.find((z) => z.name === d.zone) ?? { name: d.zone, display_name: "", color: "gray" }} /> },
+              { key: "upstream", header: "Upstream", cell: (d) => <code>{d.upstream_name}/{d.upstream_model}</code> },
+              { key: "health", header: "Health", cell: (d) => <HealthBadge health={d.health} probe={d.probe} /> },
+              {
+                key: "switch",
+                header: "",
+                cell: (d) => (
+                  <Button type="button" variant="outline" size="sm" onClick={() => setZone(d.zone)} aria-label={`Switch to zone ${d.zone}`}>
+                    Switch to zone
+                  </Button>
+                ),
+              },
+            ]}
+          />
+        </Section>
+      )}
+
       {existing && <UsedBy model={existing} />}
     </EditPage>
+  );
+}
+
+/** The periodic check of this zone's deployment. */
+function DeploymentCheck({ values: v, errors, set }: { values: Values; errors: Partial<Record<keyof Values, string>>; set: <K extends keyof Values>(k: K, value: Values[K]) => void }) {
+  return (
+    <div className="flex flex-col gap-3 rounded-lg border border-dashed p-3">
+      <SwitchField label="Check periodically" checked={v.check_enabled} onChange={(x) => set("check_enabled", x)} hint="While on, each gateway of this zone sends a short request of this model's type on this schedule, which the upstream may bill, and a failing model gets no traffic if another candidate is available." />
+      {v.check_enabled && (
+        <div className="grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-3">
+          <NumberField label="Interval (ms)" value={v.check_interval_ms} onChange={(x) => set("check_interval_ms", x)} error={errors.check_interval_ms} min={1000} placeholder="60000" />
+          <NumberField label="Timeout (ms)" value={v.check_timeout_ms} onChange={(x) => set("check_timeout_ms", x)} error={errors.check_timeout_ms} min={1} placeholder="10000" />
+          <NumberField label="Failures to mark down" value={v.check_unhealthy} onChange={(x) => set("check_unhealthy", x)} error={errors.check_unhealthy} min={1} placeholder="3" />
+          <NumberField label="Successes to mark up" value={v.check_healthy} onChange={(x) => set("check_healthy", x)} error={errors.check_healthy} min={1} placeholder="1" />
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -469,7 +538,7 @@ const CREDENTIAL: Record<ModelTest["credential"], string> = {
  * One probe request now. Without an auth plugin it tests the form as it stands; with one only a
  * saved model can be probed, by a gateway, so the button waits for a save.
  */
-function useChatTest(values: Values, modelId: string | undefined, pluginMode: boolean, saveReason: string | undefined, upstreamsPending: boolean) {
+function useChatTest(values: Values, modelId: string | undefined, pluginMode: boolean, saveReason: string | undefined, upstreamsPending: boolean, zone: string, deployed: boolean) {
   const [result, setResult] = useState<ModelTest | null>(null);
   const qc = useQueryClient();
   const run = useMutation({
@@ -478,7 +547,7 @@ function useChatTest(values: Values, modelId: string | undefined, pluginMode: bo
     mutationFn: () => {
       if (pluginMode) {
         if (!modelId) throw new Error(saveReason ?? "Save the model first.");
-        return api.testSavedModel(modelId);
+        return api.testDeployment(modelId, zone);
       }
       let defaultBody: Record<string, unknown> | null = null;
       try {
@@ -486,7 +555,8 @@ function useChatTest(values: Values, modelId: string | undefined, pluginMode: bo
       } catch {
         // An invalid body is flagged on the field; test without it.
       }
-      return api.testModel({ model_type: values.model_type as ModelType, upstream_id: values.upstream_id, upstream_model: values.upstream_model.trim(), default_body: defaultBody, model_id: modelId });
+      // A form test is kept on the saved deployment only when one exists.
+      return api.testModel({ model_type: values.model_type as ModelType, upstream_id: values.upstream_id, upstream_model: values.upstream_model.trim(), default_body: defaultBody, model_id: deployed ? modelId : undefined, zone });
     },
     onSuccess: setResult,
   });

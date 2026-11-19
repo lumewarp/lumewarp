@@ -26,13 +26,13 @@ from lumewarp_control_plane.models import (
     McpServerGrant,
     MemberPolicy,
     Model,
+    ModelDeployment,
     Org,
     OrgAdmin,
     PolicyGrant,
     Router,
     RouterFallback,
     RouterMember,
-    Scope,
     ServiceAccount,
     Team,
     TeamMember,
@@ -40,8 +40,15 @@ from lumewarp_control_plane.models import (
     Upstream,
     UpstreamKind,
     User,
+    Zone,
+    ZoneLimit,
+    ZoneMemberDefaults,
 )
 from lumewarp_control_plane.security import SecretKind, generate_secret
+
+# The config zone rows are built in. API tests point this at their own zone row
+# (tests/api/conftest.py); compiler tests use the `default` zone they seed.
+DEFAULT_ZONE = "default"
 
 _seq = itertools.count(1)
 
@@ -50,10 +57,13 @@ def _unique(prefix: str) -> str:
     return f"{prefix}-{next(_seq)}-{uuid7().hex[-6:]}"
 
 
-async def scope(session: AsyncSession, name: str = "default") -> Scope:
-    row = Scope(name=name)
-    session.add(row)
-    await session.flush()
+async def zone(session: AsyncSession, name: str = "default") -> Zone:
+    """The zone row, created if absent (another fixture may have committed it)."""
+    row = await session.get(Zone, name)
+    if row is None:
+        row = Zone(name=name)
+        session.add(row)
+        await session.flush()
     return row
 
 
@@ -109,12 +119,24 @@ async def grant(
     await session.refresh(owner)
 
 
-async def make_upstream(session: AsyncSession, name: str | None = None, **kw) -> Upstream:
+async def ensure_zone(session: AsyncSession, name: str) -> None:
+    """The zone row, created if the test did not seed it (an upstream/model needs one)."""
+    if await session.get(Zone, name) is None:
+        session.add(Zone(name=name))
+        await session.flush()
+
+
+async def make_upstream(
+    session: AsyncSession, name: str | None = None, *, zone: str | None = None, **kw
+) -> Upstream:
+    zone = zone or DEFAULT_ZONE
+    await ensure_zone(session, zone)
     name = name or _unique("upstream")
-    row = await session.scalar(select(Upstream).where(Upstream.name == name))
+    row = await session.scalar(select(Upstream).where(Upstream.zone == zone, Upstream.name == name))
     if row is None:
         row = Upstream(
             name=name,
+            zone=zone,
             kind=kw.pop("kind", UpstreamKind.VLLM),
             base_url=kw.pop("base_url", f"http://{name}/v1"),
             **kw,
@@ -128,19 +150,34 @@ async def make_model(
     session: AsyncSession,
     name: str | None = None,
     upstream: Upstream | None = None,
+    *,
+    zone: str | None = None,
+    deploy: bool = True,
     **kw,
 ) -> Model:
-    upstream = upstream or await make_upstream(session)
+    """A model definition, deployed in `zone` on `upstream` (a fresh one there by default)."""
+    zone = zone or DEFAULT_ZONE
+    await ensure_zone(session, zone)
+    upstream = upstream or await make_upstream(session, zone=zone)
+    upstream_model = kw.pop("upstream_model", None)
     row = await catalog_name(session, name or _unique("model"))
     model = Model(
         model_type=kw.pop("model_type", "llm"),
         name_id=row.id,
-        upstream_id=upstream.id,
-        upstream_model=kw.pop("upstream_model", f"{row.name}-name"),
         **kw,
     )
     session.add(model)
     await session.flush()
+    if deploy:
+        session.add(
+            ModelDeployment(
+                name_id=model.id,
+                zone=zone,
+                upstream_id=upstream.id,
+                upstream_model=upstream_model or f"{row.name}-name",
+            )
+        )
+        await session.flush()
     await session.refresh(model)
     return model
 
@@ -179,19 +216,44 @@ async def make_alias(session: AsyncSession, name: str, target: Model | Router) -
     return alias
 
 
+LIMIT_FIELDS = ("rpm_limit", "tpm_limit", "max_parallel", "budget_nano_usd")
+MEMBER_DEFAULT_FIELDS = (
+    "member_rpm_default",
+    "member_tpm_default",
+    "member_max_parallel_default",
+)
+
+
+def _limits(kw: dict) -> dict:
+    """Pop the zone-limit fields from a factory kwargs dict."""
+    return {name: kw.pop(name) for name in LIMIT_FIELDS if name in kw}
+
+
+async def _zone_limits(session: AsyncSession, zone: str | None = None, **owner) -> None:
+    limits = owner.pop("limits")
+    if limits:
+        session.add(ZoneLimit(zone=zone or DEFAULT_ZONE, **owner, **limits))
+        await session.flush()
+
+
 async def make_org(session: AsyncSession, name: str | None = None, **kw) -> Org:
     """An org. A named org is reused so a test can put several teams in one; an unnamed one
     is fresh (there is no implicit default org any more)."""
+    zone = kw.pop("zone", None)
+    await ensure_zone(session, zone or DEFAULT_ZONE)
+    limits = _limits(kw)
     if name is None:
         row = Org(name=_unique("org"), **kw)
         session.add(row)
         await session.flush()
+        await _zone_limits(session, zone, org_id=row.id, limits=limits)
         return row
     row = await session.scalar(select(Org).where(Org.name == name))
     if row is None:
         row = Org(name=name, **kw)
         session.add(row)
         await session.flush()
+        await _zone_limits(session, zone, org_id=row.id, limits=limits)
     return row
 
 
@@ -214,9 +276,25 @@ async def make_team(
     **policy,
 ) -> Team:
     org = org or await make_org(session)
+    zone = policy.pop("zone", None)
+    await ensure_zone(session, zone or DEFAULT_ZONE)
+    limits = _limits(policy)
+    defaults = {name: policy.pop(name) for name in MEMBER_DEFAULT_FIELDS if name in policy}
     team = Team(name=name or _unique("team"), org_id=org.id, **policy)
     session.add(team)
     await session.flush()
+    await _zone_limits(session, zone, team_id=team.id, limits=limits)
+    if defaults:
+        session.add(
+            ZoneMemberDefaults(
+                zone=zone or DEFAULT_ZONE,
+                team_id=team.id,
+                rpm_limit=defaults.get("member_rpm_default"),
+                tpm_limit=defaults.get("member_tpm_default"),
+                max_parallel=defaults.get("member_max_parallel_default"),
+            )
+        )
+        await session.flush()
     await grant(session, team, list(allowed_models))
     return team
 
@@ -235,10 +313,13 @@ async def make_member(
     member = TeamMember(team_id=team.id, user_id=user.id, role=role)
     session.add(member)
     await session.flush()
-    if policy or allowed_models:
+    zone = policy.pop("zone", None)
+    limits = _limits(policy)
+    if policy or allowed_models or limits:
         row = MemberPolicy(team_id=team.id, user_id=user.id, **policy)
         session.add(row)
         await session.flush()
+        await _zone_limits(session, zone, team_id=team.id, user_id=user.id, limits=limits)
         await grant(session, row, list(allowed_models))
     return member
 
@@ -251,9 +332,12 @@ async def make_service_account(
     allowed_models: list[str] = (),
     **policy,
 ) -> ServiceAccount:
+    zone = policy.pop("zone", None)
+    limits = _limits(policy)
     sa = ServiceAccount(team_id=team.id, name=name or _unique("sa"), **policy)
     session.add(sa)
     await session.flush()
+    await _zone_limits(session, zone, team_id=team.id, service_account_id=sa.id, limits=limits)
     await grant(session, sa, list(allowed_models))
     return sa
 
@@ -268,6 +352,7 @@ def new_key(team: Team, owner: User | ServiceAccount, **kw) -> ApiKey:
     )
     return ApiKey(
         team_id=team.id,
+        zone=kw.pop("zone", None) or DEFAULT_ZONE,
         name=kw.pop("name", "key"),
         key_hash=kw.pop("key_hash", secret.hash),
         display_prefix=secret.display_prefix,
@@ -281,6 +366,7 @@ async def make_key(session: AsyncSession, team: Team, owner: User | ServiceAccou
     suspends such keys), so tests can build that state.
     """
     key = new_key(team, owner, **kw)
+    await ensure_zone(session, key.zone)
     session.add(key)
     await session.flush()
     return key
@@ -298,6 +384,7 @@ async def make_mcp_server(
 ) -> McpServer:
     server = McpServer(
         name=name or _unique("server").replace("_", "-"),
+        zone=kw.pop("zone", None) or DEFAULT_ZONE,
         url=kw.pop("url", f"http://{name or 'mcp'}.test/mcp"),
         review_mode=kw.pop("review_mode", McpReviewMode.TOFU),
         **kw,
@@ -346,6 +433,7 @@ def new_definition(
 async def make_agent(session: AsyncSession, name: str | None = None, **kw) -> A2aAgent:
     agent = A2aAgent(
         name=name or _unique("agent").replace("_", "-"),
+        zone=kw.pop("zone", None) or DEFAULT_ZONE,
         url=kw.pop("url", f"http://{name or 'agent'}.test/a2a"),
         **kw,
     )

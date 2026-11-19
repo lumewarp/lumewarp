@@ -1,6 +1,6 @@
 """Descriptions of request fields, for the OpenAPI document.
 
-The same field appears in many request bodies (`rpm_limit` in eleven), so the text lives
+The same field appears in many request bodies (`team_id` in several), so the text lives
 here once instead of in every `Field(...)`. `describe` is the `json_schema_extra` of the
 schema base classes: it fills in a property that has no description of its own, looking
 up `(model, field)` first, through the model's bases, and then the field name alone. A
@@ -12,10 +12,6 @@ description written on the field itself always wins. Response models (`*Out`,
 
 from typing import Any
 
-_LIMIT_SCOPE = (
-    " at this level; null = no limit here. A lower level may not exceed a higher one"
-    " (org, team, owner, key)."
-)
 _ACCESS = (
     "`inherit` keeps the parent's set, `all` grants everything the parent allows, `list`"
     " grants exactly `{rows}`."
@@ -43,11 +39,11 @@ BY_NAME: dict[str, str] = {
     "mcp_servers": "MCP server grants used when `mcp_access` is `list`; empty denies all.",
     "a2a_access": _ACCESS.format(rows="a2a_agents"),
     "a2a_agents": "A2A agent names granted when `a2a_access` is `list`; empty denies all.",
-    "rpm_limit": "Requests per minute" + _LIMIT_SCOPE,
-    "tpm_limit": "Tokens per minute" + _LIMIT_SCOPE,
-    "max_parallel": "Concurrent requests" + _LIMIT_SCOPE,
+    "rpm_limit": "Requests per minute in this zone; null = no limit at this level.",
+    "tpm_limit": "Tokens per minute in this zone; null = no limit at this level.",
+    "max_parallel": "Concurrent requests in this zone; null = no limit at this level.",
     "budget_nano_usd": (
-        "Budget per UTC calendar month in nano-USD (1e-9 USD); null = no budget at this level."
+        "Budget per UTC calendar month in nano-USD (1e-9 USD) in this zone; null = none."
     ),
     "max_keys_per_member": (
         "How many keys one member may own in the team; null = unlimited. Service-account"
@@ -69,6 +65,31 @@ BY_NAME: dict[str, str] = {
         "Concurrent requests for each member who has no limit of their own; capped by the"
         " team's limit. null = none."
     ),
+    # Zones
+    "zone": "Config zone the record belongs to; omitted = the default zone.",
+    "org_id": "The org this limit row or usage filter belongs to.",
+    "team_id": "The team this limit row or filter belongs to.",
+    "user_id": "The member this limit row belongs to; requires team_id.",
+    "service_account_id": "The service account this limit row belongs to; requires team_id.",
+    "color": "One of the fixed palette names: gray, blue, green, amber, red, violet.",
+    "playground_gateway_url": (
+        "Gateway base URL the Playground forwards to for keys of this zone; null = Playground"
+        " unavailable there."
+    ),
+    "key_min_creator_role": (
+        "The lowest team role that may create a key in this zone: member, team_admin or"
+        " org_admin (installation admins always may)."
+    ),
+    "key_max_lifetime_seconds": (
+        "Longest lifetime of a key created in this zone; null = only the team's own limit."
+    ),
+    "key_expiry_required": "Refuse a key created in this zone without an expiry.",
+    "key_max_per_member": (
+        "How many keys one member may own in this zone; null = unlimited. Service-account"
+        " keys do not count."
+    ),
+    "service_account_keys_allowed": "Allow creating service-account keys in this zone.",
+    "playground_allowed": "Allow this zone's keys in the Playground.",
     # Tenancy
     "name": "Display name, 1 to 200 characters.",
     "display_name": "Shown in the Admin UI.",

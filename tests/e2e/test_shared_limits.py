@@ -386,10 +386,7 @@ def test_max_parallel_holds_across_three_gateways(stack, redis):
             "base_url": f"http://127.0.0.1:{slow_port}/v1",
         },
     )
-    model = stack.ok(
-        "POST",
-        "/models",
-        json={
+    model = stack.create_model({
             "name": "slow-a",
             "upstream_id": upstream["id"],
             "upstream_model": "mock",
@@ -562,10 +559,7 @@ def test_killed_gateway_frees_its_parallel_slots(stack, redis, request):
             "base_url": f"http://127.0.0.1:{slow_port}/v1",
         },
     )
-    model = stack.ok(
-        "POST",
-        "/models",
-        json={
+    model = stack.create_model({
             "name": "slow-a",
             "upstream_id": upstream["id"],
             "upstream_model": "mock",

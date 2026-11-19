@@ -1,7 +1,9 @@
 # Gateway YAML
 
 The file a standalone gateway reads with `--config`. In control-plane mode the same schema
-arrives as a snapshot and only the `server:` block is read from `--local-config`.
+arrives as a snapshot and only the `server:` block is read from `--local-config`. There is
+no zone field: a standalone snapshot has an empty `zone`, and zones exist only in
+control-plane mode (`--zone`, [gateway settings](../operations/gateway.md)).
 
 The complete schema is in
 [`lumewarp-config`](https://github.com/lumewarp/lumewarp/blob/main/gateway/crates/lumewarp-config/src/lib.rs). Unknown YAML fields are

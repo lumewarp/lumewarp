@@ -22,7 +22,7 @@ reports usage to the same endpoint:
 ```sh
 # Create a gateway token with a label (**Gateways → New gateway token** in the
 # Admin UI, or `bootstrap --name gateway` for a scripted install); the token
-# authenticates the scope and stores only its SHA-256 hash. Any number of
+# authenticates the zone and stores only its SHA-256 hash. Any number of
 # gateways may use it.
 export LUMEWARP_GATEWAY_TOKEN='lwg-...'
 
@@ -30,7 +30,7 @@ lumewarp \
   --control-plane http://127.0.0.1:50051 \
   --gateway-token-env LUMEWARP_GATEWAY_TOKEN \
   --state-dir /tmp/lumewarp-state \
-  --scope default \
+  --zone default \
   --local-config /etc/lumewarp/local.yaml
 ```
 
@@ -57,11 +57,11 @@ upstreams, routers, teams and keys (including `server.api_keys`) are ignored in 
 | `--control-plane URL` | `LUMEWARP_CONTROL_PLANE` | unset | Control-plane gRPC URL (`http://` or `https://`). Enables control-plane mode and requires the three flags below. |
 | `--gateway-token-env NAME` | none | required in control-plane mode | Name of the environment variable that holds the gateway token. |
 | `--state-dir DIR` | none | required in control-plane mode | Directory for the last good snapshot. It is created `0700` on the first successful persist. |
-| `--scope SCOPE` | none | required in control-plane mode | Config scope this gateway serves. Must match the control plane and the cached snapshot. |
+| `--zone ZONE` | `LUMEWARP_ZONE` | required in control-plane mode | Config zone this gateway serves. Must match the control plane and the cached snapshot. |
 | `--local-config FILE` | none | unset | YAML with only `server:` listener/timeout settings. Without it the defaults from the YAML reference apply. |
 | `--shared-limits-redis-url URL` | `LUMEWARP_SHARED_LIMITS_REDIS_URL` | unset | `redis://` or `rediss://` endpoint used to share rate-limit counters between gateways. Empty/unset keeps the limits per gateway. The value is never logged. |
 | `--shared-limits-sync-ms MS` | `LUMEWARP_SHARED_LIMITS_SYNC_MS` | `100` | Background sync interval, 10–1000 ms; it doubles up to 1 s while a sync takes more than half of it. |
-| `--shared-limits-namespace NAME` | `LUMEWARP_SHARED_LIMITS_NAMESPACE` | `--scope` in control-plane mode | Redis key namespace. Required with a URL in standalone mode; gateways share counters only when both the Redis endpoint and the namespace match. |
+| `--shared-limits-namespace NAME` | `LUMEWARP_SHARED_LIMITS_NAMESPACE` | `--zone` in control-plane mode | Redis key namespace. Required with a URL in standalone mode; gateways share counters only when both the Redis endpoint and the namespace match. |
 | none | `LUMEWARP_ENCRYPTION_KEY` | unset | Opens upstream API keys the control plane stores sealed (`api_key_ciphertext`). Must equal the control plane's value; a snapshot with a sealed key is NACKed without it. Read when a snapshot is applied, never per request. |
 
 A minimal local config only needs the listeners:
@@ -78,7 +78,7 @@ The admin listener stays unauthenticated; keep it private (see the auth section)
 
 - On start the gateway reads `<state-dir>/snapshot.pb`. The file starts with a
   format marker, has a trailing SHA-256, is size-capped and must carry the
-  configured scope; a corrupt, truncated, wrong-scope or older-format file is
+  configured zone; a corrupt, truncated, wrong-zone or older-format file is
   never served and never offered as a delta base. The next full snapshot
   replaces it.
 - With a valid snapshot it serves `/v1/*` immediately and connects to the
@@ -88,7 +88,7 @@ The admin listener stays unauthenticated; keep it private (see the auth section)
 - Control-plane mode always requires a key: with zero keys in the snapshot every
   `/v1/*` request is 401. A revoked, suspended or expired key is 401; a key over
   budget is 429 `insufficient_quota` (the control plane flips its status).
-- The stream sends `Hello` with the cached version, scope and digest, then
+- The stream sends `Hello` with the cached version, zone and digest, then
   applies at most one update at a time: apply to a private copy, validate,
   compile, persist (`snapshot.pb.tmp` → fsync → rename → fsync directory), swap
   with ArcSwap, then ACK. A persist failure NACKs `PERSIST_FAILED` and keeps
@@ -211,7 +211,7 @@ Listener and timeout settings are read at startup and do not change without a
 restart; in control-plane mode only the config snapshot is hot-swapped. The
 gateway does not yet implement:
 
-- canary or percentage config rollout; publishing and rollback are whole-scope
+- canary or percentage config rollout; publishing and rollback are whole-zone
   versions driven by the control plane;
 - TPOT metrics; JWT/mTLS client authentication;
 - an idle timeout on upstream response bodies after headers (including

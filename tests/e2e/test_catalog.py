@@ -38,10 +38,7 @@ def _mock_upstream(stack) -> str:
 
 
 def _model(stack, name: str, upstream: str, *, upstream_model: str = "mock", price=PRICE_A) -> str:
-    return stack.ok(
-        "POST",
-        "/models",
-        json={
+    return stack.create_model({
             "name": name,
             "upstream_id": upstream,
             "upstream_model": upstream_model,
@@ -93,7 +90,7 @@ def _wait_names(gw, key: str, present=(), absent=()) -> None:
 
 def _version_settled(stack) -> int:
     """Until the last committed mutation is compiled and the gateway ACKed it."""
-    revision = pg(stack.dsn, "SELECT source_revision FROM scopes WHERE name = 'e2e'")[0][0]
+    revision = pg(stack.dsn, "SELECT source_revision FROM zones WHERE name = 'e2e'")[0][0]
 
     def compiled():
         return (
@@ -495,7 +492,7 @@ def test_usage_filters_and_renames_keep_one_identity(stack):
     assert requests(router_missing=True) == 2
 
     # An upstream change does not rewrite history: old rows keep the name they went to.
-    stack.ok("PATCH", f"/models/{b}", json={"upstream_model": "up-b2"})
+    stack.deploy_model(b, upstream_id=stack.deployment(b)["upstream_id"], upstream_model="up-b2")
     _version_settled(stack)
     moved = gw.chat(seeded.a.secret, model="qwen-coder")
     assert _row(stack, moved)["upstream_model"] == "up-b2"

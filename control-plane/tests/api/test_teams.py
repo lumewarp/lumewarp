@@ -7,10 +7,17 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane._proto.lumewarp.usage.v1 import usage_pb2
-from lumewarp_control_plane.compiler import compile_scope
+from lumewarp_control_plane.compiler import compile_zone
 from lumewarp_control_plane.models import ApiKey, KeyLifecycle, Team, TeamMember, TeamRole
 from lumewarp_control_plane.usage import ingest
-from tests.api.helpers import ADMIN_AUTH, auth, create_org, suffix, user_with_token
+from tests.api.helpers import (
+    ADMIN_AUTH,
+    auth,
+    create_org,
+    put_zone_limits,
+    suffix,
+    user_with_token,
+)
 from tests.factories import make_key, make_member, make_service_account, make_team, make_user
 
 
@@ -25,12 +32,14 @@ def test_team_crud_and_unique_name(client) -> None:
     name = f"team-{suffix()}"
     created = client.post(
         "/api/v1/teams",
-        json={"name": name, "org_id": org["id"], "budget_nano_usd": 1000},
+        json={"name": name, "org_id": org["id"]},
         headers=ADMIN_AUTH,
     )
     assert created.status_code == 201, created.text
     team = created.json()
     assert team["model_access"] == "all"
+    put_zone_limits(client, "api-test", {"team_id": team["id"]}, budget_nano_usd=1000)
+    team = client.get(f"/api/v1/teams/{team['id']}", headers=ADMIN_AUTH).json()
     assert team["budget_nano_usd"] == 1000
     assert team["org_id"] == org["id"]
     duplicate = client.post(
@@ -41,11 +50,12 @@ def test_team_crud_and_unique_name(client) -> None:
     assert client.get(path, headers=ADMIN_AUTH).json() == team
     updated = client.patch(
         path,
-        json={"name": f"renamed-{suffix()}", "budget_nano_usd": None},
+        json={"name": f"renamed-{suffix()}"},
         headers=ADMIN_AUTH,
     )
     assert updated.status_code == 200, updated.text
-    assert updated.json()["budget_nano_usd"] is None
+    put_zone_limits(client, "api-test", {"team_id": team["id"]}, budget_nano_usd=None)
+    assert client.get(path, headers=ADMIN_AUTH).json()["budget_nano_usd"] is None
     # DELETE archives; the name is free again and the row stays for history.
     assert client.delete(path, headers=ADMIN_AUTH).status_code == 204
     assert client.get(path, headers=ADMIN_AUTH).status_code == 404
@@ -124,7 +134,7 @@ async def test_archive_revokes_keys_and_deactivates_service_accounts(
 
     # The compiler leaves the team and its keys out (all keys are revoked).
     async with AsyncSession(committed.bind) as session:
-        compiled = await compile_scope(session, api_scope, require_local_membership=True)
+        compiled = await compile_zone(session, api_scope, require_local_membership=True)
     assert str(team_id) not in {row.id for row in compiled.snapshot.teams}
     assert {str(key_id), str(account_key_id)} & {
         row.key_id for row in compiled.snapshot.api_keys
@@ -164,7 +174,7 @@ async def test_archive_keeps_members_and_late_usage_ingests(client, committed, a
         outcome=usage_pb2.REQUEST_OUTCOME_COMPLETED,
     )
     async with AsyncSession(committed.bind) as session, session.begin():
-        assert await ingest(session, "gw-test", [event], scope_name=api_scope) == 1
+        assert await ingest(session, "gw-test", [event], zone=api_scope) == 1
     from lumewarp_control_plane.models import UsageTotal
 
     async with AsyncSession(committed.bind) as session:
@@ -203,18 +213,22 @@ async def test_team_admin_may_change_settings_but_not_quota(client, committed) -
     path = f"/api/v1/teams/{team.id}"
     headers = auth(token)
 
-    for body in (
-        {"rpm_limit": 20},
-        {"budget_nano_usd": 2000},
-        {"model_access": "list", "allowed_models": []},
-    ):
-        response = client.patch(path, json=body, headers=headers)
-        assert response.status_code == 403, (body, response.text)
+    for limits in ({"rpm_limit": 20}, {"budget_nano_usd": 2000}):
+        response = client.put(
+            "/api/v1/zones/api-test/limits",
+            json={"team_id": str(team.id), **limits},
+            headers=headers,
+        )
+        assert response.status_code == 403, (limits, response.text)
         assert response.json()["error"]["code"] == "forbidden"
-    unchanged = await committed.get(Team, team.id)
-    assert unchanged is not None
-    await committed.refresh(unchanged)
-    assert (unchanged.rpm_limit, unchanged.budget_nano_usd) == (10, 1000)
+    response = client.patch(
+        path, json={"model_access": "list", "allowed_models": []}, headers=headers
+    )
+    assert response.status_code == 403, response.text
+    assert response.json()["error"]["code"] == "forbidden"
+    # The refused writes changed nothing.
+    unchanged = client.get(path, headers=ADMIN_AUTH).json()
+    assert (unchanged["rpm_limit"], unchanged["budget_nano_usd"]) == (10, 1000)
 
     # Name and the member key limits are the team admin's own settings.
     renamed = client.patch(
@@ -230,10 +244,6 @@ async def test_team_admin_may_change_settings_but_not_quota(client, committed) -
         json={
             "model_access": "all",
             "allowed_models": [],
-            "rpm_limit": 10,
-            "tpm_limit": None,
-            "max_parallel": None,
-            "budget_nano_usd": 1000,
             "max_member_key_lifetime_seconds": 3600,
         },
         headers=headers,
@@ -243,10 +253,10 @@ async def test_team_admin_may_change_settings_but_not_quota(client, committed) -
     for body in ({"name": "member-edit"}, {"model_access": "all"}, {}):
         response = client.patch(path, json=body, headers=auth(member_token))
         assert response.status_code == 403, (body, response.text)
-    # Installation admin sets quota.
-    quota = client.patch(path, json={"rpm_limit": 5}, headers=ADMIN_AUTH)
-    assert quota.status_code == 200, quota.text
-    assert quota.json()["rpm_limit"] == 5
+    # Installation admin sets quota through the zone's limits.
+    quota = put_zone_limits(client, "api-test", {"team_id": str(team.id)}, rpm_limit=5)
+    assert quota["rpm_limit"] == 5
+    assert client.get(path, headers=ADMIN_AUTH).json()["rpm_limit"] == 5
 
 
 async def test_team_read_is_basic_for_a_plain_member(client, committed) -> None:

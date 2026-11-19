@@ -7,7 +7,9 @@ import { Badge, fmtDate, fmtUsd, InheritedBadge, KeyBadge, ModelPill, PageHeader
 import { ConfirmDialog } from "../components/Confirm";
 import { CreateButton, IconAction } from "../components/RowActions";
 import { FormDialog, required, SelectField, TextField, useForm } from "../components/Form";
-import { blankKeyLimits, KeyLimitFields, keyLimitsBody, type KeyLimitValues } from "../components/KeyLimits";
+import { blankKeyLimits, KeyLimitFields, keyLimitsBody, keyCreationBlock, keyRuleNotes, type KeyLimitValues } from "../components/KeyLimits";
+import { RuleViolationBadge } from "../components/KeyPill";
+import { useZone } from "../zone";
 import { DataTable } from "../components/Table";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Badge as UiBadge } from "../components/ui/badge";
@@ -54,11 +56,31 @@ import { KeyPill } from "../components/KeyPill";
 type Team = Me["teams"][number];
 
 /**
+ * The team as the header zone sees it: limits, remaining budget and key limits come from `by_zone`, so every
+ * fact below is the zone's. A zone with no entry keeps the team-wide values.
+ */
+function inZone(team: Team, zone: string): Team {
+  const z = team.by_zone?.[zone];
+  if (!z) return team;
+  return {
+    ...team,
+    limits: z.limits,
+    budget: z.budget,
+    key_limits: {
+      key_count: z.key_count,
+      max_keys_per_member: z.key_rules.key_max_per_member,
+      max_member_key_lifetime_seconds: z.key_rules.key_max_lifetime_seconds,
+    },
+  };
+}
+
+/**
  * A self-service page: the caller's own keys in one table, then every team they may hold keys in
  * (memberships first, then teams administered by inheritance) with what a key there can do.
  */
 export function MyKeys() {
   const me = useMe();
+  const zone = useZone();
   const administered = (me.data?.teams ?? []).filter((team) => team.role === "admin");
   const keys = useOwnKeys(administered.length > 0);
   const [creating, setCreating] = useState<{ team: Team | null } | null>(null);
@@ -71,13 +93,13 @@ export function MyKeys() {
       </Alert>
     );
   }
-  const teams = orderTeams(me.data?.teams ?? []);
+  const teams = orderTeams(me.data?.teams ?? []).map((team) => inZone(team, zone.name));
   const blocked = !!me.data?.authz_unavailable || me.data?.kind === "break_glass" || teams.length === 0;
   return (
     <>
       <PageHeader
         title="My keys"
-        hint="A secret is shown only once, when a key is created or rotated."
+        hint="Keys, limits and budgets are those of the zone chosen in the header; a secret is shown only once, when a key is created or rotated."
         actions={blocked ? undefined : <Button onClick={() => setCreating({ team: teams.length === 1 ? teams[0] : null })}>New key</Button>}
       />
       {me.error && me.data && <CheckFailed onRetry={() => void me.refetch()} />}
@@ -363,6 +385,7 @@ function KeysTable({
                   <span>
                     <KeyBadge k={key} />
                     <SuspendedReason reason={key.suspended_reason} />
+                    <RuleViolationBadge keyRef={key} />
                   </span>
                   {note && (
                     <span className="text-xs text-muted-foreground" data-testid={note.startsWith("Old secret") ? "grace" : "rotation-note"}>
@@ -618,6 +641,8 @@ function CreateKeyDialog({
   onCreated: (secret: string) => void;
 }) {
   const form = useForm<CreateValues>(blankCreate, { name: required("Name") });
+  const zone = useZone();
+  const zoneLabel = zone.zone?.display_name || zone.name;
   const [picked, setPicked] = useState("");
   const [teamError, setTeamError] = useState<string>();
   const team = given ?? teams.find((item) => item.team_id === picked) ?? null;
@@ -626,6 +651,7 @@ function CreateKeyDialog({
       const { models, ...rest } = values;
       return api.createKey(team!.team_id, {
         name: values.name.trim(),
+        zone: zone.name,
         expires_at: expiryFromDay(values.expires),
         ...keyLimitsBody(rest),
         ...keyModelsBody(models),
@@ -633,6 +659,9 @@ function CreateKeyDialog({
     },
     (secret) => onCreated(secret),
   );
+  const rules = team?.by_zone?.[zone.name]?.key_rules;
+  const blocked = team ? keyCreationBlock(rules, zoneLabel, { role: team.role === "admin" ? "admin" : "member", inherited: team.inherited_from, serviceAccount: false }) : null;
+  const notes = keyRuleNotes(rules, zoneLabel);
   const lifetime = team?.key_limits.max_member_key_lifetime_seconds ?? null;
   const max = lifetime === null ? undefined : lastExpiryDay(lifetime);
   const close = () => {
@@ -655,11 +684,24 @@ function CreateKeyDialog({
   return (
     <FormDialog
       open={open}
-      title={given ? `New key in ${given.team_name}` : "New key"}
+      title={given ? `New key in ${given.team_name} (${zoneLabel})` : `New key in ${zoneLabel}`}
       submitLabel="Create key"
+      submitDisabled={!!blocked}
       onClose={close}
       onSubmit={submit}
     >
+      {blocked && (
+        <Alert variant="destructive" data-testid="key-blocked">
+          <AlertDescription>{blocked}</AlertDescription>
+        </Alert>
+      )}
+      {notes.length > 0 && (
+        <ul className="m-0 list-none p-0 text-xs text-muted-foreground" data-testid="zone-key-rules">
+          {notes.map((note) => (
+            <li key={note}>{note}</li>
+          ))}
+        </ul>
+      )}
       {!given && (
         <SelectField
           label="Team"
@@ -799,6 +841,7 @@ function ServiceAccountKeys({
                   <span>
                     <KeyBadge k={key} />
                     <SuspendedReason reason={key.suspended_reason} />
+                    <RuleViolationBadge keyRef={key} />
                   </span>
                   {note && <span className="text-xs text-muted-foreground">{note}</span>}
                 </span>

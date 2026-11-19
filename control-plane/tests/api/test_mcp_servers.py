@@ -789,7 +789,7 @@ async def test_discover_records_nothing_when_the_config_changed_in_flight(
                 for name, value in change.items():
                     setattr(row, name, value)
                 row.config_revision = await outbox.enqueue_recompile(
-                    other, api_settings.scope, "test.in_flight_edit"
+                    other, "test.in_flight_edit", api_settings.zone
                 )
             return await base.handle_async_request(request)
 

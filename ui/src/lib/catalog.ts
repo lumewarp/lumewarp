@@ -13,17 +13,19 @@ export function usedBy(model: Model, routers: Router[], aliases: Alias[]) {
   };
 }
 
+/** Upstream model names a model is deployed as, in every zone, de-duplicated. */
+const modelUpstreamModels = (m: Model | undefined) => [...new Set((m?.deployments ?? []).map((d) => d.upstream_model))];
+
 /** Upstream model names behind a router's members (not its fallbacks), de-duplicated and in order. */
 export function routerUpstreamModels(r: Router, models: Map<string, Model>): string[] {
   const ids = [...r.members.map((m) => m.model_id), ...r.traffic_split.flatMap((s) => s.members.map((m) => m.model_id))];
-  return [...new Set(ids.map((id) => models.get(id)?.upstream_model).filter((x): x is string => !!x))];
+  return [...new Set(ids.flatMap((id) => modelUpstreamModels(models.get(id))))];
 }
 
 /** The upstream model(s) an alias finally reaches. */
 export function aliasUpstreamModels(a: Alias, models: Map<string, Model>, routers: Map<string, Router>): string[] {
   if (a.target_kind === "model") {
-    const m = models.get(a.target);
-    return m ? [m.upstream_model] : [];
+    return modelUpstreamModels(models.get(a.target));
   }
   const r = routers.get(a.target);
   return r ? routerUpstreamModels(r, models) : [];

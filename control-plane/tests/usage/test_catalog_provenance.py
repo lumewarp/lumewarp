@@ -11,6 +11,7 @@ from lumewarp_control_plane._proto.lumewarp.usage.v1 import usage_pb2
 from lumewarp_control_plane.models import (
     CatalogName,
     CatalogNameHistory,
+    ModelDeployment,
     ScopeType,
     UsageEvent,
     UsageTotal,
@@ -92,7 +93,10 @@ async def test_provenance_table_and_budget_by_served_cost(session, path):
         # Snapshot/model pricing itself is a gateway (c3) responsibility.
         cost_nano_usd=20,
     )
-    model.upstream_model = "changed-before-delivery"
+    deployment = await session.scalar(
+        select(ModelDeployment).where(ModelDeployment.name_id == model.id)
+    )
+    deployment.upstream_model = "changed-before-delivery"
     await session.flush()
     assert await ingest(session, "gateway", [event]) == 1
     row = await session.scalar(

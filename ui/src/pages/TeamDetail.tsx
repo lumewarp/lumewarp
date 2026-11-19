@@ -1,13 +1,13 @@
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { api, ApiError, hasPolicy, type Key, type Member, type Schemas, type ServiceAccount, type Team, type TeamAny } from "../api";
+import { api, ApiError, hasPolicy, type ZoneMemberDefaultsOut, type Key, type Member, type Schemas, type ServiceAccount, type Team, type TeamAny } from "../api";
 import { Badge, fmtDate, fmtUsd, InheritedBadge, KeyBadge, PageHeader, SuspendedReason } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
 import { FormDialog, NumberField, required, SelectField, TextField, useForm } from "../components/Form";
-import { blankKeyLimits, KeyLimitFields, keyLimitsBody, type KeyLimitCap, type KeyLimitValues } from "../components/KeyLimits";
+import { blankKeyLimits, KeyLimitFields, keyLimitsBody, keyCreationBlock, keyRuleNotes, type KeyLimitCap, type KeyLimitValues } from "../components/KeyLimits";
 import { blankKeyModels, KeyModelPicker, KeyModels, keyModelsBody, type KeyModelState } from "../components/PermissionPicker";
-import { blankPolicy, Budget, PolicyFields, policyBody, policyFrom, PolicySummary, POLICY_ALIAS, type PolicyValues } from "../components/Policy";
+import { blankPolicy, Budget, limitsChanged, PolicyFields, policyBody, policyFrom, PolicySummary, POLICY_ALIAS, saveZoneLimits, zoneLimits, type PolicyValues } from "../components/Policy";
 import { CreateButton, RowActions } from "../components/RowActions";
 import { DataTable } from "../components/Table";
 import { Alert, AlertDescription } from "../components/ui/alert";
@@ -22,7 +22,8 @@ import { useShowSecret } from "../components/SecretProvider";
 import { useToast } from "../components/Toast";
 import { KeyEditDialog } from "./KeyDialogs";
 import { expiryFromDay, fmtLifetime, lastExpiryDay } from "./keyText";
-import { KeyPill } from "../components/KeyPill";
+import { KeyPill, RuleViolationBadge } from "../components/KeyPill";
+import { useZone } from "../zone";
 
 const TABS = [
   { id: "members", label: "Members" },
@@ -157,19 +158,22 @@ function MembersPanel({
   // Only an installation admin may hand out or change a team admin role; a team admin
   // edits limits and leaves the existing role alone.
   const canAssignAdmin = perms.canAssignTeamAdmin(team.id);
+  const zone = useZone().name;
   const save = useMut(async ({ member, values }: { member: Member | null; values: MemberValues }) => {
     try {
-      if (member) {
-        return await api.updateMember(team.id, member.user_id, {
-          ...(canAssignAdmin ? { role: values.role } : {}),
-          ...policyBody(values),
-        });
-      }
-      return await api.createMember(team.id, {
-        ...(values.user_id ? { user_id: values.user_id.trim() } : { email: values.email.trim() }),
-        role: canAssignAdmin ? values.role : "member",
-        ...policyBody(values),
-      });
+      const saved = member
+        ? await api.updateMember(team.id, member.user_id, {
+            ...(canAssignAdmin ? { role: values.role } : {}),
+            ...policyBody(values),
+          })
+        : await api.createMember(team.id, {
+            ...(values.user_id ? { user_id: values.user_id.trim() } : { email: values.email.trim() }),
+            role: canAssignAdmin ? values.role : "member",
+            ...policyBody(values),
+          });
+      const before = member ? policyFrom(member, false, zone) : blankMember;
+      if (limitsChanged(before, values)) await saveZoneLimits(zone, { team_id: team.id, user_id: saved.user_id }, values);
+      return saved;
     } catch (error) {
       if (isManagedConflict(error)) onManagedExternally();
       throw error;
@@ -188,7 +192,7 @@ function MembersPanel({
     form.reset(
       member === "new"
         ? blankMember
-        : { user_id: member.user_id, email: member.email, role: member.role, ...policyFrom(member) },
+        : { user_id: member.user_id, email: member.email, role: member.role, ...policyFrom(member, false, zone) },
     );
     setEditing(member);
   };
@@ -366,12 +370,17 @@ function ServiceAccountsPanel({ team }: { team: Team }) {
   const [editing, setEditing] = useState<ServiceAccount | "new" | null>(null);
   const [deleting, setDeleting] = useState<ServiceAccount | null>(null);
   const [toggling, setToggling] = useState<ServiceAccount | null>(null);
+  const zone = useZone().name;
   const form = useForm<ServiceValues>(blankService, { name: required("Name") });
   const save = useMut(
-    ({ account, values }: { account: ServiceAccount | null; values: ServiceValues }) =>
-      account
-        ? api.updateServiceAccount(account.id, { name: values.name, description: values.description, ...policyBody(values) })
-        : api.createServiceAccount(team.id, { name: values.name, description: values.description, ...policyBody(values) }),
+    async ({ account, values }: { account: ServiceAccount | null; values: ServiceValues }) => {
+      const saved = account
+        ? await api.updateServiceAccount(account.id, { name: values.name, description: values.description, ...policyBody(values) })
+        : await api.createServiceAccount(team.id, { name: values.name, description: values.description, ...policyBody(values) });
+      const before = account ? policyFrom(account, false, zone) : blankService;
+      if (limitsChanged(before, values)) await saveZoneLimits(zone, { team_id: team.id, service_account_id: saved.id }, values);
+      return saved;
+    },
     "Service account saved",
   );
   const remove = useMut((account: ServiceAccount) => api.deleteServiceAccount(account.id), "Service account deleted");
@@ -385,7 +394,7 @@ function ServiceAccountsPanel({ team }: { team: Team }) {
     form.reset(
       account === "new"
         ? blankService
-        : { name: account.name, description: account.description, ...policyFrom(account) },
+        : { name: account.name, description: account.description, ...policyFrom(account, false, zone) },
     );
     setEditing(account);
   };
@@ -489,11 +498,14 @@ const minLimit = (own: number | null, parent: number | null | undefined) =>
   own === null ? (parent ?? null) : parent === null || parent === undefined ? own : Math.min(own, parent);
 
 /** A stored policy or member default, as the three limit fields. */
-const policyLimits = (p: { rpm_limit: number | null; tpm_limit: number | null; max_parallel: number | null }): KeyLimitValues => ({
-  rpm_limit: p.rpm_limit,
-  tpm_limit: p.tpm_limit,
-  max_parallel: p.max_parallel,
+const policyLimits = (p: { rpm_limit?: number | null; tpm_limit?: number | null; max_parallel?: number | null }): KeyLimitValues => ({
+  rpm_limit: p.rpm_limit ?? null,
+  tpm_limit: p.tpm_limit ?? null,
+  max_parallel: p.max_parallel ?? null,
 });
+
+/** The shorter of two optional lifetimes; null means none. */
+const lifetimeOf = (a: number | null, b: number | null) => (a === null ? b : b === null ? a : Math.min(a, b));
 
 const clampLimits = (own: KeyLimitValues, parent: KeyLimitValues): KeyLimitValues => ({
   rpm_limit: minLimit(own.rpm_limit, parent.rpm_limit),
@@ -507,14 +519,17 @@ function KeysPanel({ team }: { team: TeamAny }) {
   const toast = useToast();
   const showSecret = useShowSecret();
   const isAdmin = perms.teamAdmin(team.id);
+  const zone = useZone();
+  const zoneLabel = zone.zone?.display_name || zone.name;
   const full = hasPolicy(team) ? team : null;
-  const teamLimits = full ? policyLimits(full) : undefined;
+  const teamLimits = full ? policyLimits(zoneLimits(full, zone.name)) : undefined;
   const myTeam = me.data?.teams.find((row) => row.team_id === team.id);
+  const myLimits = myTeam?.by_zone?.[zone.name]?.limits ?? myTeam?.limits;
   // The member and service-account lists are the team-admin view; a plain member's own
   // keys need neither (the server forces the list to their own keys).
   const members = useQuery({ queryKey: ["members", team.id], queryFn: () => api.members(team.id), enabled: isAdmin });
   const accounts = useQuery({ queryKey: ["service-accounts", team.id], queryFn: () => api.serviceAccounts(team.id), enabled: isAdmin });
-  const keys = useQuery({ queryKey: ["team-keys", team.id], queryFn: () => api.teamKeys(team.id) });
+  const keys = useQuery({ queryKey: ["team-keys", team.id, zone.name], queryFn: () => api.teamKeys(team.id, zone.name) });
   const [creating, setCreating] = useState(false);
   const [editingKey, setEditingKey] = useState<Key | null>(null);
   const [revoking, setRevoking] = useState<Key | null>(null);
@@ -532,6 +547,7 @@ function KeysPanel({ team }: { team: TeamAny }) {
       const { models, ...rest } = values;
       return api.createKey(team.id, {
         name: values.name,
+        zone: zone.name,
         expires_at: expiryFromDay(values.expires),
         service_account_id: values.service_account_id || null,
         ...keyLimitsBody(rest),
@@ -562,25 +578,26 @@ function KeysPanel({ team }: { team: TeamAny }) {
   // stored policy is clamped by the team's policy (the org may lower it further).
   const userCap = (userId: string | null): KeyLimitCap => {
     if (!userId) return undefined;
-    if (userId === me.data?.user_id && myTeam) return myTeam.limits;
+    if (userId === me.data?.user_id && myLimits) return myLimits;
     if (!full || !teamLimits) return undefined;
     const member = members.data?.find((row) => row.user_id === userId);
     const defaults: KeyLimitValues = {
-      rpm_limit: full.member_rpm_default ?? null,
-      tpm_limit: full.member_tpm_default ?? null,
-      max_parallel: full.member_max_parallel_default ?? null,
+      rpm_limit: full.member_defaults_by_zone?.[zone.name]?.rpm_limit ?? null,
+      tpm_limit: full.member_defaults_by_zone?.[zone.name]?.tpm_limit ?? null,
+      max_parallel: full.member_defaults_by_zone?.[zone.name]?.max_parallel ?? null,
     };
+    const mine = zoneLimits(member, zone.name);
     const own = member ? {
-      rpm_limit: member.rpm_limit ?? defaults.rpm_limit,
-      tpm_limit: member.tpm_limit ?? defaults.tpm_limit,
-      max_parallel: member.max_parallel ?? defaults.max_parallel,
+      rpm_limit: mine.rpm_limit ?? defaults.rpm_limit,
+      tpm_limit: mine.tpm_limit ?? defaults.tpm_limit,
+      max_parallel: mine.max_parallel ?? defaults.max_parallel,
     } : defaults;
     return clampLimits(own, teamLimits);
   };
   const accountCap = (accountId: string | null): KeyLimitCap => {
     const account = accounts.data?.find((row) => row.id === accountId);
     if (!account) return undefined;
-    const own = policyLimits(account);
+    const own = policyLimits(zoneLimits(account, zone.name));
     return teamLimits ? clampLimits(own, teamLimits) : own;
   };
   const capFor = (key: Key | "new"): KeyLimitCap => {
@@ -590,12 +607,20 @@ function KeysPanel({ team }: { team: TeamAny }) {
   const exactCap = (key: Key | "new") =>
     key === "new" ? !form.values.service_account_id : key.owner_kind === "user" && key.user_id === me.data?.user_id;
   const memberKey = !form.values.service_account_id;
-  const lifetime = memberKey ? (team.max_member_key_lifetime_seconds ?? null) : null;
+  const zoneLifetime = zone.zone?.key_max_lifetime_seconds ?? null;
+  const teamLifetime = memberKey ? (team.max_member_key_lifetime_seconds ?? null) : null;
+  const lifetime = zoneLifetime === null ? teamLifetime : teamLifetime === null ? zoneLifetime : Math.min(zoneLifetime, teamLifetime);
+  const blocked = keyCreationBlock(zone.zone, zoneLabel, {
+    role: isAdmin ? "admin" : "member",
+    inherited: perms.isInstallationAdmin ? "installation" : myTeam?.inherited_from,
+    serviceAccount: !memberKey,
+  });
+  const ruleNotes = keyRuleNotes(zone.zone, zoneLabel, memberKey ? (zone.zone?.key_max_per_member ?? null) : null);
   const expiryMax = lifetime === null ? undefined : lastExpiryDay(lifetime);
   const expiryHint =
     lifetime === null
-      ? "Empty means the key never expires."
-      : `Optional. This team limits member keys to ${fmtLifetime(lifetime)}; empty uses that limit. The latest day is ${expiryMax}.`;
+      ? zone.zone?.key_expiry_required ? `Required in ${zoneLabel}.` : "Empty means the key never expires."
+      : `${zone.zone?.key_expiry_required ? "Required. " : "Optional. "}Keys here live at most ${fmtLifetime(lifetime)}; empty uses that limit. The latest day is ${expiryMax}.`;
   const submit = async () => {
     if (!form.validate()) return false;
     return form.run(() => create.mutateAsync(form.values), { model_access: "models", allowed_models: "models", allowed_groups: "models" });
@@ -650,7 +675,7 @@ function KeysPanel({ team }: { team: TeamAny }) {
             </>
           ) },
           { key: "owner", header: "Owner", cell: (key) => <>{key.owner_kind === "service_account" ? "Service account: " : ""}{ownerName(key)}</> },
-          { key: "lifecycle", header: "Lifecycle", cell: (key) => <><KeyBadge k={key} /><SuspendedReason reason={key.suspended_reason} /></> },
+          { key: "lifecycle", header: "Lifecycle", cell: (key) => <><KeyBadge k={key} /><SuspendedReason reason={key.suspended_reason} /><RuleViolationBadge keyRef={key} /></> },
           { key: "models", header: "Models", hideBelow: "sm", cell: (key) => <KeyModels keyRef={key} /> },
           { key: "expires", header: "Expires", cell: (key) => fmtDate(key.expires_at) },
           { key: "created", header: "Created", cell: (key) => fmtDate(key.created_at) },
@@ -689,7 +714,19 @@ function KeysPanel({ team }: { team: TeamAny }) {
           },
         ]}
       />
-      <FormDialog open={creating} title="New API key" submitLabel="Create key" onClose={() => setCreating(false)} onSubmit={submit}>
+      <FormDialog open={creating} title={`New key in ${team.name} (${zoneLabel})`} submitLabel="Create key" submitDisabled={!!blocked} onClose={() => setCreating(false)} onSubmit={submit}>
+        {blocked && (
+          <Alert variant="destructive" data-testid="key-blocked">
+            <AlertDescription>{blocked}</AlertDescription>
+          </Alert>
+        )}
+        {ruleNotes.length > 0 && (
+          <ul className="m-0 list-none p-0 text-xs text-muted-foreground" data-testid="zone-key-rules">
+            {ruleNotes.map((note) => (
+              <li key={note}>{note}</li>
+            ))}
+          </ul>
+        )}
         {ownerOptions.length > 1 && (
           <ComboboxField
             label="Owner"
@@ -719,8 +756,8 @@ function KeysPanel({ team }: { team: TeamAny }) {
       {editingKey && (
         <KeyEditDialog
           target={editingKey}
-          lifetime={editingKey.owner_kind === "user" ? team.max_member_key_lifetime_seconds : null}
-          requiredExpiry={editingKey.owner_kind === "user" && team.max_member_key_lifetime_seconds !== null}
+          lifetime={editingKey.owner_kind === "user" ? lifetimeOf(team.max_member_key_lifetime_seconds ?? null, zoneLifetime) : zoneLifetime}
+          requiredExpiry={(editingKey.owner_kind === "user" && team.max_member_key_lifetime_seconds !== null) || !!zone.zone?.key_expiry_required}
           cap={capFor(editingKey)}
           capNote={exactCap(editingKey) ? undefined : "the owner's limits, clamped by the team; the org may lower them further"}
           onClose={() => setEditingKey(null)}
@@ -745,9 +782,10 @@ function TeamUsage({ team }: { team: TeamAny }) {
   const [groupBy, setGroupBy] = useState("owner");
   const members = useQuery({ queryKey: ["members", team.id], queryFn: () => api.members(team.id), enabled: isAdmin });
   const accounts = useQuery({ queryKey: ["service-accounts", team.id], queryFn: () => api.serviceAccounts(team.id), enabled: isAdmin });
+  const zone = useZone().name;
   const usage = useQuery({
-    queryKey: ["usage", team.id, groupBy],
-    queryFn: () => api.usage({ team_id: team.id, group_by: groupBy }),
+    queryKey: ["usage", team.id, groupBy, zone],
+    queryFn: () => api.usage({ team_id: team.id, group_by: groupBy, zone }),
   });
   const ownerName = (kind: string | null | undefined, id: string | null | undefined) => {
     if (!id) return "—";
@@ -802,24 +840,26 @@ type TeamSettingsValues = PolicyValues & {
   member_max_parallel_default: number | null;
 };
 
-const teamSettingsFrom = (team: TeamAny, withPolicy: boolean): TeamSettingsValues => {
+const teamSettingsFrom = (team: TeamAny, withPolicy: boolean, zone: string): TeamSettingsValues => {
   const full = hasPolicy(team) ? team : null;
+  const defaults: ZoneMemberDefaultsOut = full?.member_defaults_by_zone?.[zone] ?? {};
   return {
     name: team.name,
-    ...(withPolicy && full ? policyFrom(full, true) : blankPolicy(true)),
+    ...(withPolicy && full ? policyFrom(full, true, zone) : blankPolicy(true)),
     max_keys_per_member: team.max_keys_per_member ?? null,
     max_member_key_lifetime_seconds: team.max_member_key_lifetime_seconds ?? null,
-    member_rpm_default: full?.member_rpm_default ?? null,
-    member_tpm_default: full?.member_tpm_default ?? null,
-    member_max_parallel_default: full?.member_max_parallel_default ?? null,
+    member_rpm_default: defaults.rpm_limit ?? null,
+    member_tpm_default: defaults.tpm_limit ?? null,
+    member_max_parallel_default: defaults.max_parallel ?? null,
   };
 };
 
-const memberDefaultsText = (team: Team) => {
+const memberDefaultsText = (team: Team, zone: string) => {
+  const defaults = team.member_defaults_by_zone?.[zone] ?? {};
   const parts = [
-    team.member_rpm_default != null ? `${team.member_rpm_default.toLocaleString()} requests/min` : null,
-    team.member_tpm_default != null ? `${team.member_tpm_default.toLocaleString()} tokens/min` : null,
-    team.member_max_parallel_default != null ? `${team.member_max_parallel_default.toLocaleString()} in parallel` : null,
+    defaults.rpm_limit != null ? `${defaults.rpm_limit.toLocaleString()} requests/min` : null,
+    defaults.tpm_limit != null ? `${defaults.tpm_limit.toLocaleString()} tokens/min` : null,
+    defaults.max_parallel != null ? `${defaults.max_parallel.toLocaleString()} in parallel` : null,
   ].filter(Boolean);
   return parts.length ? parts.join(" · ") : "No default limits";
 };
@@ -834,24 +874,40 @@ function TeamSettings({ team }: { team: TeamAny }) {
   const [editing, setEditing] = useState(false);
   const [archiving, setArchiving] = useState(false);
   const orgName = orgs.data?.find((org) => org.id === team.org_id)?.name;
-  const form = useForm<TeamSettingsValues>(teamSettingsFrom(team, canSetQuota), {
+  const zoneState = useZone();
+  const zone = zoneState.name;
+  const zoneLabel = zoneState.zone?.display_name || zone;
+  const form = useForm<TeamSettingsValues>(teamSettingsFrom(team, canSetQuota, zone), {
     name: required("Name"),
   });
   const update = useMut(
-    (values: TeamSettingsValues) => {
+    async (values: TeamSettingsValues) => {
       const body: Schemas["TeamUpdate"] = {
         name: values.name,
         max_keys_per_member: values.max_keys_per_member,
         max_member_key_lifetime_seconds: values.max_member_key_lifetime_seconds,
-        member_rpm_default: values.member_rpm_default,
-        member_tpm_default: values.member_tpm_default,
-        member_max_parallel_default: values.member_max_parallel_default,
       };
       // A team admin edits the name, the member key limits and the member defaults; the
       // team quota (models, rate limits, budget) is sent only by an org admin, so a stale
       // read can never look like a quota change.
       if (canSetQuota) Object.assign(body, policyBody(values));
-      return api.updateTeam(team.id, body);
+      const saved = await api.updateTeam(team.id, body);
+      // Limits, the budget and the member defaults are the header zone's own rows.
+      const before = teamSettingsFrom(team, canSetQuota, zone);
+      if (canSetQuota && limitsChanged(before, values)) await saveZoneLimits(zone, { team_id: team.id }, values);
+      if (
+        before.member_rpm_default !== values.member_rpm_default ||
+        before.member_tpm_default !== values.member_tpm_default ||
+        before.member_max_parallel_default !== values.member_max_parallel_default
+      ) {
+        await api.putZoneMemberDefaults(zone, {
+          team_id: team.id,
+          rpm_limit: values.member_rpm_default,
+          tpm_limit: values.member_tpm_default,
+          max_parallel: values.member_max_parallel_default,
+        });
+      }
+      return saved;
     },
     "Team settings saved",
   );
@@ -860,7 +916,7 @@ function TeamSettings({ team }: { team: TeamAny }) {
   });
 
   const edit = () => {
-    form.reset(teamSettingsFrom(team, canSetQuota));
+    form.reset(teamSettingsFrom(team, canSetQuota, zone));
     setEditing(true);
   };
   const submit = async () => {
@@ -916,8 +972,8 @@ function TeamSettings({ team }: { team: TeamAny }) {
           )}
           {hasPolicy(team) && (
             <>
-              <DescriptionTerm>Member default limits</DescriptionTerm>
-              <DescriptionDetails>{memberDefaultsText(team)}</DescriptionDetails>
+              <DescriptionTerm>Member default limits in {zoneLabel}</DescriptionTerm>
+              <DescriptionDetails>{memberDefaultsText(team, zone)}</DescriptionDetails>
             </>
           )}
           <DescriptionTerm>Keys per member</DescriptionTerm>
@@ -933,6 +989,10 @@ function TeamSettings({ team }: { team: TeamAny }) {
         {canSetQuota && (
           <PolicyFields values={form.values} errors={form.errors} set={form.set} isTeam parent={orgs.data?.find((org) => org.id === team.org_id)} />
         )}
+        <div className="flex items-center gap-1 border-t pt-3 text-sm font-semibold" data-testid="member-defaults-heading">
+          Member defaults in {zoneLabel}
+          <HelpTip text="Defaults apply to this zone only; switch zones in the header to set another." label="Member defaults" />
+        </div>
         <NumberField
           label="Member default requests per minute"
           min={1}

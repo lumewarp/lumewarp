@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane import audit
 from lumewarp_control_plane.api.common import (
+    DefaultZoneDep,
     LimitDep,
     MetricsDep,
     SessionDep,
@@ -32,7 +33,7 @@ from lumewarp_control_plane.api.common import (
     ensure_grants_managed,
     ensure_not_null,
     ensure_range,
-    lock_scope,
+    lock_hierarchy,
     mutation,
     parse_uuid_cursor,
     require_signed_in,
@@ -57,6 +58,11 @@ from lumewarp_control_plane.api.schemas import (
     OrgUsageOut,
     Page,
 )
+from lumewarp_control_plane.api.zone_limits import (
+    apply_default_zone_limits,
+    limits_by_zone,
+    limits_of,
+)
 from lumewarp_control_plane.authz import Action, Authz, RequestAuthz
 from lumewarp_control_plane.errors import not_found
 from lumewarp_control_plane.models import (
@@ -69,7 +75,6 @@ from lumewarp_control_plane.models import (
     UsageEvent,
     User,
 )
-from lumewarp_control_plane.usage.org_budget import reset_org_budget_window
 from lumewarp_control_plane.windows import month_window
 
 router = APIRouter(tags=["orgs"])
@@ -107,11 +112,17 @@ async def _readable_org_or_404(
     return row
 
 
-def _org_out(row: Org) -> OrgOut:
+async def _org_out(session: AsyncSession, row: Org, zone: str) -> OrgOut:
     """The org with its effective model set (groups expanded; None = every name)."""
     out = OrgOut.model_validate(row)
-    models = org_effective(row).models
+    limits = await limits_of(session, zone, {"org_id": row.id})
+    models = org_effective(row, limits).models
     out.effective_models = None if models is None else sorted(models)
+    apply_default_zone_limits(
+        out,
+        (await limits_by_zone(session, "org", {row.id})).get(("org", row.id), {}),
+        default_zone=zone,
+    )
     return out
 
 
@@ -119,6 +130,7 @@ def _org_out(row: Org) -> OrgOut:
 async def list_orgs(
     authz: Authz,
     session: SessionDep,
+    zone: DefaultZoneDep,
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[OrgOut]:
@@ -130,7 +142,9 @@ async def list_orgs(
     if administered is not None:
         stmt = stmt.where(Org.id.in_(administered))
     rows, next_cursor = await uuid_page(session, stmt, Org.id, limit, cursor)
-    return Page[OrgOut](items=[_org_out(row) for row in rows], next_cursor=next_cursor)
+    return Page[OrgOut](
+        items=[await _org_out(session, row, zone) for row in rows], next_cursor=next_cursor
+    )
 
 
 @router.post(
@@ -139,7 +153,9 @@ async def list_orgs(
     status_code=status.HTTP_201_CREATED,
     operation_id="createOrg",
 )
-async def create_org(body: OrgCreate, authz: Authz, session: SessionDep) -> OrgOut:
+async def create_org(
+    body: OrgCreate, authz: Authz, session: SessionDep, zone: DefaultZoneDep
+) -> OrgOut:
     """Create an org. Requires an installation admin."""
     await authz.require(Action.ORG_MANAGE)
     policy = policy_from_fields(body, default_mode=ModelAccess.ALL)
@@ -162,23 +178,16 @@ async def create_org(body: OrgCreate, authz: Authz, session: SessionDep) -> OrgO
             org_id=row.id,
             details={"name": row.name},
         )
-    return _org_out(row)
+    return await _org_out(session, row, zone)
 
 
 @router.get("/orgs/{org_id}", response_model=OrgOut, operation_id="getOrg")
-async def get_org(org_id: uuid.UUID, authz: Authz, session: SessionDep) -> OrgOut:
+async def get_org(
+    org_id: uuid.UUID, authz: Authz, session: SessionDep, zone: DefaultZoneDep
+) -> OrgOut:
     """Readable by installation admins and by the org's own admins; anyone else gets 404."""
     row = await _readable_org_or_404(session, authz, org_id)
-    return _org_out(row)
-
-
-def _budget_change_can_clear(old: int | None, new: int | None) -> bool:
-    """A budget change that may turn an exceeded org back into a usable one.
-
-    A raise, a removal, or setting a budget where none was (no window row exists then, so
-    the delete is a harmless no-op). Lowering never clears, so its window row stays.
-    """
-    return old is None or new is None or new > old
+    return await _org_out(session, row, zone)
 
 
 @router.patch("/orgs/{org_id}", response_model=OrgOut, operation_id="updateOrg")
@@ -193,13 +202,14 @@ async def update_org(
     await authz.require(Action.ORG_MANAGE)
     ensure_not_null(body, "name")
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         row = await session.get(Org, org_id, with_for_update=True)
         if row is None:
             raise not_found("org not found")
         if row.deleted_at is not None:
             raise conflict("the org is archived")
-        base = policy_of(row)
+        limits = await limits_of(session, settings.zone, {"org_id": row.id})
+        base = policy_of(row, limits)
         proposed = policy_from_fields(body, default_mode=ModelAccess.ALL, base=base)
         changed = proposed != base
         if changed:
@@ -208,12 +218,6 @@ async def update_org(
             await save_grants(session, row, proposed)
         if body.name is not None:
             row.name = body.name
-        if proposed.budget_nano_usd != base.budget_nano_usd and _budget_change_can_clear(
-            base.budget_nano_usd, proposed.budget_nano_usd
-        ):
-            # The month's "already reported" marker only records the old budget's crossing;
-            # without this a later crossing would neither audit nor recompile again.
-            await reset_org_budget_window(session, row.id, month_window(datetime.now(UTC))[0])
         await session.flush()
         await session.refresh(row)
         audit.record(
@@ -231,7 +235,7 @@ async def update_org(
         )
         if changed:
             await enqueue_recompile(session, settings, "api.org.update")
-    return _org_out(row)
+    return await _org_out(session, row, settings.zone)
 
 
 @router.delete(
@@ -249,7 +253,7 @@ async def delete_org(
     """Archive an org. Irreversible; refused while it has a live team."""
     await authz.require(Action.ORG_MANAGE)
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         row = await session.get(Org, org_id, with_for_update=True)
         if row is None:
             raise not_found("org not found")
@@ -409,7 +413,7 @@ async def delete_org_admin(
     """
     await authz.require(Action.ORG_MANAGE)
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         org = await _org_or_404(session, org_id)
         if org.deleted_at is not None:
             raise conflict("the org is archived")
@@ -444,6 +448,9 @@ async def get_org_usage(
     session: SessionDep,
     from_: FromQuery = None,
     to_: ToQuery = None,
+    zone: Annotated[
+        str | None, Query(description="Only this zone; omitted sums every zone.")
+    ] = None,
 ) -> OrgUsageOut:
     """Spend per team, summed from `usage_events` at query time.
 
@@ -462,6 +469,7 @@ async def get_org_usage(
         UsageEvent.team_id == Team.id,
         UsageEvent.ts >= start,
         UsageEvent.ts < end,
+        *((UsageEvent.zone == zone,) if zone is not None else ()),
     )
     rows = (
         await session.execute(
@@ -484,6 +492,7 @@ async def get_org_usage(
     ).all()
     teams = [
         OrgTeamUsageOut(
+            zone=zone,
             team_id=team_id,
             team_name=name,
             archived=deleted_at is not None,
@@ -506,6 +515,7 @@ async def get_org_usage(
         ) in rows
     ]
     return OrgUsageOut(
+        zone=zone,
         org_id=org.id,
         org_name=org.name,
         teams=teams,

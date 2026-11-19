@@ -59,7 +59,7 @@ curl -s http://127.0.0.1:8091/readyz
 `migrate` runs first and exits; the control plane starts when it succeeded, and `/readyz`
 answers `"status":"ready"` once the database, migrations and background tasks are up.
 `migrate` runs again on every `up`, which is harmless at the same version. The control
-plane also creates the config scope at startup, so no `bootstrap` run is needed.
+plane also creates the config zone at startup, so no `bootstrap` run is needed.
 
 ## 3. Create the gateway token and start the gateway
 

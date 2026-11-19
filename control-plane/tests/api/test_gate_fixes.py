@@ -6,13 +6,15 @@ from lumewarp_control_plane.app import create_app
 from lumewarp_control_plane.models import (
     GatewaySession,
     GatewayToken,
-    Scope,
+    Zone,
 )
 from lumewarp_control_plane.security import SecretKind, generate_secret
 from lumewarp_control_plane.settings import Settings
 from tests.api.helpers import (
     ADMIN_AUTH,
     auth,
+    create_model,
+    deployment_of,
     suffix,
     user_with_token,
 )
@@ -43,16 +45,7 @@ def _model(client, *, upstream_id=None):
         upstream_id = _post(
             client, "/upstreams", name=f"up-{suffix()}", kind="vllm", base_url="http://h:1/v1"
         ).json()["id"]
-    resp = _post(
-        client,
-        "/models",
-        name=f"dep-{suffix()}",
-        upstream_id=upstream_id,
-        upstream_model="m",
-        model_type="llm",
-    )
-    assert resp.status_code == 201, resp.text
-    return resp.json()
+    return create_model(client, upstream_id, name=f"dep-{suffix()}", upstream_model="m")
 
 
 # ------------------------------------------------------------------------------ B1
@@ -90,12 +83,12 @@ def test_weighted_router_needs_positive_total_weight(client) -> None:
 
 async def test_gateways_are_scoped(client, committed, api_scope) -> None:
     other_scope = f"other-{suffix()}"
-    committed.add(Scope(name=other_scope))
+    committed.add(Zone(name=other_scope))
     await committed.flush()
     foreign_id = f"gw-foreign-{suffix()}"
     secret = generate_secret(SecretKind.GATEWAY_TOKEN)
     foreign_token = GatewayToken(
-        scope=other_scope,
+        zone=other_scope,
         name="foreign",
         token_hash=secret.hash,
         display_prefix=secret.display_prefix,
@@ -104,7 +97,7 @@ async def test_gateways_are_scoped(client, committed, api_scope) -> None:
     await committed.flush()
     committed.add(
         GatewaySession(
-            scope=other_scope,
+            zone=other_scope,
             gateway_id=foreign_id,
             token_id=foreign_token.id,
             connected=True,
@@ -116,8 +109,10 @@ async def test_gateways_are_scoped(client, committed, api_scope) -> None:
     assert foreign_id not in {item["gateway_id"] for item in listed}
     foreign_tokens = client.get(f"{API}/gateway-tokens?limit=500", headers=ADMIN_AUTH)
     assert foreign_token.id not in {item["id"] for item in foreign_tokens.json()["items"]}
+    # Revoking by id is installation-wide: the id is not filtered by the default zone.
     revoke = client.post(f"{API}/gateway-tokens/{foreign_token.id}/revoke", headers=ADMIN_AUTH)
-    assert revoke.status_code == 404
+    assert revoke.status_code == 200, revoke.text
+    assert revoke.json()["revoked_at"] is not None
 
     # Pagination walks every gateway exactly once, connected first then by gateway id.
     ids = [f"gw-page-{suffix()}" for _ in range(3)]
@@ -127,7 +122,7 @@ async def test_gateways_are_scoped(client, committed, api_scope) -> None:
     for gateway_id in ids:
         committed.add(
             GatewaySession(
-                scope=api_scope,
+                zone=api_scope,
                 gateway_id=gateway_id,
                 token_id=token_id,
                 connected=False,
@@ -181,7 +176,9 @@ def test_openapi_documents_the_real_error_body(api_settings: Settings) -> None:
 
 def test_list_routers_returns_ordered_models_for_every_router(client) -> None:
     models = [_model(client)]
-    models += [_model(client, upstream_id=models[0]["upstream_id"]) for _ in range(2)]
+    models += [
+        _model(client, upstream_id=deployment_of(models[0])["upstream_id"]) for _ in range(2)
+    ]
     expected = {}
     for index in range(4):
         order = [d["id"] for d in models[index % 3 :] + models[: index % 3]]

@@ -1,4 +1,5 @@
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
+import { createModel } from "./catalog-helpers";
 import { pick } from "./helpers";
 
 /*
@@ -104,7 +105,7 @@ test("the model picker offers the upstream's list and a custom name, and fills t
   await main.getByRole("button", { name: "Create" }).click();
   await expect(page).toHaveURL(/\/models$/);
   const stored = ((await (await request.get("/api/v1/models?limit=200", { headers: admin })).json()).items as any[]).find((m) => m.name === "pg-model");
-  expect([stored.upstream_model, stored.max_input_tokens, stored.max_output_tokens]).toEqual(["my-finetune", 131072, 8192]);
+  expect([stored.deployments[0].upstream_model, stored.max_input_tokens, stored.max_output_tokens]).toEqual(["my-finetune", 131072, 8192]);
 });
 
 test("model Test now asks the model, and the periodic check is saved", async ({ page, request }) => {
@@ -130,7 +131,7 @@ test("model Test now asks the model, and the periodic check is saved", async ({ 
   await main.getByRole("button", { name: "Test now" }).click();
   await expect(main.getByTestId("model-test-result")).toContainText("HTTP 200");
   await expect(main.getByTestId("model-test-result")).toContainText("2");
-  expect(sent).toEqual([{ model_type: "llm", upstream_id: up.id, upstream_model: "qwen", default_body: { top_k: 20 } }]);
+  expect(sent).toEqual([{ model_type: "llm", upstream_id: up.id, upstream_model: "qwen", default_body: { top_k: 20 }, zone: "default" }]);
 
   await main.getByLabel("Check periodically").click();
   await main.getByLabel("Interval (ms)").fill("30000");
@@ -141,7 +142,7 @@ test("model Test now asks the model, and the periodic check is saved", async ({ 
   await expect(row).toContainText("Unknown");
   await expect(row).toContainText("128k / --");
   const stored = ((await (await request.get("/api/v1/models?limit=200", { headers: admin })).json()).items as any[]).find((m) => m.name === "pg-checked");
-  expect(stored.chat_check).toEqual({ interval_ms: 30000, timeout_ms: 5000, unhealthy_threshold: null, healthy_threshold: null });
+  expect(stored.deployments[0].chat_check).toEqual({ interval_ms: 30000, timeout_ms: 5000, unhealthy_threshold: null, healthy_threshold: null });
 });
 
 test("an upstream auth plugin disables Test now until the upstream is saved", async ({ page, request }) => {
@@ -205,12 +206,7 @@ test("saved plugin Test now maps gateway errors and an unapplied version", async
 
 test("a plugin upstream makes a model's Test now wait for the save, then probe through a gateway", async ({ page, request }) => {
   const up = await pluginUpstream(request, "pg-plugin-model-up");
-  const created = await request.post("/api/v1/models", {
-    headers: admin,
-    data: { name: "pg-plugin-model", model_type: "llm", upstream_id: up.id, upstream_model: "qwen" },
-  });
-  expect(created.status(), await created.text()).toBe(201);
-  const model = (await created.json()) as { id: string };
+  const model = await createModel(request, admin, { name: "pg-plugin-model", model_type: "llm", upstream_id: up.id, upstream_model: "qwen" });
 
   await signIn(page, request, "/models/new");
   const main = page.locator("#main");
@@ -225,7 +221,7 @@ test("a plugin upstream makes a model's Test now wait for the save, then probe t
   await expect(testNow).toHaveAttribute("title", /Save the model first/);
   await expect(main.getByTestId("test-now-hint")).toContainText("Save the model first");
 
-  await page.route(`**/api/v1/models/${model.id}/test`, (route) =>
+  await page.route(`**/api/v1/models/${model.id}/deployments/default/test`, (route) =>
     route.fulfill({ json: { credential: "plugin", probe: probe("http://127.0.0.1:9/v1/chat/completions"), reply: null } }),
   );
   await page.goto(`/models/${model.id}`);

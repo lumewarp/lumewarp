@@ -1,12 +1,15 @@
 # MCP servers and A2A agents
 
-An installation admin registers upstream MCP servers and A2A agents; team and org admins
-then grant them through the same policy that grants models.
+An installation admin registers MCP servers and A2A agents in a chosen zone; the same
+server or agent name may exist in another zone. Team and org admins grant them through the
+global policy that grants models, but a key can use only the resources compiled into its own
+zone.
 
 ## MCP servers
 
-A server has a name (used in `/mcp/servers/<name>` and as the `<name>__` prefix of its
-tools), a URL, outbound authentication and a review mode.
+A server belongs to one zone and has a name (used in `/mcp/servers/<name>` and as the
+`<name>__` prefix of its tools), a URL, outbound authentication and a review mode. Its
+upstream URL and gateway probes are specific to that zone.
 
 **Outbound authentication** is one of:
 
@@ -32,8 +35,8 @@ without waiting for a gateway to see them. The full rules are in
 
 ## A2A agents
 
-An agent has a name (used in `/a2a/<name>`), a URL, outbound authentication, an optional
-card URL and an optional middleware plugin.
+An agent belongs to one zone and has a name (used in `/a2a/<name>`), a URL, outbound
+authentication, an optional card URL and an optional middleware plugin.
 
 - Gateways fetch the agent's card every few minutes and report it, so the agent's page
   shows the card as clients receive it. For a `passthrough` agent the gateway has no
@@ -43,10 +46,11 @@ card URL and an optional middleware plugin.
 
 ## Granting
 
-A policy has three independent parts: models, MCP servers and A2A agents. For each, a level
-either inherits its parent, allows everything the parent allows, or lists exactly what it
-allows. An MCP grant covers a whole server or named tools of it; a granted server exposes
-all its prompts.
+A policy has three independent, installation-wide parts: models, MCP servers and A2A agents.
+For each, a level either inherits its parent, allows everything the parent allows, or lists
+exactly what it allows. The grant is shared across zones, but the key's zone determines
+which server or agent can actually appear in its snapshot. An MCP grant covers a whole
+server or named tools of it; a granted server exposes all its prompts.
 
 ## What a gateway needs
 

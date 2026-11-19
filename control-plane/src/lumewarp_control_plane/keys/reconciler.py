@@ -15,7 +15,7 @@ from time import monotonic
 from sqlalchemy import select
 
 from lumewarp_control_plane import audit
-from lumewarp_control_plane.api.common import enqueue_recompile, lock_scope
+from lumewarp_control_plane.api.common import enqueue_recompile, lock_hierarchy
 from lumewarp_control_plane.authz import Authorizer, Decision
 from lumewarp_control_plane.db import SessionFactory
 from lumewarp_control_plane.keys.owners import key_owner_decisions
@@ -35,7 +35,8 @@ async def reconcile_keys(
     user_ids: Collection[str] | None = None,
     metrics: Metrics = DISCARD,
 ) -> int:
-    """Check distinct active owners outside write transactions, then lock scope before keys.
+    """Check distinct active owners outside write transactions, then lock the hierarchy
+    before keys.
 
     Local inactivity independently confirms owner removal, even if IAM is unavailable.
     Both local inactivity and an explicit IAM DENY use the reason ``owner_removed``.
@@ -102,7 +103,7 @@ async def _reconcile(
         return 0, errors
     suspended = 0
     async with session_factory() as session, session.begin():
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         for user, team, decided_at in removed:
             keys = await session.scalars(
                 select(ApiKey)

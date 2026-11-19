@@ -5,7 +5,7 @@ from pydantic import ValidationError
 from sqlalchemy import select
 
 from lumewarp_control_plane.api.schemas import UpstreamCreate, UpstreamUpdate
-from lumewarp_control_plane.compiler import CompileError, compile_scope
+from lumewarp_control_plane.compiler import CompileError, compile_zone
 from lumewarp_control_plane.compiler.validate import (
     SnapshotInvalid,
     capabilities_used,
@@ -70,7 +70,7 @@ async def test_invalid_uri_rejected_by_api_and_compiler(factory, url, field) -> 
         up = await session.scalar(select(Upstream))
         setattr(up, field, url)
     async with factory() as session:
-        compiled = await compile_scope(session, SCOPE, now=OCT, require_local_membership=True)
+        compiled = await compile_zone(session, SCOPE, now=OCT, require_local_membership=True)
     assert compiled.warnings
     if field == "base_url":
         assert not compiled.snapshot.upstreams
@@ -126,7 +126,7 @@ async def test_invalid_health_uri_rejected_by_api_and_compiler(factory, url) -> 
         up.health_check_timeout_ms = 100
     async with factory() as session:
         with pytest.raises(CompileError, match="health url"):
-            await compile_scope(session, SCOPE, now=OCT, require_local_membership=True)
+            await compile_zone(session, SCOPE, now=OCT, require_local_membership=True)
 
 
 def test_derived_uri_length_is_bounded() -> None:

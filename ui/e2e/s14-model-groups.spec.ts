@@ -1,5 +1,6 @@
 import { expect, test, type APIRequestContext } from "@playwright/test";
 
+import { createModel } from "./catalog-helpers";
 import { confirmDialog, deleteTeams } from "./helpers";
 import { Admin, memberSession, rowOf, signIn, VIEWER, VIEWER_EMAIL } from "./selfService";
 
@@ -37,7 +38,7 @@ test.afterEach(async ({ request }) => {
 test("a model group is granted down the hierarchy and a key narrows to one model", async ({ page, request, browser }) => {
   const upstream = await admin.post<Row>("/upstreams", { name: "s14-up", kind: "vllm", base_url: "http://127.0.0.1:9/v1" });
   for (const name of ["s14/a", "s14/b", "s14/c"]) {
-    await admin.post("/models", { name, upstream_id: upstream.id, upstream_model: "m", model_type: "llm" });
+    await createModel(request, admin.headers, { name, upstream_id: upstream.id, upstream_model: "m", model_type: "llm" });
   }
   await page.context().addCookies((await request.storageState()).cookies);
 

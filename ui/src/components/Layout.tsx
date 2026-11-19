@@ -13,6 +13,7 @@ import {
   KeyRound,
   ListOrdered,
   ChevronDown,
+  Globe,
   LogOut,
   Menu,
   PanelLeft,
@@ -20,6 +21,7 @@ import {
   Monitor,
   Moon,
   Plug,
+  Plus,
   Radio,
   Route,
   ScrollText,
@@ -35,6 +37,7 @@ import { clearCsrfToken } from "../auth";
 import type { Me } from "../api";
 import { hasAccess, useCan, useMe, type Access } from "../hooks";
 import { useTheme } from "../theme";
+import { useZone, zoneColor, ZoneBadge } from "../zone";
 import { AuthzNotice } from "../pages/Access";
 import { useClearSecrets } from "./SecretProvider";
 import { Badge } from "./Bits";
@@ -231,6 +234,46 @@ function NavSidebar({ installationAdmin, orgAdmin, teamAdmin, breakGlass }: { in
   );
 }
 
+/** The zone this view is looking at, at the left of the header; admins also reach Manage zones and New zone here. */
+function ZoneSwitcher({ installationAdmin }: { installationAdmin: boolean }) {
+  const { name, zone, zones, isLoading, setZone } = useZone();
+  const navigate = useNavigate();
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="outline" size="sm" className="max-w-[240px]" data-testid="zone-switcher">
+          {zone ? <ZoneBadge zone={zone} /> : <span className="truncate text-muted-foreground">{isLoading ? "Zone…" : name}</span>}
+          <ChevronDown className="size-4" aria-hidden="true" />
+          <span className="sr-only">Zone menu</span>
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="w-60">
+        <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">Zone</DropdownMenuLabel>
+        <DropdownMenuRadioGroup value={name} onValueChange={setZone}>
+          {zones.map((z) => (
+            <DropdownMenuRadioItem key={z.name} value={z.name} data-testid={`zone-option-${z.name}`}>
+              <ZoneBadge zone={z} />
+            </DropdownMenuRadioItem>
+          ))}
+        </DropdownMenuRadioGroup>
+        {installationAdmin && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={() => void navigate({ to: "/zones", search: { new: true } })}>
+              <Plus aria-hidden="true" />
+              New zone
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => void navigate({ to: "/zones", search: {} })}>
+              <Globe aria-hidden="true" />
+              Manage zones
+            </DropdownMenuItem>
+          </>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 /** Who is signed in, the theme and Sign out, in one menu at the top right. */
 function AccountMenu({ me, theme, onTheme, onSignOut }: { me: Me | undefined; theme: keyof typeof THEME_LABEL; onTheme: (theme: keyof typeof THEME_LABEL) => void; onSignOut: () => void }) {
   const name = me ? me.display_name || me.email || "Bootstrap admin" : "Account";
@@ -303,6 +346,7 @@ export function Layout() {
   const toast = useToast();
   const clearSecrets = useClearSecrets();
   const [sidebarOpen, setSidebarOpen] = useState(readSidebarOpen);
+  const zone = useZone();
 
   const logout = async () => {
     try {
@@ -334,8 +378,13 @@ export function Layout() {
       </a>
       <NavSidebar installationAdmin={perms.isInstallationAdmin} orgAdmin={perms.isOrgAdmin} teamAdmin={perms.isTeamAdmin} breakGlass={me.data?.kind === "break_glass"} />
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="sticky top-0 z-40 flex items-center gap-2 border-b bg-background/95 px-4 py-2.5 backdrop-blur md:px-6">
+        <header
+          className={`sticky top-0 z-40 flex items-center gap-2 border-t-2 border-b bg-background/95 px-4 py-2.5 backdrop-blur md:px-6 ${zoneColor(zone.zone?.color).border}`}
+          data-testid="app-header"
+          data-zone={zone.name}
+        >
           <NavToggle />
+          <ZoneSwitcher installationAdmin={perms.isInstallationAdmin} />
           <span className="flex-1" />
           <AccountMenu me={me.data} theme={theme} onTheme={setTheme} onSignOut={() => void logout()} />
         </header>

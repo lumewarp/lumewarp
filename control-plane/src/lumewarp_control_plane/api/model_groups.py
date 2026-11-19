@@ -26,7 +26,7 @@ from lumewarp_control_plane.api.common import (
     SettingsDep,
     conflict,
     enqueue_recompile,
-    lock_scope,
+    lock_hierarchy,
     mutation,
     uuid_page,
     validation_error,
@@ -203,7 +203,7 @@ async def create_model_group(
     """
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         await _name_free(session, body.name)
         ids = await _member_ids(session, body.members)
         row = ModelGroup(name=body.name, description=body.description)
@@ -253,7 +253,7 @@ async def update_model_group(
         if name in body.model_fields_set and getattr(body, name) is None:
             raise validation_error(name, "cannot be null")
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         row = await session.get(ModelGroup, group_id, with_for_update=True)
         if row is None:
             raise not_found("model group not found")
@@ -296,7 +296,7 @@ async def delete_model_group(
     """
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         row = await session.get(ModelGroup, group_id, with_for_update=True)
         if row is None:
             raise not_found("model group not found")

@@ -11,7 +11,7 @@ import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { DescriptionDetails, DescriptionList, DescriptionTerm } from "../components/ui/description-list";
 import { HelpTip } from "../components/ui/help-tip";
-import { useMut, usePlugins, useUpstreams } from "../hooks";
+import { useCatalogZone, useMut, usePlugins, useUpstreams } from "../hooks";
 import { parseSchema, validateValues, type Values as Params } from "../lib/schema";
 import { PageLoading } from "./Access";
 import { HealthBadge, KINDS } from "./Upstreams";
@@ -187,6 +187,7 @@ export function UpstreamEdit() {
   const { upstreamId } = useParams({ strict: false }) as { upstreamId?: string };
   const list = useUpstreams();
   const existing = upstreamId ? list.data?.find((u) => u.id === upstreamId) : undefined;
+  const { zone, zoneLabel } = useCatalogZone(existing);
   if (upstreamId && list.isPending) return <PageLoading />;
   if (upstreamId && !existing) {
     return (
@@ -195,14 +196,14 @@ export function UpstreamEdit() {
       </Alert>
     );
   }
-  return <UpstreamForm key={existing?.id ?? "new"} existing={existing} />;
+  return <UpstreamForm key={`${existing?.id ?? "new"}@${zone}`} existing={existing} zone={zone} zoneLabel={zoneLabel} />;
 }
 
 const SAVE_FIRST = "Save the upstream first: Test now for an auth plugin runs on a gateway with the saved configuration.";
 
-function UpstreamForm({ existing }: { existing?: Upstream }) {
+function UpstreamForm({ existing, zone, zoneLabel }: { existing?: Upstream; zone: string; zoneLabel: string }) {
   const navigate = useNavigate();
-  const plugins = usePlugins("upstream-auth");
+  const plugins = usePlugins("upstream-auth", true, undefined, zone);
   const initial = existing ? fromUpstream(existing) : blank;
   const [submitted, setSubmitted] = useState(false);
   const [jsonProblem, setJsonProblem] = useState<string | null>(null);
@@ -237,12 +238,13 @@ function UpstreamForm({ existing }: { existing?: Upstream }) {
     (values: Values) =>
       existing
         ? api.updateUpstream(existing.id, body(values, existing, values.key_source === "plugin" && missing.length > 0 && values.force))
-        : api.createUpstream(body(values, undefined, values.key_source === "plugin" && missing.length > 0 && values.force)),
+        : api.createUpstream({ ...body(values, undefined, values.key_source === "plugin" && missing.length > 0 && values.force), zone }),
     existing ? "Upstream saved" : "Upstream created",
   );
   return (
     <EditPage
-      title={existing ? existing.name : "New upstream"}
+      title={existing ? existing.name : `New upstream in ${zoneLabel}`}
+      description={existing ? `Zone ${zoneLabel}` : undefined}
       back="/upstreams"
       backLabel="Upstreams"
       dirty={dirty}
@@ -301,6 +303,7 @@ function UpstreamForm({ existing }: { existing?: Upstream }) {
           <>
             <PluginRefFields
               kind="upstream-auth"
+              zone={zone}
               wasmOnly
               value={{ plugin: v.auth_plugin, params: v.auth_params, timeout_ms: v.auth_timeout_ms ?? 0 }}
               onChange={(next) => {

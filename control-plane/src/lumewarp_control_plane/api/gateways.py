@@ -1,16 +1,18 @@
 """Gateway fleet status and gateway tokens (installation admins only).
 
 A gateway is one process, so the fleet list has exactly one row per gateway. Tokens are
-scope credentials with a label: they are not bound to a gateway id and any number of
-gateways may authenticate with one.
+zone credentials with a label: they are not bound to a gateway id and any number of
+gateways may authenticate with one. Reads take a `zone` query parameter (default: the
+default zone); a token's zone is fixed at creation.
 """
 
 from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from typing import Annotated
 
-from fastapi import APIRouter, Request, status
+from fastapi import APIRouter, Query, Request, status
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +23,7 @@ from lumewarp_control_plane.api.common import (
     SessionDep,
     SettingsDep,
     conflict,
+    enqueue_recompile,
     mutation,
     parse_uuid_cursor,
     validation_error,
@@ -35,7 +38,7 @@ from lumewarp_control_plane.api.schemas import (
 )
 from lumewarp_control_plane.authz import Action, Authz
 from lumewarp_control_plane.errors import not_found
-from lumewarp_control_plane.models import GatewaySession, GatewayToken, Scope
+from lumewarp_control_plane.models import GatewaySession, GatewayToken, Zone
 from lumewarp_control_plane.security import SecretKind, generate_secret
 
 router = APIRouter(tags=["gateways"])
@@ -44,6 +47,7 @@ router = APIRouter(tags=["gateways"])
 def _token_out(row: GatewayToken, connected_gateways: int = 0) -> GatewayTokenOut:
     return GatewayTokenOut(
         id=row.id,
+        zone=row.zone,
         name=row.name,
         display_prefix=row.display_prefix,
         created_at=row.created_at,
@@ -85,17 +89,21 @@ async def list_gateways(
     settings: SettingsDep,
     limit: LimitDep = 50,
     cursor: str | None = None,
+    zone: Annotated[str, Query(description="Config zone to list.")] | None = None,
 ) -> Page[GatewayOut]:
-    """One row per gateway process, connected ones first and then by gateway id.
+    """One row per gateway process of one zone, connected ones first and then by gateway
+    id.
 
     Requires an installation admin. A disconnected gateway stays visible for 24 h after its
-    stream ended. Each row names the token its latest Hello authenticated with.
+    stream ended. Each row names the token its latest Hello authenticated with. Omit `zone`
+    for the default zone.
     """
     await authz.require(Action.GATEWAY_READ)
+    zone = zone or settings.zone
     stmt = (
         select(GatewaySession, GatewayToken)
         .join(GatewayToken, GatewayToken.id == GatewaySession.token_id)
-        .where(GatewaySession.scope == settings.scope)
+        .where(GatewaySession.zone == zone)
     )
     if cursor is not None:
         after_connected, gateway_id = _cursor(cursor)
@@ -123,6 +131,7 @@ async def list_gateways(
     page = rows[:limit]
     items = [
         GatewayOut(
+            zone=row.zone,
             gateway_id=row.gateway_id,
             connected=row.connected,
             peer=row.peer,
@@ -164,13 +173,15 @@ async def list_gateway_tokens(
     settings: SettingsDep,
     limit: LimitDep = 50,
     cursor: str | None = None,
+    zone: Annotated[str, Query(description="Config zone to list.")] | None = None,
 ) -> Page[GatewayTokenOut]:
-    """Gateway tokens of the config scope, newest first, with their connected gateway count.
+    """Gateway tokens of one zone, newest first, with their connected gateway count.
 
-    Requires an installation admin. A revoked token stays listed.
+    Requires an installation admin. A revoked token stays listed. Omit `zone` for the default
+    zone.
     """
     await authz.require(Action.GATEWAY_READ)
-    stmt = select(GatewayToken).where(GatewayToken.scope == settings.scope)
+    stmt = select(GatewayToken).where(GatewayToken.zone == (zone or settings.zone))
     if cursor is not None:
         stmt = stmt.where(GatewayToken.id < parse_uuid_cursor(cursor))
     rows = list(
@@ -196,18 +207,19 @@ async def create_gateway_token(
     session: SessionDep,
     settings: SettingsDep,
 ) -> GatewayTokenCreated:
-    """Create a gateway token (`lwg-…`) with a label. It is not bound to a gateway id, so any
-    number of gateways may use it. The secret is in this response only. Requires an
-    installation admin.
+    """Create a gateway token (`lwg-…`) with a label in a zone (default: the default zone).
+    It is not bound to a gateway id, so any number of gateways may use it. The secret is in
+    this response only. Requires an installation admin.
     """
     await authz.require(Action.GATEWAY_TOKEN_MANAGE)
+    zone = body.zone or settings.zone
     new = generate_secret(SecretKind.GATEWAY_TOKEN)
     async with mutation(session):
-        scope = await session.get(Scope, settings.scope)
-        if scope is None:
-            raise conflict(f"config scope {settings.scope!r} is not initialized")
+        target = await session.get(Zone, zone)
+        if target is None or target.archived_at is not None:
+            raise conflict(f"config zone {zone!r} is not available")
         row = GatewayToken(
-            scope=settings.scope,
+            zone=zone,
             name=body.name,
             token_hash=new.hash,
             display_prefix=new.display_prefix,
@@ -221,8 +233,9 @@ async def create_gateway_token(
             resource_type="gateway_token",
             resource_id=row.id,
             principal=authz.principal,
-            details={"name": row.name},
+            details={"name": row.name, "zone": row.zone},
         )
+        await enqueue_recompile(session, settings, "api.gateway_token.create", zone=zone)
     return GatewayTokenCreated(token=_token_out(row), secret=new.secret)
 
 
@@ -244,7 +257,7 @@ async def revoke_gateway_token(
     await authz.require(Action.GATEWAY_TOKEN_MANAGE)
     async with mutation(session):
         row = await session.get(GatewayToken, token_id)
-        if row is None or row.scope != settings.scope:
+        if row is None:
             raise not_found("gateway token not found")
         if row.revoked_at is None:
             row.revoked_at = datetime.now(UTC)
@@ -258,6 +271,7 @@ async def revoke_gateway_token(
                 principal=authz.principal,
                 details={"name": row.name},
             )
+            await enqueue_recompile(session, settings, "api.gateway_token.revoke", zone=row.zone)
     # Streams also re-check their token periodically; this makes revocation immediate.
     runtime = getattr(request.app.state, "runtime", None)
     server = getattr(runtime, "grpc_server", None)

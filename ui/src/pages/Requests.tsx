@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useSearch } from "@tanstack/react-router";
 import { CheckIcon, CopyIcon } from "lucide-react";
-import { useState, type MouseEvent } from "react";
+import { useEffect, useState, type MouseEvent } from "react";
 
 import { api, type RequestRow, type RequestsQuery, type Schemas } from "../api";
 import { Badge, fmtUsd, PageHeader } from "../components/Bits";
@@ -11,7 +11,8 @@ import { DataTable } from "../components/Table";
 import { Button } from "../components/ui/button";
 import { CatalogFilter } from "../components/CatalogPicker";
 import { ComboboxField } from "../components/ui/combobox-field";
-import { useCan, useMe, useNames, useTeamDirectory, useTeams } from "../hooks";
+import { useCan, useMe, useNames, useTeamDirectory, useTeams, useZoneFilter } from "../hooks";
+import { ZoneBadge } from "../zone";
 import { dayStart, shiftDay } from "../lib/days";
 import type { RequestsSearch } from "../lib/requests";
 import { localDayOf } from "./keyText";
@@ -78,8 +79,9 @@ const initialFilters = (search: RequestsSearch): Filters => ({
 const trimmed = (value: string) => value.trim() || undefined;
 
 /** The API query: the day range is inclusive on screen and exclusive at its end, as on Usage. */
-function queryOf(filters: Filters, cursor: string | undefined, routing: boolean): RequestsQuery {
+function queryOf(filters: Filters, cursor: string | undefined, routing: boolean, zone: string | undefined): RequestsQuery {
   return {
+    zone,
     kind: filters.kind,
     team_id: filters.teamId || undefined,
     key_id: filters.keyId || undefined,
@@ -108,6 +110,9 @@ export function Requests() {
   const [filters, setFilters] = useState<Filters>(() => initialFilters(search));
   const [trail, setTrail] = useState<(string | undefined)[]>([undefined]);
   const cursor = trail[trail.length - 1];
+  const zone = useZoneFilter();
+  // A cursor belongs to one zone filter: a new zone starts at the first page.
+  useEffect(() => setTrail([undefined]), [zone.value]);
   const [selected, setSelected] = useState<RequestRow | null>(null);
   const teams = useTeams();
   const perms = useCan();
@@ -120,8 +125,8 @@ export function Requests() {
   const accountName = useNames(directory.data?.serviceAccounts);
 
   const keys = useQuery({
-    queryKey: ["team-keys", filters.teamId],
-    queryFn: () => api.teamKeys(filters.teamId),
+    queryKey: ["team-keys", filters.teamId, zone.param ?? "all"],
+    queryFn: () => api.teamKeys(filters.teamId, zone.param),
     enabled: !!filters.teamId,
   });
   const ownersEnabled = !!filters.teamId && perms.teamAdmin(filters.teamId);
@@ -137,8 +142,8 @@ export function Requests() {
   });
 
   const query = useQuery({
-    queryKey: ["requests", filters, cursor, perms.canReadRouting],
-    queryFn: () => api.requests(queryOf(filters, cursor, perms.canReadRouting)),
+    queryKey: ["requests", filters, cursor, perms.canReadRouting, zone.param ?? "all"],
+    queryFn: () => api.requests(queryOf(filters, cursor, perms.canReadRouting, zone.param)),
   });
 
   const set = (patch: Partial<Filters>) =>
@@ -202,7 +207,7 @@ export function Requests() {
       <PageHeader title="Requests" hint="No prompt or response content is stored; copy a request id to look it up in OTel." />
       <FilterBar
         testId="request-filters"
-        className={perms.canReadRouting ? "lg:grid-cols-[10rem_10rem_repeat(4,minmax(0,1fr))_auto]" : "lg:grid-cols-[10rem_10rem_repeat(3,minmax(0,1fr))_auto]"}
+        className={perms.canReadRouting ? "lg:grid-cols-[10rem_10rem_repeat(5,minmax(0,1fr))_auto]" : "lg:grid-cols-[10rem_10rem_repeat(4,minmax(0,1fr))_auto]"}
         more={{
           active: extraActive,
           onClear: clearExtra,
@@ -233,6 +238,7 @@ export function Requests() {
           onChange={(value) => change({ teamId: value })}
           options={[{ value: "", label: "All teams" }, ...(teams.data ?? []).map((team) => ({ value: team.id, label: team.name }))]}
         />
+        <SelectField label="Zone" value={zone.value} onChange={zone.set} options={zone.options} />
         <ComboboxField
           label="Key"
           value={filters.keyId}
@@ -300,6 +306,19 @@ export function Requests() {
               </Button>
             ),
           },
+          ...(zone.all
+            ? [
+                {
+                  key: "zone",
+                  header: "Zone",
+                  hideBelow: "sm" as const,
+                  cell: (row: RequestRow) => {
+                    const z = zone.zones.find((item) => item.name === row.zone);
+                    return z ? <ZoneBadge zone={z} /> : <span className="text-muted-foreground">{row.zone}</span>;
+                  },
+                },
+              ]
+            : []),
           ...(perms.canReadRouting ? [{ key: "resolved", header: "Resolved", cell: (row: RequestRow) => <Resolved row={row} /> }] : []),
           {
             key: "key",

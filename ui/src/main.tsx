@@ -8,6 +8,7 @@ import { setUnauthorizedHandler } from "./auth";
 import { ToastProvider } from "./components/Toast";
 import { SecretProvider } from "./components/SecretProvider";
 import { router } from "./router";
+import { ZoneProvider } from "./zone";
 import "./styles.css";
 
 // A permission-dependent read that is refused may mean the cached roles are stale: revalidate `/users/me`
@@ -52,7 +53,9 @@ createRoot(document.getElementById("root")!).render(
     <QueryClientProvider client={queryClient}>
       <ToastProvider>
         <SecretProvider>
-          <RouterProvider router={router} />
+          <ZoneProvider>
+            <RouterProvider router={router} />
+          </ZoneProvider>
         </SecretProvider>
       </ToastProvider>
     </QueryClientProvider>

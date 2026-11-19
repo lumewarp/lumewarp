@@ -26,8 +26,8 @@ def diff(old: snapshot_pb2.Snapshot, new: snapshot_pb2.Snapshot) -> config_servi
     then upserts by key) yields a snapshot equal to `new` up to entity order, which the
     compiler keeps sorted.
     """
-    if old.scope != new.scope:
-        raise ValueError(f"cannot diff across scopes ({old.scope!r} -> {new.scope!r})")
+    if old.zone != new.zone:
+        raise ValueError(f"cannot diff across zones ({old.zone!r} -> {new.zone!r})")
     delta = config_service_pb2.Delta(
         base_version=old.version,
         version=new.version,

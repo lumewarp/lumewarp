@@ -96,7 +96,10 @@ for (const [where, width] of [["desktop", 1280], ["390 px", 390]] as const) {
     await page.route(/\/api\/v1\/models(\?|$)/, async (route) => {
       const response = await route.fetch();
       const body = (await response.json()) as { items: Record<string, unknown>[] };
-      const extra = Array.from({ length: 65 }, (_, i) => ({ ...body.items[0], id: `long-${i}`, upstream_model: `Long/${String(i).padStart(2, "0")}` }));
+      // Suggestions come from the deployments of every model.
+      const base = body.items.find((item) => Array.isArray(item.deployments) && item.deployments.length > 0) ?? body.items[0];
+      const deployment = ((base.deployments as Record<string, unknown>[] | undefined) ?? [{}])[0];
+      const extra = Array.from({ length: 65 }, (_, i) => ({ ...base, id: `long-${i}`, deployments: [{ ...deployment, upstream_model: `Long/${String(i).padStart(2, "0")}` }] }));
       await route.fulfill({ response, json: { ...body, items: [...body.items, ...extra] } });
     });
     await page.reload();

@@ -107,7 +107,7 @@ MCP_DEFINITION_STATE_PENDING: McpDefinitionState
 MCP_DEFINITION_STATE_REJECTED: McpDefinitionState
 
 class Snapshot(_message.Message):
-    __slots__ = ("version", "upstreams", "models", "routers", "api_keys", "teams", "created_at_unix_ms", "required_capabilities", "scope", "aliases", "mcp_servers", "a2a_agents")
+    __slots__ = ("version", "upstreams", "models", "routers", "api_keys", "teams", "created_at_unix_ms", "required_capabilities", "zone", "aliases", "mcp_servers", "a2a_agents")
     VERSION_FIELD_NUMBER: _ClassVar[int]
     UPSTREAMS_FIELD_NUMBER: _ClassVar[int]
     MODELS_FIELD_NUMBER: _ClassVar[int]
@@ -116,7 +116,7 @@ class Snapshot(_message.Message):
     TEAMS_FIELD_NUMBER: _ClassVar[int]
     CREATED_AT_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
     REQUIRED_CAPABILITIES_FIELD_NUMBER: _ClassVar[int]
-    SCOPE_FIELD_NUMBER: _ClassVar[int]
+    ZONE_FIELD_NUMBER: _ClassVar[int]
     ALIASES_FIELD_NUMBER: _ClassVar[int]
     MCP_SERVERS_FIELD_NUMBER: _ClassVar[int]
     A2A_AGENTS_FIELD_NUMBER: _ClassVar[int]
@@ -128,11 +128,11 @@ class Snapshot(_message.Message):
     teams: _containers.RepeatedCompositeFieldContainer[Team]
     created_at_unix_ms: int
     required_capabilities: _containers.RepeatedScalarFieldContainer[str]
-    scope: str
+    zone: str
     aliases: _containers.RepeatedCompositeFieldContainer[Alias]
     mcp_servers: _containers.RepeatedCompositeFieldContainer[McpServer]
     a2a_agents: _containers.RepeatedCompositeFieldContainer[A2aAgent]
-    def __init__(self, version: _Optional[int] = ..., upstreams: _Optional[_Iterable[_Union[Upstream, _Mapping]]] = ..., models: _Optional[_Iterable[_Union[Model, _Mapping]]] = ..., routers: _Optional[_Iterable[_Union[Router, _Mapping]]] = ..., api_keys: _Optional[_Iterable[_Union[ApiKey, _Mapping]]] = ..., teams: _Optional[_Iterable[_Union[Team, _Mapping]]] = ..., created_at_unix_ms: _Optional[int] = ..., required_capabilities: _Optional[_Iterable[str]] = ..., scope: _Optional[str] = ..., aliases: _Optional[_Iterable[_Union[Alias, _Mapping]]] = ..., mcp_servers: _Optional[_Iterable[_Union[McpServer, _Mapping]]] = ..., a2a_agents: _Optional[_Iterable[_Union[A2aAgent, _Mapping]]] = ...) -> None: ...
+    def __init__(self, version: _Optional[int] = ..., upstreams: _Optional[_Iterable[_Union[Upstream, _Mapping]]] = ..., models: _Optional[_Iterable[_Union[Model, _Mapping]]] = ..., routers: _Optional[_Iterable[_Union[Router, _Mapping]]] = ..., api_keys: _Optional[_Iterable[_Union[ApiKey, _Mapping]]] = ..., teams: _Optional[_Iterable[_Union[Team, _Mapping]]] = ..., created_at_unix_ms: _Optional[int] = ..., required_capabilities: _Optional[_Iterable[str]] = ..., zone: _Optional[str] = ..., aliases: _Optional[_Iterable[_Union[Alias, _Mapping]]] = ..., mcp_servers: _Optional[_Iterable[_Union[McpServer, _Mapping]]] = ..., a2a_agents: _Optional[_Iterable[_Union[A2aAgent, _Mapping]]] = ...) -> None: ...
 
 class Upstream(_message.Message):
     __slots__ = ("name", "kind", "base_url", "api_key_ref", "timeout_ms", "stream_usage_mode", "health_check", "circuit_breaker", "metrics_url", "api_key_ciphertext", "auth")

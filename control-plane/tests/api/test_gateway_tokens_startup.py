@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from lumewarp_control_plane.app import create_app
-from lumewarp_control_plane.models import ConfigVersion, Scope
+from lumewarp_control_plane.models import ConfigVersion, Zone
 from lumewarp_control_plane.settings import Settings
 from tests.conftest import migrated_database
 
@@ -44,7 +44,7 @@ async def _scope_rows(database_url: str) -> list[tuple[str, int]]:
     engine = create_async_engine(database_url)
     try:
         async with AsyncSession(engine) as session:
-            rows = (await session.scalars(select(Scope))).all()
+            rows = (await session.scalars(select(Zone))).all()
             return [(row.name, row.source_revision) for row in rows]
     finally:
         await engine.dispose()

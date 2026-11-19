@@ -30,6 +30,7 @@ from tests.api.helpers import (
     ADMIN_AUTH,
     auth,
     create_org,
+    put_zone_limits,
     suffix,
     usage_event,
     user_with_token,
@@ -88,7 +89,7 @@ def test_list_and_get_orgs_respect_the_reader(client, committed, world: World) -
 def test_only_an_installation_admin_manages_orgs(client, world: World) -> None:
     for method, path, body in (
         ("POST", "/api/v1/orgs", {"name": f"by-org-admin-{suffix()}"}),
-        ("PATCH", f"/api/v1/orgs/{world.org_a.id}", {"budget_nano_usd": 1}),
+        ("PATCH", f"/api/v1/orgs/{world.org_a.id}", {"model_access": "all"}),
         ("DELETE", f"/api/v1/orgs/{world.org_a.id}", None),
         ("PUT", f"/api/v1/orgs/{world.org_a.id}/admins/{world.org_admin_user.id}", None),
         ("DELETE", f"/api/v1/orgs/{world.org_a.id}/admins/{world.org_admin_user.id}", None),
@@ -106,39 +107,49 @@ def test_installation_creates_and_patches_org_policy(client, world: World) -> No
             "name": f"new-{suffix()}",
             "model_access": "list",
             "allowed_models": [],
-            "rpm_limit": 10,
-            "budget_nano_usd": 1000,
         },
         headers=ADMIN_AUTH,
     )
     assert created.status_code == 201, created.text
     org = created.json()
     assert (org["model_access"], org["allowed_models"]) == ("list", [])
+    put_zone_limits(client, "api-test", {"org_id": org["id"]}, rpm_limit=10, budget_nano_usd=1000)
+    org = client.get(f"/api/v1/orgs/{org['id']}", headers=ADMIN_AUTH).json()
     assert (org["rpm_limit"], org["budget_nano_usd"]) == (10, 1000)
 
     patched = client.patch(
         f"/api/v1/orgs/{org['id']}",
-        json={"name": f"renamed-{suffix()}", "model_access": "all", "rpm_limit": None},
+        json={"name": f"renamed-{suffix()}", "model_access": "all"},
         headers=ADMIN_AUTH,
     )
     assert patched.status_code == 200, patched.text
     assert patched.json()["model_access"] == "all"
-    assert patched.json()["rpm_limit"] is None
+    put_zone_limits(client, "api-test", {"org_id": org["id"]}, rpm_limit=None)
+    assert client.get(f"/api/v1/orgs/{org['id']}", headers=ADMIN_AUTH).json()["rpm_limit"] is None
 
-    # The org is the root: a team cannot start above its current effective policy.
-    new_org = create_org(client, rpm_limit=10)
-    too_wide = client.post(
-        "/api/v1/teams",
-        json={"name": f"wide-{suffix()}", "org_id": new_org["id"], "rpm_limit": 11},
+    # The org is the root: a team's limit cannot be set above its current effective value.
+    new_org = create_org(client)
+    put_zone_limits(client, "api-test", {"org_id": new_org["id"]}, rpm_limit=10)
+    too_wide = client.put(
+        "/api/v1/zones/api-test/limits",
+        json={"team_id": str(uuid.uuid4()), "rpm_limit": 11},
         headers=ADMIN_AUTH,
     )
-    assert too_wide.status_code == 422, too_wide.text
+    assert too_wide.status_code == 404, too_wide.text
     inside = client.post(
         "/api/v1/teams",
-        json={"name": f"inside-{suffix()}", "org_id": new_org["id"], "rpm_limit": 10},
+        json={"name": f"inside-{suffix()}", "org_id": new_org["id"]},
         headers=ADMIN_AUTH,
     )
     assert inside.status_code == 201, inside.text
+    team_id = inside.json()["id"]
+    too_wide = client.put(
+        "/api/v1/zones/api-test/limits",
+        json={"team_id": team_id, "rpm_limit": 11},
+        headers=ADMIN_AUTH,
+    )
+    assert too_wide.status_code == 422, too_wide.text
+    put_zone_limits(client, "api-test", {"team_id": team_id}, rpm_limit=10)
 
 
 async def test_org_admin_creates_and_archives_teams_only_in_its_org(
@@ -291,8 +302,9 @@ async def test_org_usage_is_grouped_by_team_at_query_time(client, committed, wor
     )
 
 
-async def test_raising_an_org_budget_resets_its_month_window(client, committed) -> None:
-    org = create_org(client, budget_nano_usd=100)
+async def test_raising_an_org_budget_resets_its_month_window(client, committed, api_scope) -> None:
+    org = create_org(client)
+    put_zone_limits(client, api_scope, {"org_id": org["id"]}, budget_nano_usd=100)
     team = client.post(
         "/api/v1/teams",
         json={"name": f"budget-{suffix()}", "org_id": org["id"]},
@@ -313,6 +325,7 @@ async def test_raising_an_org_budget_resets_its_month_window(client, committed) 
             if total is None:
                 session.add(
                     UsageTotal(
+                        zone=api_scope,
                         scope_type=ScopeType.TEAM,
                         scope_id=team_id,
                         window_start=window_start,
@@ -322,7 +335,7 @@ async def test_raising_an_org_budget_resets_its_month_window(client, committed) 
                 )
             else:
                 total.cost_nano_usd = cost
-            await enforce_org_budgets(session, "gw-test", {team_id}, window_start)
+            await enforce_org_budgets(session, "gw-test", api_scope, {team_id}, window_start)
 
     async def audits() -> int:
         async with AsyncSession(committed.bind) as session:
@@ -353,10 +366,7 @@ async def test_raising_an_org_budget_resets_its_month_window(client, committed) 
 
     # Raising the budget clears the exceeded state and forgets the month's report, so the
     # next crossing must audit and recompile again.
-    raised = client.patch(
-        f"/api/v1/orgs/{org_id}", json={"budget_nano_usd": 1000}, headers=ADMIN_AUTH
-    )
-    assert raised.status_code == 200, raised.text
+    put_zone_limits(client, api_scope, {"org_id": str(org_id)}, budget_nano_usd=1000)
     async with AsyncSession(committed.bind) as session:
         assert (
             await session.scalar(
@@ -371,16 +381,20 @@ async def test_raising_an_org_budget_resets_its_month_window(client, committed) 
     assert await audits() == 2
 
 
-def test_team_quota_cannot_exceed_the_org(client, world: World) -> None:
-    org = create_org(client, rpm_limit=5, budget_nano_usd=100)
+def test_team_quota_cannot_exceed_the_org(client, world: World, api_scope) -> None:
+    org = create_org(client)
+    put_zone_limits(client, api_scope, {"org_id": org["id"]}, rpm_limit=5)
     team = client.post(
         "/api/v1/teams",
-        json={"name": f"narrow-{suffix()}", "org_id": org["id"], "rpm_limit": 5},
+        json={"name": f"narrow-{suffix()}", "org_id": org["id"]},
         headers=ADMIN_AUTH,
     )
     assert team.status_code == 201, team.text
-    too_wide = client.patch(
-        f"/api/v1/teams/{team.json()['id']}", json={"rpm_limit": 6}, headers=ADMIN_AUTH
+    put_zone_limits(client, api_scope, {"team_id": team.json()["id"]}, rpm_limit=5)
+    too_wide = client.put(
+        f"/api/v1/zones/{api_scope}/limits",
+        json={"team_id": team.json()["id"], "rpm_limit": 6},
+        headers=ADMIN_AUTH,
     )
     assert too_wide.status_code == 422, too_wide.text
 
@@ -401,16 +415,13 @@ async def test_org_policy_uses_all_as_the_root_default(client, committed) -> Non
 
 async def test_org_admins_read_org_events_and_archived_team_audit(client, world: World) -> None:
     # An org-level event: its row has org_id set and team_id NULL.
-    patched = client.patch(
-        f"/api/v1/orgs/{world.org_a.id}", json={"budget_nano_usd": 5000}, headers=ADMIN_AUTH
-    )
-    assert patched.status_code == 200, patched.text
+    put_zone_limits(client, "api-test", {"org_id": str(world.org_a.id)}, budget_nano_usd=5000)
     assert client.delete(f"/api/v1/teams/{world.team_a.id}", headers=world.admin).status_code == 204
 
     org_admin = client.get("/api/v1/audit?limit=500", headers=world.admin)
     assert org_admin.status_code == 200, org_admin.text
     actions = {row["action"] for row in org_admin.json()["items"]}
-    assert {"org.update", "team.archive"} <= actions
+    assert {"zone.limits.update", "team.archive"} <= actions
 
     # A team admin of the (now archived) team reads its team rows but never the org event.
     team_admin = client.get("/api/v1/audit?limit=500", headers=world.team_admin)
@@ -437,7 +448,7 @@ async def test_org_admins_read_org_events_and_archived_team_audit(client, world:
     assert by_org.status_code == 200, by_org.text
     rows = by_org.json()["items"]
     assert rows and all(row["org_id"] == str(world.org_a.id) for row in rows)
-    assert any(row["action"] == "org.update" and row["team_id"] is None for row in rows)
+    assert any(row["action"] == "zone.limits.update" and row["team_id"] is None for row in rows)
     assert (
         client.get(
             "/api/v1/audit", params={"org_id": str(world.org_b.id)}, headers=world.admin

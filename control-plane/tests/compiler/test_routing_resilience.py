@@ -9,7 +9,7 @@ import pytest
 from sqlalchemy import select
 
 from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as pb
-from lumewarp_control_plane.compiler import compile_scope
+from lumewarp_control_plane.compiler import compile_zone
 from lumewarp_control_plane.compiler.validate import (
     SUPPORTED_CAPABILITIES,
     SnapshotInvalid,
@@ -18,6 +18,7 @@ from lumewarp_control_plane.compiler.validate import (
 )
 from lumewarp_control_plane.models import (
     Model,
+    ModelDeployment,
     Router,
     RouterFallback,
     RouterSplit,
@@ -35,7 +36,7 @@ def _m(*names: str) -> list[pb.RouterMember]:
 
 async def compile_(factory):
     async with factory() as s:
-        return await compile_scope(s, SCOPE, now=OCT, require_local_membership=True)
+        return await compile_zone(s, SCOPE, now=OCT, require_local_membership=True)
 
 
 def router_of(snap: pb.Snapshot, name: str) -> pb.Router:
@@ -313,8 +314,9 @@ async def test_all_capabilities_together(factory) -> None:
         a.max_output_tokens = 100
         a.default_body = {"top_k": 20}
         a.reasoning_mode = "strip"
-        a.chat_check_interval_ms = 30000
-        a.chat_check_timeout_ms = 5000
+        deployment = await s.scalar(select(ModelDeployment).where(ModelDeployment.name_id == a.id))
+        deployment.chat_check_interval_ms = 30000
+        deployment.chat_check_timeout_ms = 5000
         main.reasoning_default_level = "high"
     snap = (await compile_(factory)).snapshot
     assert list(snap.required_capabilities) == sorted(

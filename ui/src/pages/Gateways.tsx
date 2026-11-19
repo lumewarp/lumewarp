@@ -12,6 +12,7 @@ import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { useMut } from "../hooks";
+import { useZone } from "../zone";
 import { runTokenSecretMutation } from "../lib/keySecret";
 
 type Tab = "gateways" | "tokens";
@@ -36,7 +37,7 @@ export function quarantinedVersions(versions: { version: number; quarantined: bo
 
 /**
  * The one badge a row shows for its config, by priority: quarantined > NACK > pending > behind.
- * A gateway is quarantined when the version it serves or last rejected is the scope's quarantined one.
+ * A gateway is quarantined when the version it serves or last rejected is the zone's quarantined one.
  */
 export function configBadge(g: Gateway, latest: number | undefined, quarantined: Set<number>): ConfigBadge | null {
   const quarantinedVersion = [g.last_nack_version, g.acked_version].find(
@@ -58,7 +59,7 @@ function sharingLabel(g: Gateway): string {
 
 /**
  * The problems the fleet has right now, one sentence each: connected gateways on different builds
- * or shared-limits settings, each connected gateway's NACK, and the scope's quarantined version.
+ * or shared-limits settings, each connected gateway's NACK, and the zone's quarantined version.
  * Disconnected rows are history and never raise a warning.
  */
 export function gatewayWarnings(rows: Gateway[], quarantined: Set<number>): string[] {
@@ -84,7 +85,7 @@ export function gatewayWarnings(rows: Gateway[], quarantined: Set<number>): stri
     warnings.push(`${g.gateway_id} NACKed config v${g.last_nack_version}${code}${reason ? `: ${reason}` : ""}.`);
   }
   for (const version of [...quarantined].sort((a, b) => a - b)) {
-    warnings.push(`Config v${version} is quarantined and withheld from every gateway in this scope.`);
+    warnings.push(`Config v${version} is quarantined and withheld from every gateway in this zone.`);
   }
   return warnings;
 }
@@ -120,19 +121,19 @@ function Config({ g, latest, quarantined }: { g: Gateway; latest: number | undef
   );
 }
 
-function GatewayTokenDialog({ open, onClose, onCreated }: { open: boolean; onClose: () => void; onCreated: () => void }) {
+function GatewayTokenDialog({ open, zone, zoneLabel, onClose, onCreated }: { open: boolean; zone: string; zoneLabel: string; onClose: () => void; onCreated: () => void }) {
   const showSecret = useShowSecret();
   const form = useForm({ name: "" });
   const create = useMut(() =>
     runTokenSecretMutation(
-      () => api.createGatewayToken({ name: form.values.name }),
+      () => api.createGatewayToken({ name: form.values.name, zone }),
       (value) => showSecret({ value, title: "Gateway token created" }),
     ),
   );
   return (
     <FormDialog
       open={open}
-      title="New gateway token"
+      title={`New gateway token in ${zoneLabel}`}
       submitLabel="Create token"
       onClose={onClose}
       onSubmit={() =>
@@ -222,9 +223,10 @@ function TokensTab({ rows, loading, error, onRetry }: { rows: GatewayToken[] | u
 }
 
 export function Gateways() {
-  const gateways = useQuery({ queryKey: ["gateways"], queryFn: () => api.gateways(), refetchInterval: 10_000 });
-  const versions = useQuery({ queryKey: ["config-versions"], queryFn: () => api.configVersions() });
-  const tokens = useQuery({ queryKey: ["gateway-tokens"], queryFn: () => api.gatewayTokens(), refetchInterval: 10_000 });
+  const { name: zone, zone: zoneRow } = useZone();
+  const gateways = useQuery({ queryKey: ["gateways", zone], queryFn: () => api.gateways(zone), refetchInterval: 10_000 });
+  const versions = useQuery({ queryKey: ["config-versions", zone], queryFn: () => api.configVersions(zone) });
+  const tokens = useQuery({ queryKey: ["gateway-tokens", zone], queryFn: () => api.gatewayTokens(zone), refetchInterval: 10_000 });
   const [tab, setTab] = useState<Tab>("gateways");
   const [creating, setCreating] = useState(false);
   const [opened, setOpened] = useState(0);
@@ -304,8 +306,10 @@ export function Gateways() {
         </TabsContent>
       </Tabs>
       <GatewayTokenDialog
-        key={opened}
+        key={`${opened}-${zone}`}
         open={creating}
+        zone={zone}
+        zoneLabel={zoneRow?.display_name || zone}
         onClose={() => setCreating(false)}
         onCreated={() => setTab("tokens")}
       />

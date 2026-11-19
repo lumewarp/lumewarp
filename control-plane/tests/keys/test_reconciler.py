@@ -33,7 +33,14 @@ from lumewarp_control_plane.models import (
 from lumewarp_control_plane.security import Principal, PrincipalKind
 from lumewarp_control_plane.settings import Settings
 from tests.conftest import migrated_database
-from tests.factories import make_key, make_member, make_service_account, make_team, make_user, scope
+from tests.factories import (
+    make_key,
+    make_member,
+    make_service_account,
+    make_team,
+    make_user,
+    zone,
+)
 
 
 @pytest.fixture
@@ -43,7 +50,7 @@ async def store():
         factory = async_sessionmaker(engine, expire_on_commit=False)
         try:
             async with factory() as session, session.begin():
-                await scope(session)
+                await zone(session)
                 team = await make_team(session)
                 other_team = await make_team(session)
                 owner = await make_user(session)
@@ -169,11 +176,11 @@ async def test_deny_suspends_only_matching_pair_and_publishes(store):
     backend = Backend()
     backend.overrides[(str(rows["owner"].id), str(rows["team"].id))] = Decision.DENY
     async with factory() as session, session.begin():
-        await outbox.enqueue_recompile(session, settings.scope, "initial")
+        await outbox.enqueue_recompile(session, "initial", settings.zone)
     assert (
         await compiler.publish_pending(
             factory,
-            settings.scope,
+            settings.zone,
             require_local_membership=False,
         )
         == 1
@@ -214,13 +221,13 @@ async def test_deny_suspends_only_matching_pair_and_publishes(store):
     assert (
         await compiler.publish_pending(
             factory,
-            settings.scope,
+            settings.zone,
             require_local_membership=False,
         )
         == 2
     )
     async with factory() as session:
-        version = await session.get(ConfigVersion, (settings.scope, 2))
+        version = await session.get(ConfigVersion, (settings.zone, 2))
         snapshot = pb.Snapshot.FromString(version.payload)
     published = {k.key_id: k.status for k in snapshot.api_keys}
     assert published[str(rows["owned"].id)] == pb.KEY_STATUS_SUSPENDED
@@ -295,19 +302,19 @@ async def test_keys_created_at_or_after_decision_are_not_suspended(store, monkey
         def now(tz):
             return cutoff
 
-    original = reconciler.lock_scope
+    original = reconciler.lock_hierarchy
     fresh = []
 
-    async def create_after_decisions(session, config):
+    async def create_after_decisions(session):
         async with factory() as writer, writer.begin():
             for created_at in (cutoff, cutoff + timedelta(seconds=1)):
                 fresh.append(
                     await make_key(writer, rows["team"], rows["owner"], created_at=created_at)
                 )
-        await original(session, config)
+        await original(session)
 
     monkeypatch.setattr(reconciler, "datetime", Clock)
-    monkeypatch.setattr(reconciler, "lock_scope", create_after_decisions)
+    monkeypatch.setattr(reconciler, "lock_hierarchy", create_after_decisions)
     assert (
         await reconciler.reconcile_keys(
             factory,
@@ -524,8 +531,8 @@ async def test_concurrent_revoke_does_not_deadlock_or_overwrite_state(store, mon
     factory, settings, rows = store
     key_locked = asyncio.Event()
     second_attempted = asyncio.Event()
-    original_key_scope = keys.lock_scope
-    original_reconcile_scope = reconciler.lock_scope
+    original_key_scope = keys.lock_hierarchy
+    original_reconcile_scope = reconciler.lock_hierarchy
     original_get_key = keys._get_key
 
     async def get_key(*args):
@@ -535,17 +542,17 @@ async def test_concurrent_revoke_does_not_deadlock_or_overwrite_state(store, mon
             await second_attempted.wait()
         return row
 
-    async def key_scope(session, config):
+    async def key_scope(session):
         if first == "reconcile":
             await key_locked.wait()
             second_attempted.set()
-        await original_key_scope(session, config)
+        await original_key_scope(session)
 
-    async def reconcile_scope(session, config):
+    async def reconcile_scope(session):
         if first == "revoke":
             await key_locked.wait()
             second_attempted.set()
-        await original_reconcile_scope(session, config)
+        await original_reconcile_scope(session)
         if first == "reconcile":
             # Hold a key row as well, so both execution orders exercise contention.
             await session.get(ApiKey, rows["owned"].id, with_for_update=True)
@@ -553,8 +560,8 @@ async def test_concurrent_revoke_does_not_deadlock_or_overwrite_state(store, mon
             await second_attempted.wait()
 
     monkeypatch.setattr(keys, "_get_key", get_key)
-    monkeypatch.setattr(keys, "lock_scope", key_scope)
-    monkeypatch.setattr(reconciler, "lock_scope", reconcile_scope)
+    monkeypatch.setattr(keys, "lock_hierarchy", key_scope)
+    monkeypatch.setattr(reconciler, "lock_hierarchy", reconcile_scope)
     authorizer = Authorizer(BuiltinBackend(factory))
     authz = RequestAuthz(Principal(kind=PrincipalKind.BREAK_GLASS), authorizer)
     async with factory() as key_session, asyncio.timeout(10), asyncio.TaskGroup() as tasks:

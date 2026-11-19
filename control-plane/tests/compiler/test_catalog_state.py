@@ -23,6 +23,7 @@ from lumewarp_control_plane.models import (
     KeyLifecycle,
     Model,
     ModelAccess,
+    ModelDeployment,
     ModelGroup,
     ModelGroupMember,
     PolicyGrant,
@@ -33,6 +34,7 @@ from lumewarp_control_plane.models import (
     Team,
     Upstream,
     UpstreamKind,
+    ZoneLimit,
 )
 from tests import factories
 from tests.compiler.helpers import (
@@ -61,6 +63,7 @@ async def test_restore_recreates_deleted_ids_and_preserves_changed_policy(factor
         model_id = await session.scalar(select(Model.id).where(Model.name == "model"))
         session.add(RouterSplitMember(split_id=split.id, model_id=model_id, position=0))
         team, user = await add_hierarchy(session)
+        team_id = team.id
         key = await add_key(session, team, user)
         await session.flush()
         expected = await capture_catalog_state(session)
@@ -78,14 +81,21 @@ async def test_restore_recreates_deleted_ids_and_preserves_changed_policy(factor
         await session.execute(delete(RouterFallback))
         await session.execute(delete(CatalogName).where(CatalogName.id == backup_id))
         await session.execute(delete(CatalogName).where(CatalogName.name == "backup-model"))
-        upstream = Upstream(name="new-upstream", kind=UpstreamKind.OPENAI, base_url="http://new/v1")
+        upstream = Upstream(
+            name="new-upstream",
+            zone=SCOPE,
+            kind=UpstreamKind.OPENAI,
+            base_url="http://new/v1",
+        )
         session.add(upstream)
         await session.flush()
         await session.execute(
-            update(Model).where(Model.id == model_id).values(upstream_id=upstream.id)
+            update(ModelDeployment)
+            .where(ModelDeployment.name_id == model_id)
+            .values(upstream_id=upstream.id)
         )
-        # Current policy is not restored from the routing sidecar.
-        await session.execute(update(Team).values(rpm_limit=23))
+        # Current per-zone limits are not restored from the routing sidecar.
+        session.add(ZoneLimit(zone=SCOPE, team_id=team_id, rpm_limit=23))
         await session.execute(
             update(ApiKey)
             .where(ApiKey.id == key_id)
@@ -95,7 +105,14 @@ async def test_restore_recreates_deleted_ids_and_preserves_changed_policy(factor
         version = await rollback_routing(session, SCOPE, 1, require_local_membership=True)
         assert await capture_catalog_state(session) == expected
         assert await session.get(Router, backup_id) is not None
-        assert await session.scalar(select(Team.rpm_limit)) == 23
+        assert (
+            await session.scalar(
+                select(ZoneLimit.rpm_limit).where(
+                    ZoneLimit.zone == SCOPE, ZoneLimit.team_id == team_id
+                )
+            )
+            == 23
+        )
     restored = await load_version(factory, version)
     assert restored.models == before.models
     assert restored.routers == before.routers

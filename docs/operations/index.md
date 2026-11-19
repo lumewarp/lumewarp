@@ -34,8 +34,9 @@ Each release publishes:
 | `lumewarp-gateway` | `lumewarp` (distroless). Arguments are the gateway's [flags](./gateway.md#flags). | 65532 | `/var/lib/lumewarp`, for the cached snapshot |
 | `lumewarp-control-plane` | `python -m lumewarp_control_plane serve` (Python 3.12, with the Admin UI built in). The command is a [CLI command](./control-plane.md#cli): `migrate`, `bootstrap`, `hash-password`, ... | 10001 | none |
 
-From v0.2.1 on, a release migrates the control-plane database in place; back it up first,
-since there is no downgrade ([Upgrades](./upgrades.md)).
+The database baseline has been rebuilt for zones. Recreate an existing development database
+from the previous schema before running the current migrations; it is not upgraded in place
+([Upgrades](./upgrades.md)).
 
 ### Building images
 
@@ -64,11 +65,13 @@ control plane's HTTP listener speak plain HTTP (the gRPC listener can use TLS,
 
 ## What every deployment needs
 
+A zone separates gateway configuration and traffic, not teams or identity. See [Zones](../admin/zones.md).
+
 | Setting | Where | Why |
 | --- | --- | --- |
 | `LUMEWARP_DATABASE_URL` | Control plane | PostgreSQL 16+, as a SQLAlchemy async URL. |
-| `migrate`, then a gateway token | Control plane CLI or Admin UI, once | `migrate` creates the schema and `serve` creates the config scope at startup. Create the first gateway token with **Gateways → New gateway token** in the UI (`lwg-…`, shown once), or `bootstrap --name <label>` without the UI. |
-| Gateway token | Gateway | `--gateway-token-env` names the variable holding the token. The token authenticates the scope, so any number of gateways may share it; each process generates its own id. |
+| `migrate`, then a gateway token | Control plane CLI or Admin UI, once | `migrate` creates the schema and `serve` creates the default zone at startup. Create a token for that zone with **Gateways → New gateway token** in the UI (`lwg-…`, shown once), or `bootstrap --name <label> --zone <zone>` without the UI. Recreate an existing development database from before the rebuilt zone baseline. |
+| Gateway token | Gateway | `--gateway-token-env` names the variable holding the token. The token authenticates one zone, so any number of gateways for that zone may share it; each process generates its own id. |
 | A persistent `--state-dir` | Gateway | The last good snapshot, so a restart while the control plane is down still serves. |
 | `LUMEWARP_BREAK_GLASS_PASSWORD_HASH` | Control plane | Emergency login, and the way to sign in before SSO is set up. An argon2id hash from `hash-password`. |
 | `LUMEWARP_ENCRYPTION_KEY` | Control plane **and every gateway**, same value | Seals upstream API keys entered in the Admin UI. |

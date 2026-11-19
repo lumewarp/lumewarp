@@ -1,4 +1,4 @@
-"""compile_scope: source state -> one resolved Snapshot (not yet versioned)."""
+"""compile_zone: source state -> one resolved Snapshot (not yet versioned)."""
 
 import logging
 import uuid
@@ -42,6 +42,7 @@ from lumewarp_control_plane.models import (
     MemberPolicy,
     Model,
     ModelAccess,
+    ModelDeployment,
     ModelGroupMember,
     Org,
     OrgAdmin,
@@ -53,7 +54,6 @@ from lumewarp_control_plane.models import (
     RouterMember,
     RouterSplit,
     RouterSplitMember,
-    Scope,
     ScopeType,
     ServiceAccount,
     StickyBy,
@@ -64,6 +64,9 @@ from lumewarp_control_plane.models import (
     UpstreamKind,
     UsageTotal,
     User,
+    Zone,
+    ZoneLimit,
+    ZoneMemberDefaults,
 )
 from lumewarp_control_plane.quota import (
     key_effective,
@@ -117,7 +120,7 @@ class CompileError(Exception):
 
 @dataclass(frozen=True)
 class CompiledSnapshot:
-    """Result of `compile_scope`, not yet published.
+    """Result of `compile_zone`, not yet published.
 
     `snapshot.version` and `created_at_unix_ms` are 0 here; publishing assigns them.
     `warnings` lists source entities left out of the snapshot (e.g. an empty router).
@@ -143,16 +146,19 @@ def narrow(parent: ModelSet, mode: ModelAccess, allowed: Sequence[str]) -> Model
     return own if parent is None else parent & own
 
 
-def rate_limit_scope(prefix: str, scope_id: uuid.UUID | str, entity) -> pb.RateLimitScope | None:
-    """One limiter scope for an entity whose *own* limits are set; NULL limits add none."""
-    if entity.rpm_limit is None and entity.tpm_limit is None and entity.max_parallel is None:
+def rate_limit_scope(prefix: str, scope_id: uuid.UUID | str, limits) -> pb.RateLimitScope | None:
+    """One limiter scope for a level whose *own* zone limits are set; NULL adds none."""
+    rpm = getattr(limits, "rpm_limit", None)
+    tpm = getattr(limits, "tpm_limit", None)
+    parallel = getattr(limits, "max_parallel", None)
+    if rpm is None and tpm is None and parallel is None:
         return None
     return pb.RateLimitScope(
         id=f"{prefix}:{scope_id}",
         limit=pb.RateLimit(
-            requests_per_minute=entity.rpm_limit or 0,
-            tokens_per_minute=entity.tpm_limit or 0,
-            max_parallel_requests=entity.max_parallel or 0,
+            requests_per_minute=rpm or 0,
+            tokens_per_minute=tpm or 0,
+            max_parallel_requests=parallel or 0,
         ),
     )
 
@@ -172,9 +178,14 @@ def _owner_scope_limits(
     else:
         raw = (None, None, None)
     if not service_account:
+        eff_defaults = (
+            getattr(member_defaults, "rpm_limit", None),
+            getattr(member_defaults, "tpm_limit", None),
+            getattr(member_defaults, "max_parallel", None),
+        )
         raw = tuple(
             value if value is not None else default
-            for value, default in zip(raw, member_defaults, strict=True)
+            for value, default in zip(raw, eff_defaults, strict=True)
         )
     parents = (team_eff.rpm_limit, team_eff.tpm_limit, team_eff.max_parallel)
     return tuple(
@@ -271,23 +282,29 @@ def expiry_ms(expires_at: datetime | None) -> int:
     return max(_ms(expires_at), 1)
 
 
-async def compile_scope(
+async def compile_zone(
     session: AsyncSession,
-    scope: str,
+    zone: str,
     *,
     now: datetime | None = None,
     max_snapshot_bytes: int | None = None,
     max_snapshot_keys: int | None = None,
     require_local_membership: bool,
 ) -> CompiledSnapshot:
-    """Compile the current source state of `scope` into a snapshot.
+    """Compile the current source state of `zone` into a snapshot.
 
     Pure over source state read in `session` (plus `now` for the budget window);
     the caller runs it in one REPEATABLE READ transaction, or holds the
-    scope row lock, so every table is read at one consistent point and `source_revision`
-    is `scopes.source_revision` as seen there.
+    hierarchy lock, so every table is read at one consistent point and `source_revision`
+    is `zones.source_revision` as seen there.
 
     Contract:
+    - Routing is per zone: only this zone's upstreams, model deployments, MCP servers and
+      A2A agents are read. A model is emitted only when it has a deployment in `zone`, and
+      its upstream comes from that deployment; a router member, split member or fallback
+      without one is dropped with a warning, a split left without models drops the router,
+      a router left without models is dropped, and an alias whose target was dropped is
+      dropped. Definitions (models, routers, aliases, grants) stay global.
     - Expands org -> team -> owner (member or service account) -> key policy into each
       key's EffectivePolicy. Model access: resolve INHERIT first (the owner takes the team's
       effective set unchanged; teams are never INHERIT), then intersect: ALL is the
@@ -340,13 +357,20 @@ async def compile_scope(
     max_keys = max_snapshot_keys or settings.max_snapshot_keys
     warnings: list[str] = []
 
-    revision = await session.scalar(select(Scope.source_revision).where(Scope.name == scope))
+    revision = await session.scalar(select(Zone.source_revision).where(Zone.name == zone))
     if revision is None:
-        raise CompileError(f"unknown config scope {scope!r}")
+        raise CompileError(f"unknown config zone {zone!r}")
 
     # Routing. Rename and rollback may have run in this session, hence populate_existing.
-    upstreams = (await session.scalars(select(Upstream).order_by(Upstream.name))).all()
+    # Only this zone's upstreams and deployments: a name may repeat in another zone.
+    upstreams = (
+        await session.scalars(select(Upstream).where(Upstream.zone == zone).order_by(Upstream.name))
+    ).all()
     upstream_name = {u.id: u.name for u in upstreams}
+    deployments = {
+        d.name_id: d
+        for d in await session.scalars(select(ModelDeployment).where(ModelDeployment.zone == zone))
+    }
     catalog_rows = select(Model).order_by(Model.name).execution_options(populate_existing=True)
     models = (await session.scalars(catalog_rows)).all()
     catalog_rows = select(Router).order_by(Router.name).execution_options(populate_existing=True)
@@ -360,7 +384,7 @@ async def compile_scope(
         set(caps)
         for caps in await session.scalars(
             select(GatewaySession.capabilities).where(
-                GatewaySession.scope == scope, GatewaySession.connected.is_(True)
+                GatewaySession.zone == zone, GatewaySession.connected.is_(True)
             )
         )
     ]
@@ -393,7 +417,7 @@ async def compile_scope(
     for sr in split_rows:
         splits.setdefault(sr.router_id, []).append(sr)
 
-    snap = pb.Snapshot(scope=scope)
+    snap = pb.Snapshot(zone=zone)
     # Source entities the gateway would reject are left out (with a warning) instead of
     # failing the compile, so one bad routing row never blocks revocations or budget
     # blocks for the whole fleet. The API should already refuse them (422).
@@ -451,10 +475,16 @@ async def compile_scope(
                 up.metrics_url = u.metrics_url
         snap.upstreams.append(up)
     valid_models = []
+    undeployed: set[uuid.UUID] = set()
     for d in models:
-        if d.upstream_id not in valid_upstreams:
+        deployment = deployments.get(d.id)
+        if deployment is None:
+            # Defined, not served here: the definition is global, the deployment is not.
+            undeployed.add(d.id)
+            continue
+        if deployment.upstream_id not in valid_upstreams:
             warnings.append(f"model {d.name!r} left out: its upstream is left out")
-        elif not d.name or not d.upstream_model:
+        elif not d.name or not deployment.upstream_model:
             warnings.append(f"model {d.name!r} left out: empty name or upstream_model")
         elif d.name in RESERVED_ALIASES:
             warnings.append(f"model {d.name!r} left out: the name is reserved")
@@ -462,8 +492,8 @@ async def compile_scope(
             valid_models.append(d)
             out = pb.Model(
                 name=d.name,
-                upstream=upstream_name[d.upstream_id],
-                upstream_model=d.upstream_model,
+                upstream=upstream_name[deployment.upstream_id],
+                upstream_model=deployment.upstream_model,
                 type={
                     "llm": pb.MODEL_TYPE_LLM,
                     "embedding": pb.MODEL_TYPE_EMBEDDING,
@@ -483,13 +513,13 @@ async def compile_scope(
                     )
                 )
             _model_body_rules(out, d, warnings)
-            if d.chat_check_interval_ms is not None:
+            if deployment.chat_check_interval_ms is not None:
                 out.chat_check.CopyFrom(
                     pb.ChatCheck(
-                        interval_ms=d.chat_check_interval_ms,
-                        timeout_ms=d.chat_check_timeout_ms or 0,
-                        unhealthy_threshold=d.chat_check_unhealthy_threshold or 0,
-                        healthy_threshold=d.chat_check_healthy_threshold or 0,
+                        interval_ms=deployment.chat_check_interval_ms,
+                        timeout_ms=deployment.chat_check_timeout_ms or 0,
+                        unhealthy_threshold=deployment.chat_check_unhealthy_threshold or 0,
+                        healthy_threshold=deployment.chat_check_healthy_threshold or 0,
                     )
                 )
             snap.models.append(out)
@@ -509,7 +539,9 @@ async def compile_scope(
         ]
         members_of_router = [m for m in members_of_router if m.model_id in valid_model_ids]
         if dropped:
-            warnings.append(f"router {r.name!r}: left-out models {dropped} removed")
+            warnings.append(
+                f"router {r.name!r}: left-out models {dropped} removed (not available in this zone)"
+            )
         if not r.name or r.name in RESERVED_ALIASES:
             warnings.append(f"router {r.name!r} left out: name is empty or reserved")
             continue
@@ -532,7 +564,18 @@ async def compile_scope(
         if router_splits:
             bad = None
             for sr in router_splits:
-                pool = [m for m in split_members.get(sr.id, []) if m.model_id in valid_model_ids]
+                split_rows = split_members.get(sr.id, [])
+                dropped_split = [
+                    model_by_id[m.model_id].name
+                    for m in split_rows
+                    if m.model_id not in valid_model_ids
+                ]
+                if dropped_split:
+                    warnings.append(
+                        f"router {r.name!r}: split {sr.name!r} left out models"
+                        f" {dropped_split} removed (not available in this zone)"
+                    )
+                pool = [m for m in split_rows if m.model_id in valid_model_ids]
                 if not pool:
                     bad = f"split {sr.name!r} has no models"
                 elif weighted and not sum(m.weight for m in pool):
@@ -577,7 +620,7 @@ async def compile_scope(
             else:
                 warnings.append(
                     f"router {r.name!r}: fallback {model_by_id[fallback].name!r} is left out,"
-                    " dropped"
+                    " dropped (not available in this zone)"
                 )
         # A stored level the gateway would reject, or that a served model no longer accepts,
         # is left out with a warning instead of failing the compile (the API refuses both).
@@ -602,7 +645,10 @@ async def compile_scope(
         if not a.name or a.name in RESERVED_ALIASES:
             warnings.append(f"alias {a.name!r} left out: name is empty or reserved")
         elif target is None:
-            warnings.append(f"alias {a.name!r} left out: {a.target_name!r} is left out")
+            reason = (
+                "is not available in this zone" if a.target_name_id in undeployed else "is left out"
+            )
+            warnings.append(f"alias {a.name!r} left out: {a.target_name!r} {reason}")
         else:
             snap.aliases.append(pb.Alias(name=a.name, target=target))
 
@@ -613,7 +659,9 @@ async def compile_scope(
     # definition table), so a rejected definition cannot come back.
     mcp_servers = (
         await session.scalars(
-            select(McpServer).where(McpServer.deleted_at.is_(None)).order_by(McpServer.name)
+            select(McpServer)
+            .where(McpServer.zone == zone, McpServer.deleted_at.is_(None))
+            .order_by(McpServer.name)
         )
     ).all()
     definitions: dict[uuid.UUID, list[McpDefinition]] = {}
@@ -653,7 +701,9 @@ async def compile_scope(
         snap.mcp_servers.append(out)
     agents = (
         await session.scalars(
-            select(A2aAgent).where(A2aAgent.deleted_at.is_(None)).order_by(A2aAgent.name)
+            select(A2aAgent)
+            .where(A2aAgent.zone == zone, A2aAgent.deleted_at.is_(None))
+            .order_by(A2aAgent.name)
         )
     ).all()
     for agent in agents:
@@ -732,31 +782,55 @@ async def compile_scope(
                 defer(ApiKey.allowed_groups),
                 defer(ApiKey.granted_models),
             )
-            .where(ApiKey.lifecycle != KeyLifecycle.REVOKED)
+            .where(ApiKey.zone == zone, ApiKey.lifecycle != KeyLifecycle.REVOKED)
             .order_by(ApiKey.id)
         )
     ).all()
     if len(keys) > max_keys:
         raise CompileError(f"{len(keys)} keys exceed the limit of {max_keys}")
 
+    # Per-zone limits, budgets and member defaults. One read each for this zone.
+    zone_limit_rows = list(await session.scalars(select(ZoneLimit).where(ZoneLimit.zone == zone)))
+    org_limits = {row.org_id: row for row in zone_limit_rows if row.org_id is not None}
+    team_limits = {
+        row.team_id: row
+        for row in zone_limit_rows
+        if row.team_id is not None
+        and row.org_id is None
+        and row.user_id is None
+        and row.service_account_id is None
+    }
+    member_limits = {
+        (row.team_id, row.user_id): row for row in zone_limit_rows if row.user_id is not None
+    }
+    account_limits = {
+        row.service_account_id: row for row in zone_limit_rows if row.service_account_id is not None
+    }
+    member_defaults_by_team = {
+        row.team_id: row
+        for row in await session.scalars(
+            select(ZoneMemberDefaults).where(ZoneMemberDefaults.zone == zone)
+        )
+    }
     window_start, window_end = month_window(now)
     spent = {
         (row.scope_type, row.scope_id): row.cost_nano_usd
         for row in await session.execute(
             select(UsageTotal.scope_type, UsageTotal.scope_id, UsageTotal.cost_nano_usd).where(
-                UsageTotal.window_start == window_start
+                UsageTotal.zone == zone, UsageTotal.window_start == window_start
             )
         )
     }
     # Org spend is derived: the sum of every team of the org (archived included), so the
-    # org level needs no total row and can never drift from its teams.
+    # org level needs no total row and can never drift from its teams. It is this zone's
+    # spend only.
     org_spent = {org_id: 0 for org_id in orgs}
     for team in all_teams.values():
         if team.org_id in org_spent:
             org_spent[team.org_id] += spent.get((ScopeType.TEAM, team.id), 0)
 
-    def over_budget(level: ScopeType, scope_id: uuid.UUID, entity) -> bool:
-        budget = entity.budget_nano_usd
+    def over_budget(level: ScopeType, scope_id: uuid.UUID, limits) -> bool:
+        budget = getattr(limits, "budget_nano_usd", None)
         if budget is None:
             return False
         used = (
@@ -770,7 +844,11 @@ async def compile_scope(
         snap.teams.append(pb.Team(id=str(t.id), name=t.name))
 
     team_effective_policies = {
-        team_id: team_effective(org_effective(orgs[team.org_id]), team)
+        team_id: team_effective(
+            org_effective(orgs[team.org_id], org_limits.get(team.org_id)),
+            team,
+            team_limits.get(team_id),
+        )
         for team_id, team in teams.items()
         if team.org_id in orgs
     }
@@ -783,11 +861,7 @@ async def compile_scope(
             continue
         org = orgs[team.org_id]
         team_eff = team_effective_policies[team.id]
-        member_defaults = (
-            team.member_rpm_default,
-            team.member_tpm_default,
-            team.member_max_parallel_default,
-        )
+        defaults = member_defaults_by_team.get(team.id)
         owner_gone = False
         if k.owner_kind is KeyOwnerKind.USER:
             member = members.get((k.team_id, k.user_id))
@@ -809,7 +883,7 @@ async def compile_scope(
             service_account = True
         owner_eff = owner_effective(
             team_eff,
-            team,
+            defaults,
             policy_of(owner_policy) if owner_policy is not None else None,
             service_account=service_account,
         )
@@ -836,16 +910,19 @@ async def compile_scope(
             allowed_agents=sorted(name for name in (owner_eff.agents or ()) if name in agent_names),
         )
         scopes: list[pb.RateLimitScope] = []
-        if (rl := rate_limit_scope("org", org.id, org)) is not None:
+        if (rl := rate_limit_scope("org", org.id, org_limits.get(org.id))) is not None:
             scopes.append(rl)
-        if (rl := rate_limit_scope("team", team.id, team)) is not None:
+        if (rl := rate_limit_scope("team", team.id, team_limits.get(team.id))) is not None:
             scopes.append(rl)
         if k.owner_kind is KeyOwnerKind.USER:
             # The member level's values are the exception, else the team's defaults,
             # even without a membership row (external authz backend). Emit the clamped
             # effective value so the scope matches /users/me.
             limits = _owner_scope_limits(
-                owner_policy, member_defaults, team_eff, service_account=False
+                member_limits.get((k.team_id, k.user_id)),
+                defaults,
+                team_eff,
+                service_account=False,
             )
             if any(value is not None for value in limits):
                 scopes.append(
@@ -860,7 +937,10 @@ async def compile_scope(
                 )
         else:
             limits = _owner_scope_limits(
-                owner_policy, member_defaults, team_eff, service_account=True
+                account_limits.get(k.service_account_id),
+                defaults,
+                team_eff,
+                service_account=True,
             )
             # A service account with no limit of its own adds no scope: the team's
             # scope already enforces the same effective value.
@@ -882,9 +962,17 @@ async def compile_scope(
         if k.lifecycle is KeyLifecycle.SUSPENDED or owner_gone:
             status = pb.KEY_STATUS_SUSPENDED
         elif (
-            over_budget(ScopeType.ORG, org.id, org)
-            or over_budget(ScopeType.TEAM, team.id, team)
-            or (owner_policy is not None and over_budget(*k.owner_scope, owner_policy))
+            over_budget(ScopeType.ORG, org.id, org_limits.get(org.id))
+            or over_budget(ScopeType.TEAM, team.id, team_limits.get(team.id))
+            or (
+                owner_policy is not None
+                and over_budget(
+                    *k.owner_scope,
+                    account_limits.get(k.service_account_id)
+                    if k.owner_kind is KeyOwnerKind.SERVICE_ACCOUNT
+                    else member_limits.get((k.team_id, k.user_id)),
+                )
+            )
         ):
             status = pb.KEY_STATUS_BUDGET_EXCEEDED
             key_policy.budget_window_end_unix_ms = _ms(window_end)
@@ -920,7 +1008,7 @@ async def compile_scope(
     except SnapshotInvalid as exc:
         raise CompileError(str(exc)) from exc
     for w in warnings:
-        log.warning("compile %s: %s", scope, w)
+        log.warning("compile %s: %s", zone, w)
     return CompiledSnapshot(
         snapshot=snap,
         source_revision=revision,

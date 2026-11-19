@@ -42,6 +42,7 @@ from lumewarp_control_plane.models import (
     RouterSplitMember,
     ServiceAccount,
     Team,
+    Zone,
 )
 from lumewarp_control_plane.quota import key_models
 from lumewarp_control_plane.security import PrincipalKind
@@ -62,6 +63,7 @@ def mint_token(encryption_key: str, key_id: uuid.UUID, exp_ms: int) -> str:
 
 class PlaygroundKey(BaseModel):
     id: uuid.UUID
+    zone: str
     name: str
     display_prefix: str
     team_id: uuid.UUID
@@ -257,10 +259,23 @@ async def get_playground(authz: Authz, session: SessionDep, settings: SettingsDe
             .order_by(ApiKey.id)
         )
     ).all()
+    zones = {
+        row.name: row
+        for row in await session.scalars(select(Zone).where(Zone.archived_at.is_(None)))
+    }
+    # Only keys in a zone that allows the Playground and has a gateway URL are offered.
+    usable_zones = {
+        name: row
+        for name, row in zones.items()
+        if row.playground_allowed and row.playground_gateway_url
+    }
     keys = []
     llm_names = await _llm_names(session)
     for key, account_name, team, org_name in rows:
         if not _usable(key):
+            continue
+        zone_row = usable_zones.get(key.zone)
+        if zone_row is None:
             continue
         if key.owner_kind is KeyOwnerKind.USER and not await authz.allowed(
             Action.KEY_MANAGE_OWN, team.id
@@ -272,6 +287,7 @@ async def get_playground(authz: Authz, session: SessionDep, settings: SettingsDe
         keys.append(
             PlaygroundKey(
                 id=key.id,
+                zone=key.zone,
                 name=key.name,
                 display_prefix=key.display_prefix,
                 team_id=team.id,
@@ -290,7 +306,7 @@ async def get_playground(authz: Authz, session: SessionDep, settings: SettingsDe
         if name in callable_names
     }
     return PlaygroundOut(
-        enabled=bool(settings.playground_gateway_url and settings.encryption_key),
+        enabled=bool(usable_zones and settings.encryption_key),
         keys=keys,
         reasoning=reasoning,
     )
@@ -346,8 +362,18 @@ async def chat_completions(
             raise HTTPException(404, "key not found")
     else:
         raise HTTPException(404, "key not found")
-    if not settings.playground_gateway_url or not settings.encryption_key:
-        raise ApiError(503, "playground_disabled", "Playground is not configured")
+    zone = await session.get(Zone, key.zone)
+    if zone is None or zone.archived_at is not None:
+        raise ApiError(403, "playground_not_allowed", "the key's zone is not available")
+    if not zone.playground_allowed:
+        raise ApiError(
+            403, "playground_not_allowed", f"zone {zone.name!r} does not allow the Playground"
+        )
+    playground_gateway_url = zone.playground_gateway_url
+    if not playground_gateway_url or not settings.encryption_key:
+        raise ApiError(
+            503, "playground_disabled", f"Playground is not configured in zone {zone.name!r}"
+        )
     body = bytearray()
     async for chunk in request.stream():
         body.extend(chunk)
@@ -382,7 +408,7 @@ async def chat_completions(
         upstream = await client.send(
             client.build_request(
                 "POST",
-                settings.playground_gateway_url.rstrip("/") + "/v1/chat/completions",
+                playground_gateway_url.rstrip("/") + "/v1/chat/completions",
                 content=bytes(body),
                 headers={
                     "Authorization": f"Bearer {token}",

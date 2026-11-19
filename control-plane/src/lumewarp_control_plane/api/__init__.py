@@ -34,6 +34,8 @@ from lumewarp_control_plane.api import (
     teams,
     usage,
     users,
+    zone_limits,
+    zones,
 )
 from lumewarp_control_plane.api.schemas import ErrorBody
 
@@ -68,4 +70,6 @@ router.include_router(requests.router)
 router.include_router(audit.router)
 router.include_router(gateways.router)
 router.include_router(config.router)
+router.include_router(zones.router)
+router.include_router(zone_limits.router)
 router.include_router(session.router)

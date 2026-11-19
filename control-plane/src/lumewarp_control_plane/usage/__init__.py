@@ -27,15 +27,13 @@ from lumewarp_control_plane.ids import valid_gateway_id
 from lumewarp_control_plane.models import (
     ActorType,
     ApiKey,
-    MemberPolicy,
     RequestOutcome,
     ScopeType,
-    ServiceAccount,
-    Team,
     TrafficKind,
     UsageEvent,
     UsageState,
     UsageTotal,
+    ZoneLimit,
     member_scope_id,
 )
 from lumewarp_control_plane.settings import Settings, get_settings
@@ -80,6 +78,7 @@ _EVENT_FIELDS = (
     "config_version",
     "usage_state",
     "outcome",
+    "zone",
 )
 _USAGE_FIELDS = (*_EVENT_FIELDS, "owner_kind", "owner_id")
 # Per-event skip messages that are not field validation errors, and their metric reason.
@@ -137,7 +136,7 @@ def _bounded_int(value: int, field: str, *, maximum: int = _MAX_BIGINT) -> int:
     return value
 
 
-def _prepare_event(gateway_id: str, event: usage_pb2.UsageEvent) -> _PreparedEvent:
+def _prepare_event(gateway_id: str, zone: str, event: usage_pb2.UsageEvent) -> _PreparedEvent:
     if not event.request_id:
         raise InvalidUsageBatch("request_id is required")
     request_id = _uuid(event.request_id, "request_id")
@@ -220,6 +219,7 @@ def _prepare_event(gateway_id: str, event: usage_pb2.UsageEvent) -> _PreparedEve
     values: dict[str, object] = {
         "request_id": request_id,
         "gateway_id": gateway_id,
+        "zone": zone,
         "ts": _timestamp(event.timestamp_unix_ms, "timestamp_unix_ms"),
         "started_at": _timestamp(event.started_at_unix_ms, "started_at_unix_ms", optional=True),
         "key_id": key_id,
@@ -261,7 +261,7 @@ def _same_event(existing: UsageEvent, values: dict[str, object]) -> bool:
 
 
 def _add_totals(
-    totals: dict[tuple[ScopeType, uuid.UUID, datetime], list[int]],
+    totals: dict[tuple[str, ScopeType, uuid.UUID, datetime], list[int]],
     values: dict[str, object],
     key: ApiKey,
 ) -> None:
@@ -274,8 +274,9 @@ def _add_totals(
         int(not bool(values["cost_known"])),
         int(values["audio_ms"]),
     )
+    zone = str(values["zone"])
     for kind, scope_id in ((ScopeType.TEAM, key.team_id), key.owner_scope):
-        bucket = totals.setdefault((kind, scope_id, start), [0, 0, 0, 0, 0, 0])
+        bucket = totals.setdefault((zone, kind, scope_id, start), [0, 0, 0, 0, 0, 0])
         for i, amount in enumerate(amounts):
             bucket[i] += amount
             if bucket[i] > _MAX_BIGINT:
@@ -283,10 +284,12 @@ def _add_totals(
 
 
 async def _validate_key_hierarchy(
-    session: AsyncSession, prepared: Sequence[_PreparedEvent]
+    session: AsyncSession, zone: str, prepared: Sequence[_PreparedEvent]
 ) -> tuple[set[uuid.UUID], dict[uuid.UUID, ApiKey]]:
-    """Return the request ids whose key is unknown or in another team, and the keys.
-    Valid events get the key's owner added to their values.
+    """Return the request ids whose key is unknown, in another team or in another zone.
+
+    Valid events get the key's owner added to their values. The zone comes from the
+    authenticated gateway token, never from the event.
     """
     key_ids = {item.values["key_id"] for item in prepared}
     if not key_ids:
@@ -297,7 +300,7 @@ async def _validate_key_hierarchy(
     for item in prepared:
         values = item.values
         key = by_id.get(values["key_id"])  # type: ignore[arg-type]
-        if key is None or key.team_id != values["team_id"]:
+        if key is None or key.team_id != values["team_id"] or key.zone != zone:
             mismatched.add(item.request_id)
             continue
         values["owner_kind"] = key.owner_kind
@@ -307,31 +310,38 @@ async def _validate_key_hierarchy(
 
 async def _upsert_totals(
     session: AsyncSession,
-    aggregates: dict[tuple[ScopeType, uuid.UUID, datetime], list[int]],
-) -> tuple[list[UsageTotal], dict[tuple[ScopeType, uuid.UUID, datetime], int]]:
+    aggregates: dict[tuple[str, ScopeType, uuid.UUID, datetime], list[int]],
+) -> tuple[list[UsageTotal], dict[tuple[str, ScopeType, uuid.UUID, datetime], int]]:
     # Create and lock aggregate rows in one stable total order. The previous spend is kept
     # under the same row lock so budget threshold crossings remain correct after a policy
     # budget is raised within a month.
-    keys = sorted(aggregates, key=lambda k: (k[2], k[0].value, k[1].hex))
+    keys = sorted(aggregates, key=lambda k: (k[3], k[0], k[1].value, k[2].hex))
     rows: list[UsageTotal] = []
-    previous_costs: dict[tuple[ScopeType, uuid.UUID, datetime], int] = {}
+    previous_costs: dict[tuple[str, ScopeType, uuid.UUID, datetime], int] = {}
     now = datetime.now(UTC)
-    for scope_type, scope_id, window_start in keys:
-        key = (scope_type, scope_id, window_start)
+    for zone, scope_type, scope_id, window_start in keys:
+        key = (zone, scope_type, scope_id, window_start)
         ensure = pg_insert(UsageTotal).values(
+            zone=zone,
             scope_type=scope_type,
             scope_id=scope_id,
             window_start=window_start,
         )
         await session.execute(
             ensure.on_conflict_do_nothing(
-                index_elements=[UsageTotal.scope_type, UsageTotal.scope_id, UsageTotal.window_start]
+                index_elements=[
+                    UsageTotal.zone,
+                    UsageTotal.scope_type,
+                    UsageTotal.scope_id,
+                    UsageTotal.window_start,
+                ]
             )
         )
         total = (
             await session.execute(
                 select(UsageTotal)
                 .where(
+                    UsageTotal.zone == zone,
                     UsageTotal.scope_type == scope_type,
                     UsageTotal.scope_id == scope_id,
                     UsageTotal.window_start == window_start,
@@ -361,46 +371,40 @@ async def _upsert_totals(
 
 async def _budget_policy(
     session: AsyncSession,
+    zone: str,
     keys: dict[uuid.UUID, ApiKey],
-    aggregates: dict[tuple[ScopeType, uuid.UUID, datetime], list[int]],
+    aggregates: dict[tuple[str, ScopeType, uuid.UUID, datetime], list[int]],
 ):
-    """(hard, team_id) per aggregated scope. A member removed while their events were in
-    flight has no budget left to evaluate; the team's still applies.
+    """(hard, team_id) per aggregated level in `zone`.
+
+    A member removed while their events were in flight has no budget left to evaluate; the
+    team's still applies. Budgets are the zone's `zone_limits` rows only.
     """
-    team_ids = {key.team_id for key in keys.values()}
     policies: dict[tuple[ScopeType, uuid.UUID], tuple[int | None, uuid.UUID]] = {}
-    for entity_id, hard in await session.execute(
-        select(Team.id, Team.budget_nano_usd).where(Team.id.in_(team_ids))
-    ):
-        policies[(ScopeType.TEAM, entity_id)] = (hard, entity_id)
-    # Member quotas live in `member_policies`, independent of the membership rows: an
-    # external backend has none, yet its members' budgets still apply.
-    for member in await session.scalars(
-        select(MemberPolicy).where(MemberPolicy.team_id.in_(team_ids))
-    ):
-        policies[(ScopeType.MEMBER, member_scope_id(member.team_id, member.user_id))] = (
-            member.budget_nano_usd,
-            member.team_id,
-        )
-    account_ids = {k.service_account_id for k in keys.values() if k.service_account_id}
-    if account_ids:
-        for entity_id, team_id, hard in await session.execute(
-            select(
-                ServiceAccount.id,
-                ServiceAccount.team_id,
-                ServiceAccount.budget_nano_usd,
-            ).where(ServiceAccount.id.in_(account_ids))
-        ):
-            policies[(ScopeType.SERVICE_ACCOUNT, entity_id)] = (hard, team_id)
+    for row in await session.scalars(select(ZoneLimit).where(ZoneLimit.zone == zone)):
+        if row.org_id is not None:
+            policies[(ScopeType.ORG, row.org_id)] = (row.budget_nano_usd, row.org_id)
+        elif row.user_id is not None:
+            policies[(ScopeType.MEMBER, member_scope_id(row.team_id, row.user_id))] = (
+                row.budget_nano_usd,
+                row.team_id,
+            )
+        elif row.service_account_id is not None:
+            policies[(ScopeType.SERVICE_ACCOUNT, row.service_account_id)] = (
+                row.budget_nano_usd,
+                row.team_id,
+            )
+        elif row.team_id is not None:
+            policies[(ScopeType.TEAM, row.team_id)] = (row.budget_nano_usd, row.team_id)
     for key in keys.values():
+        policies.setdefault((ScopeType.TEAM, key.team_id), (None, key.team_id))
         level, scope_id = key.owner_scope
-        if level is ScopeType.MEMBER:
-            policies.setdefault((level, scope_id), (None, key.team_id))
+        policies.setdefault((level, scope_id), (None, key.team_id))
     # Make missing rows a consistency failure rather than silently dropping an aggregate.
-    for kind, scope_id, _ in aggregates:
-        if (kind, scope_id) not in policies:
+    for scope_zone, kind, scope_id, _ in aggregates:
+        if scope_zone != zone or (kind, scope_id) not in policies:
             raise RuntimeError(
-                f"budget scope disappeared during usage ingestion: {kind}:{scope_id}"
+                f"budget scope disappeared during usage ingestion: {scope_zone}:{kind}:{scope_id}"
             )
     return policies
 
@@ -408,9 +412,10 @@ async def _budget_policy(
 async def _evaluate_budgets(
     session: AsyncSession,
     gateway_id: str,
+    zone: str,
     aggregate_rows: Sequence[UsageTotal],
-    aggregates: dict[tuple[ScopeType, uuid.UUID, datetime], list[int]],
-    previous_costs: dict[tuple[ScopeType, uuid.UUID, datetime], int],
+    aggregates: dict[tuple[str, ScopeType, uuid.UUID, datetime], list[int]],
+    previous_costs: dict[tuple[str, ScopeType, uuid.UUID, datetime], int],
     policies: dict[tuple[ScopeType, uuid.UUID], tuple[int | None, uuid.UUID]],
 ) -> bool:
     now = datetime.now(UTC)
@@ -419,7 +424,7 @@ async def _evaluate_budgets(
     for total in aggregate_rows:
         hard, team_id = policies[(total.scope_type, total.scope_id)]
         window_start = total.window_start
-        previous_cost = previous_costs[(total.scope_type, total.scope_id, window_start)]
+        previous_cost = previous_costs[(total.zone, total.scope_type, total.scope_id, window_start)]
         hard_crossed = (
             hard is not None and total.cost_nano_usd >= hard and total.exceeded_at is None
         )
@@ -440,8 +445,9 @@ async def _evaluate_budgets(
             action="budget.hard_exceeded",
             resource_type=total.scope_type.value,
             resource_id=total.scope_id,
-            team_id=team_id,
+            team_id=team_id if total.scope_type is not ScopeType.ORG else None,
             details={
+                "zone": zone,
                 "window_start": window_start.isoformat(),
                 "spent_nano_usd": total.cost_nano_usd,
                 "budget_nano_usd": hard,
@@ -453,10 +459,10 @@ async def _evaluate_budgets(
 async def _persist_events(
     session: AsyncSession,
     gateway_id: str,
+    zone: str,
     by_id: dict[uuid.UUID, _PreparedEvent],
     keys: dict[uuid.UUID, ApiKey],
     accepted: int,
-    scope_name: str | None,
     rejected: Counter[str],
 ) -> int:
     # Insert in request_id order so overlapping batches take event row locks in one order.
@@ -490,7 +496,7 @@ async def _persist_events(
                 rejected[_CONFLICTS_STORED] += 1
                 accepted -= 1
 
-    aggregates: dict[tuple[ScopeType, uuid.UUID, datetime], list[int]] = {}
+    aggregates: dict[tuple[str, ScopeType, uuid.UUID, datetime], list[int]] = {}
     for request_id in inserted_ids:
         values = by_id[request_id].values
         if values["kind"] is not TrafficKind.LLM:
@@ -501,26 +507,25 @@ async def _persist_events(
         return accepted
 
     total_rows, previous_costs = await _upsert_totals(session, aggregates)
-    policies = await _budget_policy(session, keys, aggregates)
+    policies = await _budget_policy(session, zone, keys, aggregates)
     hard_flipped = await _evaluate_budgets(
-        session, gateway_id, total_rows, aggregates, previous_costs, policies
+        session, gateway_id, zone, total_rows, aggregates, previous_costs, policies
     )
     # Orgs derive their spend from their teams, so only the orgs of the teams in this
     # batch are checked; a window that already crossed is skipped by the insert itself.
     team_ids = {values["team_id"] for values in (by_id[rid].values for rid in inserted_ids)}
-    windows = {window for kind, _, window in aggregates if kind is ScopeType.TEAM}
+    windows = {window for _, kind, _, window in aggregates if kind is ScopeType.TEAM}
     org_flipped = False
     for window in sorted(windows):
         org_flipped |= await enforce_org_budgets(
             session,
             gateway_id,
+            zone,
             team_ids,
             window,  # type: ignore[arg-type]
         )
     if hard_flipped or org_flipped:
-        await outbox.enqueue_recompile(
-            session, scope_name or get_settings().scope, "usage budget exceeded"
-        )
+        await outbox.enqueue_recompile(session, "usage budget exceeded", zone)
     return accepted
 
 
@@ -529,7 +534,7 @@ async def ingest(
     gateway_id: str,
     events: Sequence[usage_pb2.UsageEvent],
     *,
-    scope_name: str | None = None,
+    zone: str | None = None,
     max_batch_events: int | None = None,
     skipped: Counter[str] | None = None,
 ) -> int:
@@ -540,11 +545,13 @@ async def ingest(
     event) is skipped and logged, and never costs the rest of the batch. A duplicate request
     id with an identical payload is accepted without re-counting. Only batch-level problems
     (an invalid reporting gateway id, batch size) reject the whole batch. Event timestamps,
-    not receipt time, select the UTC month.
+    not receipt time, select the UTC month. `zone` is the authenticated gateway token's
+    zone; a key of another zone is rejected (`key_mismatch`) like a hierarchy mismatch.
 
     If `skipped` is given, skipped events are added to it by bounded reason (`SKIP_REASONS`)
     for the caller to export once the transaction has committed.
     """
+    zone = zone or get_settings().zone
     if not isinstance(gateway_id, str) or not valid_gateway_id(gateway_id):
         raise InvalidUsageBatch("invalid gateway id: 1..100 of [A-Za-z0-9._-]")
     maximum = (
@@ -558,7 +565,7 @@ async def ingest(
     duplicates: Counter[uuid.UUID] = Counter()
     for event in events:
         try:
-            prepared = _prepare_event(gateway_id, event)
+            prepared = _prepare_event(gateway_id, zone, event)
         except InvalidUsageBatch as exc:
             rejected[str(exc)] += 1
             continue
@@ -571,7 +578,7 @@ async def ingest(
         else:
             duplicates[prepared.request_id] += 1
 
-    mismatched, keys = await _validate_key_hierarchy(session, list(by_id.values()))
+    mismatched, keys = await _validate_key_hierarchy(session, zone, list(by_id.values()))
     for request_id in mismatched:
         # Identical in-batch copies of a rejected event are rejected with it.
         rejected[_KEY_MISMATCH] += 1 + duplicates[request_id]
@@ -590,10 +597,10 @@ async def ingest(
             return await _persist_events(
                 session,
                 gateway_id,
+                zone,
                 by_id,
                 keys,
                 len(events) - rejected.total(),
-                scope_name,
                 rejected,
             )
     finally:
@@ -612,14 +619,14 @@ async def ingest(
 
 async def _rollover_once(settings: Settings, session_factory: SessionFactory) -> None:
     async with session_factory() as session, session.begin():
-        await outbox.enqueue_recompile(session, settings.scope, "monthly budget rollover")
+        await outbox.enqueue_recompile(session, "monthly budget rollover")
         audit.record(
             session,
             actor_type=ActorType.SYSTEM,
             actor_id="budget-rollover",
             action="budget.monthly_rollover",
-            resource_type="scope",
-            resource_id=settings.scope,
+            resource_type="zone",
+            resource_id="all",
             details={"window_start": month_window(datetime.now(UTC))[0].isoformat()},
         )
 

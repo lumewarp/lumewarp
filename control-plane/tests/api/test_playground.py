@@ -26,7 +26,7 @@ from lumewarp_control_plane.models import (
     TeamRole,
 )
 from tests.api.conftest import TEST_ENCRYPTION_KEY
-from tests.api.helpers import auth, user_with_token
+from tests.api.helpers import auth, set_playground_url, user_with_token
 from tests.factories import (
     make_alias,
     make_key,
@@ -92,9 +92,21 @@ async def setup_keys(committed, *, role: TeamRole = TeamRole.MEMBER):
 
 async def test_own_keys_only_and_disabled(client, committed):
     own, excluded, headers, pat = await setup_keys(committed)
+    # A zone with no Playground URL offers no keys and reports the Playground disabled.
+    # (Another test may have configured the shared zone's URL.)
+    from lumewarp_control_plane.models import Zone
+
+    zone = await committed.get(Zone, "api-test")
+    zone.playground_gateway_url = None
+    await committed.commit()
     response = client.get("/api/v1/playground", headers=headers)
     assert response.status_code == 200, response.text
     assert response.json()["enabled"] is False
+    assert response.json()["keys"] == []
+    await set_playground_url(client, committed, "http://gateway:4000")
+    response = client.get("/api/v1/playground", headers=headers)
+    assert response.status_code == 200, response.text
+    assert response.json()["enabled"] is True
     assert [key["id"] for key in response.json()["keys"]] == [str(own.id)]
     assert client.get("/api/v1/playground", headers=auth(pat)).status_code == 401
     assert (
@@ -113,6 +125,12 @@ async def test_own_keys_only_and_disabled(client, committed):
         )
         assert response.status_code == 404
         assert response.json()["error"]["message"] == "key not found"
+    # Clearing the URL disables forwarding even for a key the zone already listed.
+    from lumewarp_control_plane.models import Zone
+
+    zone = await committed.get(Zone, "api-test")
+    zone.playground_gateway_url = None
+    await committed.commit()
     response = client.post(
         "/api/v1/playground/v1/chat/completions",
         headers={**headers, "x-lumewarp-act-as": str(own.id)},
@@ -128,6 +146,7 @@ async def test_team_admin_sees_and_uses_service_account_key(client, committed, m
     account = await committed.get(ServiceAccount, service.service_account_id)
     assert account is not None
 
+    await set_playground_url(client, committed, "http://gateway:4000")
     body = client.get("/api/v1/playground", headers=headers).json()
     by_id = {key["id"]: key for key in body["keys"]}
     assert set(by_id) == {str(own.id), str(service.id)}
@@ -145,7 +164,7 @@ async def test_team_admin_sees_and_uses_service_account_key(client, committed, m
     assert response.status_code == 404
     assert response.json()["error"]["message"] == "key not found"
 
-    client.app.state.settings.playground_gateway_url = "http://gateway:4000"
+    await set_playground_url(client, committed, "http://gateway:4000")
     request_id = uuid.uuid4()
 
     def gateway(request):
@@ -185,6 +204,7 @@ async def test_org_admin_inherits_service_account_key(client, committed, monkeyp
     cookie = await sessions.create_session(committed, admin.id, 3600)
     await committed.commit()
     headers = auth("session:" + cookie)
+    await set_playground_url(client, committed, "http://gateway:4000")
 
     body = client.get("/api/v1/playground", headers=headers).json()
     by_id = {entry["id"]: entry for entry in body["keys"]}
@@ -203,7 +223,7 @@ async def test_org_admin_inherits_service_account_key(client, committed, monkeyp
     assert response.status_code == 404
     assert response.json()["error"]["message"] == "key not found"
 
-    client.app.state.settings.playground_gateway_url = "http://gateway:4000"
+    await set_playground_url(client, committed, "http://gateway:4000")
     request_id = uuid.uuid4()
 
     def gateway(request):
@@ -254,6 +274,7 @@ async def test_inactive_service_account_keys_are_hidden_and_refused(client, comm
     cookie = await sessions.create_session(committed, admin.id, 3600)
     await committed.commit()
     headers = auth("session:" + cookie)
+    await set_playground_url(client, committed, "http://gateway:4000")
 
     body = client.get("/api/v1/playground", headers=headers).json()
     by_id = {entry["id"]: entry for entry in body["keys"]}
@@ -275,7 +296,7 @@ async def test_missing_or_invalid_request_id_still_succeeds(
     client, committed, monkeypatch, request_id
 ):
     own, _, headers, _ = await setup_keys(committed)
-    client.app.state.settings.playground_gateway_url = "http://gateway:4000"
+    await set_playground_url(client, committed, "http://gateway:4000")
     upstream_headers = {"content-type": "text/event-stream"}
     if request_id is not None:
         upstream_headers["x-lumewarp-request-id"] = request_id
@@ -300,7 +321,7 @@ async def test_missing_or_invalid_request_id_still_succeeds(
 @pytest.mark.parametrize("code", ["invalid_api_key", "other_auth_error"])
 async def test_gateway_auth_error(client, committed, monkeypatch, caplog, code):
     own, _, headers, _ = await setup_keys(committed)
-    client.app.state.settings.playground_gateway_url = "http://gateway:4000"
+    await set_playground_url(client, committed, "http://gateway:4000")
     responses = []
 
     def gateway(request):
@@ -351,7 +372,7 @@ class SSEStream(httpx.AsyncByteStream):
 
 async def test_proxy_streams_and_records_request(client, committed, monkeypatch):
     own, _, headers, _ = await setup_keys(committed)
-    client.app.state.settings.playground_gateway_url = "http://gateway:4000"
+    await set_playground_url(client, committed, "http://gateway:4000")
     model = await make_model(committed)
     await committed.commit()
     body = (
@@ -414,7 +435,7 @@ async def test_proxy_streams_and_records_request(client, committed, monkeypatch)
 
 async def test_body_limit_and_unreachable(client, committed, monkeypatch):
     own, _, headers, _ = await setup_keys(committed)
-    client.app.state.settings.playground_gateway_url = "http://gateway:4000"
+    await set_playground_url(client, committed, "http://gateway:4000")
     headers["x-lumewarp-act-as"] = str(own.id)
     path = "/api/v1/playground/v1/chat/completions"
     assert client.post(path, headers=headers, content=b"x" * (1024 * 1024 + 1)).status_code == 413

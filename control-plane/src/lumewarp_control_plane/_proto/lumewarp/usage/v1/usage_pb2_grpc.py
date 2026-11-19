@@ -30,7 +30,7 @@ class UsageServiceStub:
     request path and reports them asynchronously; a failed report is retried
     from a bounded buffer and dropped (and counted) when the buffer is full.
     Authenticated with the same gateway token as ConfigService; the token only
-    authenticates the scope, and usage is attributed to ReportRequest.gateway_id.
+    authenticates the zone, and usage is attributed to ReportRequest.gateway_id.
     """
 
     def __init__(self, channel):
@@ -51,7 +51,7 @@ class UsageServiceServicer:
     request path and reports them asynchronously; a failed report is retried
     from a bounded buffer and dropped (and counted) when the buffer is full.
     Authenticated with the same gateway token as ConfigService; the token only
-    authenticates the scope, and usage is attributed to ReportRequest.gateway_id.
+    authenticates the zone, and usage is attributed to ReportRequest.gateway_id.
     """
 
     def Report(self, request, context):
@@ -86,7 +86,7 @@ class UsageService:
     request path and reports them asynchronously; a failed report is retried
     from a bounded buffer and dropped (and counted) when the buffer is full.
     Authenticated with the same gateway token as ConfigService; the token only
-    authenticates the scope, and usage is attributed to ReportRequest.gateway_id.
+    authenticates the zone, and usage is attributed to ReportRequest.gateway_id.
     """
 
     @staticmethod

@@ -40,6 +40,7 @@ const TeamDetailPage = lazy(() => import("./pages/TeamDetail").then((module) => 
 const McpServersPage = lazy(() => import("./pages/McpServers").then((module) => ({ default: module.McpServers })));
 const McpServerEditPage = lazy(() => import("./pages/McpServerEdit").then((module) => ({ default: module.McpServerEdit })));
 const PluginsPage = lazy(() => import("./pages/Plugins").then((module) => ({ default: module.Plugins })));
+const ZonesPage = lazy(() => import("./pages/Zones").then((module) => ({ default: module.Zones })));
 const A2aAgentsPage = lazy(() => import("./pages/A2aAgents").then((module) => ({ default: module.A2aAgents })));
 const A2aAgentEditPage = lazy(() => import("./pages/A2aAgentEdit").then((module) => ({ default: module.A2aAgentEdit })));
 
@@ -169,6 +170,14 @@ const orgDetailRoute = createRoute({
   component: OrgDetailRoute,
 });
 
+/** Manage zones: reached from the header's zone menu, no sidebar entry. `?new=1` opens the create dialog. */
+const zonesRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: "/zones",
+  validateSearch: (search: Record<string, unknown>): { new?: boolean } => (search.new === true || search.new === "true" || search.new === 1 ? { new: true } : {}),
+  component: guarded(() => <ZonesPage />, "installationAdmin"),
+});
+
 const routeTree = rootRoute.addChildren([
   loginRoute,
   appRoute.addChildren([
@@ -205,6 +214,7 @@ const routeTree = rootRoute.addChildren([
     page("/usage", Usage),
     requestsRoute,
     page("/audit", () => <AuditPage />, "teamAdmin"),
+    zonesRoute,
     page("/gateways", () => <GatewaysPage />, "installationAdmin"),
     page("/config", () => <ConfigPage />, "installationAdmin"),
     page("/settings", () => <Navigate to="/my-keys" replace />),

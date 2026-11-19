@@ -1242,7 +1242,7 @@ impl Config {
                 }
                 caps
             },
-            scope: String::new(),
+            zone: String::new(),
         })
     }
 }

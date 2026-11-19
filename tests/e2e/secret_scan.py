@@ -62,9 +62,7 @@ from urllib.parse import quote, quote_plus
 # `lwp-` and `lwg-` have a four-character prefix; the lookarounds keep a full token from
 # matching inside a longer run of token characters (and a display prefix has only 6).
 TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_-])(lwp-|lwg-|lw-)[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])")
-TOKEN_BYTES_RE = re.compile(
-    rb"(?<![A-Za-z0-9_-])(lwp-|lwg-|lw-)[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])"
-)
+TOKEN_BYTES_RE = re.compile(rb"(?<![A-Za-z0-9_-])(lwp-|lwg-|lw-)[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])")
 COPY_RE = re.compile(r"^COPY (?:\S+\.)?(\S+)(?: \([^)]*\))? FROM stdin;$", re.MULTILINE)
 # A bytea column is `\\x` followed by the hex of its bytes in a plain-format dump: COPY
 # escapes the backslash of PostgreSQL's hex format, so the dump text has two of them.
@@ -438,9 +436,7 @@ def _scanned(run_dir: str) -> dict[str, dict]:
             try:
                 item = json.loads(line)
             except ValueError as err:
-                raise ValueError(
-                    f"{path}:{number}: corrupt scan result line ({err.msg})"
-                ) from None
+                raise ValueError(f"{path}:{number}: corrupt scan result line ({err.msg})") from None
             if not isinstance(item, dict) or not item.get("database") or "hits" not in item:
                 raise ValueError(f"{path}:{number}: corrupt scan result entry")
             results[item["database"]] = item
@@ -483,8 +479,7 @@ def run_id_from(run_dir: str) -> str:
         if run_id:
             return run_id
     raise RuntimeError(
-        f"{RUN_ID_ENV} is not set and {path} is missing; this run's databases cannot be"
-        " identified"
+        f"{RUN_ID_ENV} is not set and {path} is missing; this run's databases cannot be identified"
     )
 
 
@@ -515,7 +510,9 @@ def finalize(run_dir: str, pg_url: str, *, stack_free: bool = False) -> int:
     existing = _existing_databases(pg_url)
     # A database with this run's name that no Stack registered is still this run's leak
     # risk: scan it. Register it so the scripts' reaper removes it too.
-    unregistered = sorted(name for name in existing if name.startswith(prefix) and name not in created)
+    unregistered = sorted(
+        name for name in existing if name.startswith(prefix) and name not in created
+    )
     if unregistered:
         with open(os.path.join(run_dir, "dbs"), "a") as dbs:
             for name in unregistered:

@@ -21,9 +21,90 @@ from lumewarp_control_plane.models import (
     UsageState,
     UsageTotal,
     User,
+    Zone,
 )
 from lumewarp_control_plane.security import SecretKind, generate_secret
 from tests.factories import make_user
+
+
+def app_zone(client) -> str:
+    """The zone the test app was configured with (the default for a record without one)."""
+    return client.app.state.settings.zone
+
+
+def create_model(
+    client,
+    upstream_id,
+    *,
+    name: str | None = None,
+    model_type: str = "llm",
+    upstream_model: str = "real-name",
+    zone: str | None = None,
+    deploy: bool = True,
+    **body,
+) -> dict:
+    """Create a model through the API and deploy it on `upstream_id` in one zone.
+
+    `chat_check` in `body` belongs to the deployment, so it goes there; everything else is
+    the model definition. Returns the model as `GET /models/{id}` renders it.
+    """
+    chat_check = body.pop("chat_check", None)
+    payload = {"name": name or f"model-{suffix()}", "model_type": model_type, **body}
+    response = client.post("/api/v1/models", json=payload, headers=ADMIN_AUTH)
+    assert response.status_code == 201, response.text
+    model = response.json()
+    if deploy:
+        deployment = {"upstream_id": upstream_id, "upstream_model": upstream_model}
+        if chat_check is not None:
+            deployment["chat_check"] = chat_check
+        response = client.put(
+            f"/api/v1/models/{model['id']}/deployments/{zone or app_zone(client)}",
+            json=deployment,
+            headers=ADMIN_AUTH,
+        )
+        assert response.status_code == 200, response.text
+        response = client.get(f"/api/v1/models/{model['id']}", headers=ADMIN_AUTH)
+        assert response.status_code == 200, response.text
+        model = response.json()
+    return model
+
+
+def deployment_of(model: dict, zone: str | None = None) -> dict:
+    """The model's one deployment (or the one in `zone`)."""
+    deployments = model["deployments"]
+    if zone is None:
+        assert len(deployments) == 1, deployments
+        return deployments[0]
+    return next(item for item in deployments if item["zone"] == zone)
+
+
+def put_zone_limits(client, zone: str, owner: dict[str, str], **limits) -> dict:
+    """`PUT /zones/{zone}/limits` as an installation admin."""
+    response = client.put(
+        f"/api/v1/zones/{zone}/limits",
+        json={**owner, **limits},
+        headers=ADMIN_AUTH,
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def put_member_defaults(client, zone: str, team_id: str, **limits) -> dict:
+    response = client.put(
+        f"/api/v1/zones/{zone}/member-defaults",
+        json={"team_id": team_id, **limits},
+        headers=ADMIN_AUTH,
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+async def set_playground_url(client, session, url: str = "http://gateway:4000") -> None:
+    """Point the default zone's Playground at a gateway, as an administrator would."""
+    zone = await session.get(Zone, client.app.state.settings.zone)
+    assert zone is not None
+    zone.playground_gateway_url = url
+    await session.commit()
 
 
 def auth(secret: str) -> dict[str, str]:
@@ -108,6 +189,7 @@ def usage_event(
         ts=ts,
         key_id=key.id,
         team_id=key.team_id,
+        zone=key.zone,
         owner_kind=key.owner_kind,
         owner_id=key.owner_id,
         kind=kind,
@@ -140,8 +222,12 @@ def usage_total(
     completion_tokens: int = 5,
     cost_nano_usd: int = 1000,
     unknown_cost_count: int = 0,
+    zone: str | None = None,
 ) -> UsageTotal:
+    from tests import factories
+
     return UsageTotal(
+        zone=zone or factories.DEFAULT_ZONE,
         scope_type=scope_type,
         scope_id=scope_id,
         window_start=window_start,
@@ -207,7 +293,7 @@ async def report_plugins(
         capabilities += [f"{CAPABILITY_PREFIX[kind]}:{name}" for kind, name in named]
     secret = generate_secret(SecretKind.GATEWAY_TOKEN)
     token = GatewayToken(
-        scope=scope,
+        zone=scope,
         name=gateway_id,
         token_hash=secret.hash,
         display_prefix=secret.display_prefix,
@@ -224,8 +310,8 @@ async def report_plugins(
     }
     await session.execute(
         insert(GatewaySession)
-        .values(scope=scope, gateway_id=gateway_id, **values)
-        .on_conflict_do_update(index_elements=["scope", "gateway_id"], set_=values)
+        .values(zone=scope, gateway_id=gateway_id, **values)
+        .on_conflict_do_update(index_elements=["zone", "gateway_id"], set_=values)
     )
     text = lambda schema: schema if isinstance(schema, str) else json.dumps(schema)  # noqa: E731
     reported = []

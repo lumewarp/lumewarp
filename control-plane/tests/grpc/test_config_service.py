@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 import grpc
 import pytest
 from sqlalchemy import event, select, update
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from lumewarp_control_plane._proto.lumewarp.config.v1 import (
     config_service_pb2 as cpb,
@@ -27,7 +27,7 @@ from lumewarp_control_plane.compiler.plugins import (
     load_plugins,
 )
 from lumewarp_control_plane.compiler.publish import compact_versions
-from lumewarp_control_plane.db import SessionFactory, create_session_factory
+from lumewarp_control_plane.db import SessionFactory
 from lumewarp_control_plane.grpc import (
     ProbeGatewayGone,
     ProbeTimeout,
@@ -46,7 +46,7 @@ from lumewarp_control_plane.models import (
     GatewaySession,
     GatewayToken,
     PluginKind,
-    Scope,
+    Zone,
 )
 from lumewarp_control_plane.security import SecretKind, generate_secret
 from lumewarp_control_plane.settings import Settings
@@ -54,23 +54,6 @@ from lumewarp_control_plane.settings import Settings
 CATASTROPHIC = json.dumps(
     {"type": "object", "properties": {"a": {"type": "string", "pattern": "^(a+)+$"}}}
 )
-
-
-@pytest.fixture(scope="module")
-async def c4_engine():
-    from tests.conftest import migrated_database
-
-    async with migrated_database() as url:
-        engine = create_async_engine(url)
-        try:
-            yield engine
-        finally:
-            await engine.dispose()
-
-
-@pytest.fixture(scope="module")
-async def session_factory(c4_engine: AsyncEngine) -> SessionFactory:
-    return create_session_factory(c4_engine)
 
 
 async def _seed(
@@ -83,14 +66,14 @@ async def _seed(
     scope_name = scope_name or f"grpc-{uuid7().hex}"
     tokens: dict[str, str] = {}
     async with factory() as session, session.begin():
-        session.add(Scope(name=scope_name))
+        session.add(Zone(name=scope_name))
         await session.flush()
         for gateway_id in gateways:
             generated = generate_secret(SecretKind.GATEWAY_TOKEN)
             tokens[gateway_id] = generated.secret
             session.add(
                 GatewayToken(
-                    scope=scope_name,
+                    zone=scope_name,
                     name=gateway_id,
                     token_hash=generated.hash,
                     display_prefix=generated.display_prefix,
@@ -98,14 +81,14 @@ async def _seed(
             )
         for version in versions:
             snapshot = snapshot_pb2.Snapshot(
-                scope=scope_name,
+                zone=scope_name,
                 version=version,
                 created_at_unix_ms=version,
             )
             payload = snapshot.SerializeToString(deterministic=True)
             session.add(
                 ConfigVersion(
-                    scope=scope_name,
+                    zone=scope_name,
                     version=version,
                     payload=payload,
                     digest=hashlib.sha256(payload).digest(),
@@ -121,14 +104,14 @@ async def _seed(
 async def _publish(factory: SessionFactory, scope: str, version: int) -> None:
     async with factory() as session, session.begin():
         snapshot = snapshot_pb2.Snapshot(
-            scope=scope,
+            zone=scope,
             version=version,
             created_at_unix_ms=version,
         )
         payload = snapshot.SerializeToString(deterministic=True)
         session.add(
             ConfigVersion(
-                scope=scope,
+                zone=scope,
                 version=version,
                 payload=payload,
                 digest=hashlib.sha256(payload).digest(),
@@ -152,7 +135,7 @@ def _stub_diff(monkeypatch):
 async def _start(factory: SessionFactory, scope: str, *, ack_timeout: float = 1.0):
     server = await serve(
         Settings(
-            scope=scope,
+            zone=scope,
             grpc_bind="127.0.0.1:0",
             ack_timeout_seconds=ack_timeout,
             background_enabled=False,
@@ -166,7 +149,7 @@ async def _start(factory: SessionFactory, scope: str, *, ack_timeout: float = 1.
 def _digest(scope: str, version: int) -> bytes:
     """The digest _seed/_publish store for a version."""
     payload = snapshot_pb2.Snapshot(
-        scope=scope, version=version, created_at_unix_ms=version
+        zone=scope, version=version, created_at_unix_ms=version
     ).SerializeToString(deterministic=True)
     return hashlib.sha256(payload).digest()
 
@@ -176,7 +159,7 @@ async def _open_stream(
     token: str,
     gateway_id: str,
     have_version: int = 0,
-    scope: str = "",
+    zone: str = "",
     have_digest: bytes | None = None,
     plugins: tuple[cpb.PluginDescriptor, ...] = (),
     capabilities: tuple[str, ...] = (),
@@ -185,7 +168,7 @@ async def _open_stream(
 ):
     """Hello; by default have_digest is the stored digest of have_version (if any)."""
     if have_digest is None:
-        have_digest = _digest(scope, have_version) if have_version and scope else b""
+        have_digest = _digest(zone, have_version) if have_version and zone else b""
     call = stub.Stream(metadata=(("authorization", f"Bearer {token}"),))
     await call.write(
         cpb.GatewayMessage(
@@ -194,7 +177,7 @@ async def _open_stream(
                 have_version=have_version,
                 have_digest=have_digest,
                 gateway_version=gateway_version,
-                scope=scope,
+                zone=zone,
                 plugins=plugins,
                 supported_capabilities=capabilities,
                 shared_limits=shared_limits,
@@ -211,13 +194,13 @@ async def test_startup_disconnects_stale_mirrors_before_serving(session_factory:
     old_seen = datetime(2025, 1, 1, tzinfo=UTC)
     async with session_factory() as session, session.begin():
         token = GatewayToken(
-            scope=scope,
+            zone=scope,
             name="mirror",
             token_hash=generate_secret(SecretKind.GATEWAY_TOKEN).hash,
             display_prefix="lwg-test",
         )
         other_token = GatewayToken(
-            scope=other_scope,
+            zone=other_scope,
             name="other",
             token_hash=generate_secret(SecretKind.GATEWAY_TOKEN).hash,
             display_prefix="lwg-test",
@@ -227,7 +210,7 @@ async def test_startup_disconnects_stale_mirrors_before_serving(session_factory:
         for name, connected in (("stale", True), ("offline", False)):
             session.add(
                 GatewaySession(
-                    scope=scope,
+                    zone=scope,
                     gateway_id=name,
                     token_id=token.id,
                     connected=connected,
@@ -240,7 +223,7 @@ async def test_startup_disconnects_stale_mirrors_before_serving(session_factory:
             )
         session.add(
             GatewaySession(
-                scope=other_scope, gateway_id="other", token_id=other_token.id, connected=True
+                zone=other_scope, gateway_id="other", token_id=other_token.id, connected=True
             )
         )
     server, channel, _ = await _start(session_factory, scope)
@@ -253,7 +236,8 @@ async def test_startup_disconnects_stale_mirrors_before_serving(session_factory:
             assert stale.acked_version == stale.pending_version == stale.hello_have_version == 1
             offline = await session.get(GatewaySession, (scope, "offline"))
             assert offline.disconnected_at == old_seen
-            assert (await session.get(GatewaySession, (other_scope, "other"))).connected is True
+            # Every zone's stale mirrors are disconnected: one process serves all zones.
+            assert (await session.get(GatewaySession, (other_scope, "other"))).connected is False
             assert await compact_versions(session, scope, retain=1) == 1
     finally:
         await channel.close()
@@ -295,7 +279,7 @@ async def test_full_then_delta_after_ack_and_session_mirror(
     _stub_diff(monkeypatch)
     scope, tokens = await _seed(session_factory, versions=(1,))
     server, channel, stub = await _start(session_factory, scope)
-    call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", scope=scope)
+    call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", zone=scope)
     try:
         initial = await call.read()
         assert initial.WhichOneof("update") == "full"
@@ -332,7 +316,7 @@ async def test_only_one_update_pending_and_versions_coalesce(
     _stub_diff(monkeypatch)
     scope, tokens = await _seed(session_factory, versions=(1,))
     server, channel, stub = await _start(session_factory, scope)
-    call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", scope=scope)
+    call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", zone=scope)
     try:
         first = await call.read()
         assert first.full.version == 1
@@ -384,7 +368,7 @@ async def test_two_gateways_get_updates_from_their_own_versions(
 async def test_base_mismatch_resends_full(session_factory: SessionFactory):
     scope, tokens = await _seed(session_factory)
     server, channel, stub = await _start(session_factory, scope)
-    call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", scope=scope)
+    call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", zone=scope)
     try:
         first = await call.read()
         assert first.full.version == 1
@@ -415,7 +399,7 @@ async def test_invalid_version_is_quarantined_until_newer_publish(
     _stub_diff(monkeypatch)
     scope, tokens = await _seed(session_factory, versions=(1,))
     server, channel, stub = await _start(session_factory, scope)
-    call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", have_version=3, scope=scope)
+    call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", have_version=3, zone=scope)
     try:
         first = await call.read()
         await call.write(
@@ -438,9 +422,7 @@ async def test_invalid_version_is_quarantined_until_newer_publish(
             assert status.last_nack_version == first.full.version
             assert status.last_nack_reason == "invalid config"
             quarantined = await session.scalar(
-                select(GatewayQuarantine.quarantined_version).where(
-                    GatewayQuarantine.scope == scope
-                )
+                select(GatewayQuarantine.quarantined_version).where(GatewayQuarantine.zone == scope)
             )
             assert quarantined == first.full.version
     finally:
@@ -453,7 +435,7 @@ async def test_invalid_version_is_quarantined_until_newer_publish(
 async def test_persist_failed_retries_same_update_with_backoff(session_factory: SessionFactory):
     scope, tokens = await _seed(session_factory)
     server, channel, stub = await _start(session_factory, scope, ack_timeout=3)
-    call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", scope=scope)
+    call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", zone=scope)
     try:
         first = await call.read()
         await call.write(
@@ -474,7 +456,7 @@ async def test_persist_failed_retries_same_update_with_backoff(session_factory: 
 async def test_ack_timeout_closes_stream(session_factory: SessionFactory):
     scope, tokens = await _seed(session_factory)
     server, channel, stub = await _start(session_factory, scope, ack_timeout=0.15)
-    call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", scope=scope)
+    call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", zone=scope)
     try:
         assert (await call.read()).full.version == 1
         with pytest.raises(grpc.aio.AioRpcError) as error:
@@ -495,11 +477,11 @@ async def test_invalid_gateway_ids_and_missing_credentials_are_rejected(
     metadata = (("authorization", f"Bearer {tokens['gateway-a']}"),)
     try:
         # The token authenticates the scope, not an id: any valid id is accepted.
-        call = await _open_stream(stub, tokens["gateway-a"], "another-gateway", scope=scope)
+        call = await _open_stream(stub, tokens["gateway-a"], "another-gateway", zone=scope)
         assert (await call.read()).WhichOneof("update") == "full"
         await _close(call)
 
-        invalid = await _open_stream(stub, tokens["gateway-a"], "bad/id", scope=scope)
+        invalid = await _open_stream(stub, tokens["gateway-a"], "bad/id", zone=scope)
         with pytest.raises(grpc.aio.AioRpcError) as hello_error:
             await invalid.read()
         assert hello_error.value.code() is grpc.StatusCode.INVALID_ARGUMENT
@@ -507,7 +489,7 @@ async def test_invalid_gateway_ids_and_missing_credentials_are_rejected(
 
         unauthenticated = stub.Stream()
         await unauthenticated.write(
-            cpb.GatewayMessage(hello=cpb.Hello(gateway_id="gateway-a", scope=scope))
+            cpb.GatewayMessage(hello=cpb.Hello(gateway_id="gateway-a", zone=scope))
         )
         with pytest.raises(grpc.aio.AioRpcError) as token_error:
             await unauthenticated.read()
@@ -529,22 +511,23 @@ async def test_invalid_gateway_ids_and_missing_credentials_are_rejected(
 
 
 @pytest.mark.asyncio
-async def test_scope_mismatch_and_restored_higher_version_force_full(
+async def test_zone_mismatch_is_refused_and_restored_higher_version_forces_full(
     session_factory: SessionFactory,
 ):
     scope, tokens = await _seed(session_factory, versions=(1,))
     server, channel, stub = await _start(session_factory, scope)
     try:
-        wrong_scope = await _open_stream(
-            stub, tokens["gateway-a"], "gateway-a", have_version=1, scope="other-scope"
+        # The token belongs to `scope`; a persisted snapshot of another zone cannot be
+        # presented on this stream.
+        wrong_zone = await _open_stream(
+            stub, tokens["gateway-a"], "gateway-a", have_version=1, zone="other-scope"
         )
-        update = await wrong_scope.read()
-        assert update.WhichOneof("update") == "full"
-        assert update.full.version == 1
-        wrong_scope.cancel()
+        with pytest.raises(grpc.aio.AioRpcError) as zone_error:
+            await wrong_zone.read()
+        assert zone_error.value.code() is grpc.StatusCode.FAILED_PRECONDITION
 
         future_version = await _open_stream(
-            stub, tokens["gateway-a"], "gateway-a", have_version=2, scope=scope
+            stub, tokens["gateway-a"], "gateway-a", have_version=2, zone=scope
         )
         restored = await future_version.read()
         assert restored.WhichOneof("update") == "full"
@@ -559,7 +542,7 @@ async def test_scope_mismatch_and_restored_higher_version_force_full(
 async def test_quarantine_survives_gateway_reconnect(session_factory: SessionFactory):
     scope, tokens = await _seed(session_factory, versions=(1,))
     server, channel, stub = await _start(session_factory, scope)
-    first_call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", scope=scope)
+    first_call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", zone=scope)
     try:
         assert (await first_call.read()).full.version == 1
         await first_call.write(
@@ -569,7 +552,7 @@ async def test_quarantine_survives_gateway_reconnect(session_factory: SessionFac
         first_call.cancel()
         await asyncio.sleep(0.05)
 
-        reconnected = await _open_stream(stub, tokens["gateway-a"], "gateway-a", scope=scope)
+        reconnected = await _open_stream(stub, tokens["gateway-a"], "gateway-a", zone=scope)
         waiting = asyncio.create_task(reconnected.read())
         await asyncio.sleep(0.1)
         assert not waiting.done(), "quarantined version was resent after reconnect"
@@ -592,7 +575,7 @@ async def test_unsupported_feature_nack_skips_the_version_for_that_gateway_only(
     # A gateway missing a plugin rejects the version; the rest of the scope still gets it.
     scope, tokens = await _seed(session_factory, versions=(1,), gateways=("gateway-a", "gateway-b"))
     server, channel, stub = await _start(session_factory, scope)
-    lacking = await _open_stream(stub, tokens["gateway-a"], "gateway-a", scope=scope)
+    lacking = await _open_stream(stub, tokens["gateway-a"], "gateway-a", zone=scope)
     other = None
     try:
         assert (await lacking.read()).full.version == 1
@@ -604,14 +587,14 @@ async def test_unsupported_feature_nack_skips_the_version_for_that_gateway_only(
         await asyncio.sleep(0.1)
         assert not waiting.done(), "the NACKing gateway was sent the version again"
 
-        other = await _open_stream(stub, tokens["gateway-b"], "gateway-b", scope=scope)
+        other = await _open_stream(stub, tokens["gateway-b"], "gateway-b", zone=scope)
         update = await asyncio.wait_for(other.read(), 2)
         assert update.full.version == 1
         async with session_factory() as session:
             assert (
                 await session.scalar(
                     select(GatewayQuarantine.quarantined_version).where(
-                        GatewayQuarantine.scope == scope
+                        GatewayQuarantine.zone == scope
                     )
                 )
                 is None
@@ -681,22 +664,16 @@ async def test_matching_digest_at_desired_version_sends_nothing(session_factory:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("hello", ["ahead_of_restore", "other_scope"])
 async def test_nacked_forced_full_is_never_followed_by_delta(
-    session_factory: SessionFactory, monkeypatch, hello: str
+    session_factory: SessionFactory, monkeypatch
 ):
     _stub_diff(monkeypatch)
     scope, tokens = await _seed(session_factory, versions=(1,))
     server, channel, stub = await _start(session_factory, scope)
-    if hello == "ahead_of_restore":
-        # Gateway kept its own v2; the control plane was restored to v1.
-        call = await _open_stream(
-            stub, tokens["gateway-a"], "gateway-a", 2, scope, have_digest=b"\x03" * 32
-        )
-    else:
-        call = await _open_stream(
-            stub, tokens["gateway-a"], "gateway-a", 1, "other-scope", have_digest=_digest(scope, 1)
-        )
+    # Gateway kept its own v2; the control plane was restored to v1.
+    call = await _open_stream(
+        stub, tokens["gateway-a"], "gateway-a", 2, scope, have_digest=b"\x03" * 32
+    )
     try:
         first = await asyncio.wait_for(call.read(), 2)
         assert first.WhichOneof("update") == "full"
@@ -718,7 +695,7 @@ async def test_nacked_forced_full_is_never_followed_by_delta(
 async def test_revoked_token_stream_is_closed_by_registry_hook(session_factory: SessionFactory):
     scope, tokens = await _seed(session_factory)
     server, channel, stub = await _start(session_factory, scope)
-    call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", scope=scope)
+    call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", zone=scope)
     try:
         assert (await call.read()).full.version == 1
         await call.write(cpb.GatewayMessage(ack=cpb.Ack(version=1)))
@@ -726,7 +703,7 @@ async def test_revoked_token_stream_is_closed_by_registry_hook(session_factory: 
             token_id = (
                 await session.execute(
                     select(GatewayToken.id).where(
-                        GatewayToken.scope == scope, GatewayToken.name == "gateway-a"
+                        GatewayToken.zone == scope, GatewayToken.name == "gateway-a"
                     )
                 )
             ).scalar_one()
@@ -745,8 +722,8 @@ async def test_revoking_one_token_closes_only_its_gateways(session_factory: Sess
     """Two gateways, two tokens: revoking one leaves the other gateway connected."""
     scope, tokens = await _seed(session_factory, gateways=("gateway-a", "gateway-b"))
     server, channel, stub = await _start(session_factory, scope)
-    a = await _open_stream(stub, tokens["gateway-a"], "gateway-a", scope=scope)
-    b = await _open_stream(stub, tokens["gateway-b"], "gateway-b", scope=scope)
+    a = await _open_stream(stub, tokens["gateway-a"], "gateway-a", zone=scope)
+    b = await _open_stream(stub, tokens["gateway-b"], "gateway-b", zone=scope)
     try:
         assert (await a.read()).WhichOneof("update") == "full"
         assert (await b.read()).WhichOneof("update") == "full"
@@ -757,7 +734,7 @@ async def test_revoking_one_token_closes_only_its_gateways(session_factory: Sess
         async with session_factory() as session:
             token_id = await session.scalar(
                 select(GatewayToken.id).where(
-                    GatewayToken.scope == scope, GatewayToken.name == "gateway-a"
+                    GatewayToken.zone == scope, GatewayToken.name == "gateway-a"
                 )
             )
         assert registry_for(server).close_token(token_id) == 1
@@ -785,14 +762,14 @@ async def test_revoked_token_stream_is_closed_by_periodic_recheck(
     monkeypatch.setattr(grpc_services, "_TOKEN_RECHECK_SECONDS", 0.1)
     scope, tokens = await _seed(session_factory)
     server, channel, stub = await _start(session_factory, scope)
-    call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", scope=scope)
+    call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", zone=scope)
     try:
         assert (await call.read()).full.version == 1
         await call.write(cpb.GatewayMessage(ack=cpb.Ack(version=1)))
         async with session_factory() as session, session.begin():
             await session.execute(
                 update(GatewayToken)
-                .where(GatewayToken.scope == scope, GatewayToken.name == "gateway-a")
+                .where(GatewayToken.zone == scope, GatewayToken.name == "gateway-a")
                 .values(revoked_at=datetime.now(UTC))
             )
         # A version published after revocation must not reach the stream.
@@ -869,7 +846,7 @@ async def test_idle_sessions_do_not_load_payloads_and_diffs_are_shared(
 async def test_replaced_stream_is_closed_without_further_updates(session_factory: SessionFactory):
     scope, tokens = await _seed(session_factory)
     server, channel, stub = await _start(session_factory, scope)
-    old = await _open_stream(stub, tokens["gateway-a"], "gateway-a", scope=scope)
+    old = await _open_stream(stub, tokens["gateway-a"], "gateway-a", zone=scope)
     try:
         assert (await old.read()).full.version == 1
         await old.write(cpb.GatewayMessage(ack=cpb.Ack(version=1)))
@@ -913,7 +890,7 @@ async def test_keepalive_policy_accepts_idle_stream_pings(
     monkeypatch.setattr(grpc_module, "_KEEPALIVE_MIN_PING_INTERVAL_MS", min_ping_interval_ms)
     server = await serve(
         Settings(
-            scope=f"ka-{min_ping_interval_ms}", grpc_bind="127.0.0.1:0", background_enabled=False
+            zone=f"ka-{min_ping_interval_ms}", grpc_bind="127.0.0.1:0", background_enabled=False
         ),
         session_factory,
     )
@@ -950,7 +927,7 @@ async def test_session_and_ack_metrics(session_factory: SessionFactory):
     metrics = Metrics()
     scope, tokens = await _seed(session_factory)
     server = await serve(
-        Settings(scope=scope, grpc_bind="127.0.0.1:0", background_enabled=False),
+        Settings(zone=scope, grpc_bind="127.0.0.1:0", background_enabled=False),
         session_factory,
         metrics,
     )
@@ -961,11 +938,11 @@ async def test_session_and_ack_metrics(session_factory: SessionFactory):
         return metrics.value(name, labels)
 
     try:
-        assert value("lumewarp_cp_gateway_sessions") == 0
-        call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", scope=scope)
+        assert value("lumewarp_cp_gateway_sessions", zone=scope) == 0
+        call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", zone=scope)
         first = await call.read()
         assert first.full.version == 1
-        assert value("lumewarp_cp_gateway_sessions") == 1
+        assert value("lumewarp_cp_gateway_sessions", zone=scope) == 1
         await call.write(
             cpb.GatewayMessage(
                 nack=cpb.Nack(version=1, have_version=0, code=cpb.NACK_CODE_BASE_MISMATCH)
@@ -984,7 +961,7 @@ async def test_session_and_ack_metrics(session_factory: SessionFactory):
         with pytest.raises(grpc.aio.AioRpcError):
             await asyncio.wait_for(call.read(), 2)
         async with asyncio.timeout(2):
-            while value("lumewarp_cp_gateway_sessions") != 0:
+            while value("lumewarp_cp_gateway_sessions", zone=scope) != 0:
                 await asyncio.sleep(0.01)
         assert value("lumewarp_cp_gateway_acks_total", result="ack") == 1
         assert value("lumewarp_cp_gateway_acks_total", result="nack") == 1
@@ -1029,7 +1006,7 @@ async def _stored(factory: SessionFactory, scope: str, gateway_id: str) -> dict[
     async with factory() as session:
         rows = await session.scalars(
             select(GatewayPlugin).where(
-                GatewayPlugin.scope == scope,
+                GatewayPlugin.zone == scope,
                 GatewayPlugin.gateway_id == gateway_id,
                 GatewayPlugin.kind == PluginKind.ROUTER_STRATEGY,
             )
@@ -1105,7 +1082,7 @@ async def test_a_hello_stores_plugins_of_every_kind(session_factory: SessionFact
                 (row.kind, row.name): row
                 for row in await session.scalars(
                     select(GatewayPlugin).where(
-                        GatewayPlugin.scope == scope,
+                        GatewayPlugin.zone == scope,
                         GatewayPlugin.gateway_id == "gateway-a",
                     )
                 )
@@ -1208,7 +1185,7 @@ async def _token_id(factory: SessionFactory, scope: str, gateway_id: str) -> uui
     async with factory() as session:
         return await session.scalar(
             select(GatewayToken.id).where(
-                GatewayToken.scope == scope, GatewayToken.name == gateway_id
+                GatewayToken.zone == scope, GatewayToken.name == gateway_id
             )
         )
 
@@ -1416,7 +1393,7 @@ async def test_capability_flood_is_bounded_counted_and_keeps_the_stream(
     metrics = Metrics()
     scope, tokens = await _seed(session_factory)
     server = await serve(
-        Settings(scope=scope, grpc_bind="127.0.0.1:0", background_enabled=False),
+        Settings(zone=scope, grpc_bind="127.0.0.1:0", background_enabled=False),
         session_factory,
         metrics,
     )
@@ -1454,7 +1431,7 @@ async def test_ignored_plugins_are_counted_per_kind(session_factory: SessionFact
     metrics = Metrics()
     scope, tokens = await _seed(session_factory)
     server = await serve(
-        Settings(scope=scope, grpc_bind="127.0.0.1:0", background_enabled=False),
+        Settings(zone=scope, grpc_bind="127.0.0.1:0", background_enabled=False),
         session_factory,
         metrics,
     )
@@ -1586,7 +1563,7 @@ async def _status(factory: SessionFactory, scope: str, gateway_id: str) -> Gatew
 async def test_health_report_is_mirrored_any_time(session_factory: SessionFactory):
     scope, tokens = await _seed(session_factory, versions=(1,))
     server, channel, stub = await _start(session_factory, scope)
-    call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", scope=scope)
+    call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", zone=scope)
     try:
         # Before the ACK of the pending full: not a reply, never an ACK/NACK mismatch.
         await call.read()
@@ -1631,10 +1608,11 @@ async def test_a_catalog_report_reaches_the_ingest_stub(
 
     seen = []
 
-    async def capture(session, gateway_id, report):
+    async def capture(session, gateway_id, report, *, zone=None):
         seen.append(
             (
                 gateway_id,
+                zone,
                 [(d.server, d.kind, d.name, bytes(d.hash)) for d in report.definitions],
                 [(c.agent, c.card_json, c.error) for c in report.cards],
             )
@@ -1657,7 +1635,7 @@ async def test_a_catalog_report_reaches_the_ingest_stub(
     scope, tokens = await _seed(session_factory, versions=(1,))
     server, channel, stub = await _start(session_factory, scope)
     try:
-        call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", scope=scope)
+        call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", zone=scope)
         await call.read()
         await call.write(
             cpb.GatewayMessage(catalog=cpb.CatalogReport(definitions=[definition], cards=[card]))
@@ -1668,6 +1646,7 @@ async def test_a_catalog_report_reaches_the_ingest_stub(
         assert seen == [
             (
                 "gateway-a",
+                scope,
                 [("s1", snapshot_pb2.MCP_DEFINITION_KIND_TOOL, "echo", definition.hash)],
                 [("a1", '{"name":"agent"}', "")],
             )
@@ -1725,7 +1704,7 @@ async def test_a_bad_catalog_item_never_closes_the_stream(
     other, unrelated reports). See review-w1 M4."""
     scope, tokens = await _seed(session_factory, versions=(1,))
     server, channel, stub = await _start(session_factory, scope)
-    call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", scope=scope)
+    call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", zone=scope)
     try:
         await call.read()
         await call.write(cpb.GatewayMessage(catalog=report))
@@ -1763,7 +1742,7 @@ async def test_oversized_health_report_closes_the_stream(
 ):
     scope, tokens = await _seed(session_factory, versions=(1,))
     server, channel, stub = await _start(session_factory, scope)
-    call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", scope=scope)
+    call = await _open_stream(stub, tokens["gateway-a"], "gateway-a", zone=scope)
     try:
         await call.read()
         await call.write(cpb.GatewayMessage(health=bad))
@@ -1790,7 +1769,7 @@ async def test_two_gateways_sharing_one_token_stay_connected_and_both_get_update
     metrics = Metrics()
     scope, tokens = await _seed(session_factory, gateways=("gateway-a", "gateway-b"))
     server = await serve(
-        Settings(scope=scope, grpc_bind="127.0.0.1:0", background_enabled=False),
+        Settings(zone=scope, grpc_bind="127.0.0.1:0", background_enabled=False),
         session_factory,
         metrics,
     )
@@ -1807,7 +1786,7 @@ async def test_two_gateways_sharing_one_token_stay_connected_and_both_get_update
         await first.write(cpb.GatewayMessage(ack=cpb.Ack(version=1)))
         await second.write(cpb.GatewayMessage(ack=cpb.Ack(version=1)))
         async with asyncio.timeout(2):
-            while metrics.value("lumewarp_cp_gateway_sessions") != 2:
+            while metrics.value("lumewarp_cp_gateway_sessions", {"zone": scope}) != 2:
                 await asyncio.sleep(0.01)
         for gateway_id in ("gateway-a", "gateway-b"):
             async with asyncio.timeout(2):
@@ -1820,7 +1799,7 @@ async def test_two_gateways_sharing_one_token_stay_connected_and_both_get_update
             asyncio.wait_for(first.read(), 2), asyncio.wait_for(second.read(), 2)
         )
         assert all(update.delta.version == 2 for update in following)
-        assert metrics.value("lumewarp_cp_gateway_sessions") == 2
+        assert metrics.value("lumewarp_cp_gateway_sessions", {"zone": scope}) == 2
         # A graceful end of the request stream lets each gateway write its disconnected row
         # before the server goes away.
         await first.done_writing()
@@ -1836,7 +1815,7 @@ async def test_two_gateways_sharing_one_token_stay_connected_and_both_get_update
                 rows = (
                     await session.scalars(
                         select(GatewaySession).where(
-                            GatewaySession.scope == scope,
+                            GatewaySession.zone == scope,
                         )
                     )
                 ).all()
@@ -1864,7 +1843,7 @@ async def test_a_nack_from_one_gateway_quarantines_the_version_for_the_scope(
                 async with session_factory() as session:
                     quarantined = await session.scalar(
                         select(GatewayQuarantine.quarantined_version).where(
-                            GatewayQuarantine.scope == scope
+                            GatewayQuarantine.zone == scope
                         )
                     )
                 if quarantined == 1:
@@ -1968,7 +1947,7 @@ async def test_stale_gateway_rows_and_their_plugins_are_deleted_after_a_day(
         for gateway_id, connected, disconnected_at in gateways:
             session.add(
                 GatewaySession(
-                    scope=scope,
+                    zone=scope,
                     gateway_id=gateway_id,
                     token_id=token_id,
                     connected=connected,
@@ -1981,7 +1960,7 @@ async def test_stale_gateway_rows_and_their_plugins_are_deleted_after_a_day(
         for gateway_id, *_ in gateways:
             session.add(
                 GatewayPlugin(
-                    scope=scope,
+                    zone=scope,
                     gateway_id=gateway_id,
                     kind=PluginKind.ROUTER_STRATEGY,
                     name="sticky",
@@ -1996,12 +1975,12 @@ async def test_stale_gateway_rows_and_their_plugins_are_deleted_after_a_day(
     async with session_factory() as session:
         remaining = (
             await session.scalars(
-                select(GatewaySession.gateway_id).where(GatewaySession.scope == scope)
+                select(GatewaySession.gateway_id).where(GatewaySession.zone == scope)
             )
         ).all()
         plugins = (
             await session.scalars(
-                select(GatewayPlugin.gateway_id).where(GatewayPlugin.scope == scope)
+                select(GatewayPlugin.gateway_id).where(GatewayPlugin.zone == scope)
             )
         ).all()
     assert set(remaining) == {"recent", "live"}
@@ -2118,10 +2097,10 @@ async def test_usage_is_attributed_to_the_reporting_gateway(
 
     scope, tokens = await _seed(session_factory)
     async with session_factory() as session, session.begin():
-        team = await factories.make_team(session)
+        team = await factories.make_team(session, zone=scope)
         user = await factories.make_user(session)
         await factories.make_member(session, team, user)
-        key = await factories.make_key(session, team, user)
+        key = await factories.make_key(session, team, user, zone=scope)
         key_id, team_id = key.id, team.id
     server, channel, _ = await _start(session_factory, scope)
     metadata = (("authorization", f"Bearer {tokens['gateway-a']}"),)
@@ -2202,7 +2181,7 @@ async def test_a_probe_request_reaches_a_capable_gateway_and_its_result_resolves
         stub,
         tokens["gateway-a"],
         "gateway-a",
-        scope=scope,
+        zone=scope,
         plugins=(_probe_plugin(),),
         capabilities=("upstream_probe",),
     )
@@ -2239,7 +2218,7 @@ async def test_no_capable_gateway_is_probe_unavailable(session_factory: SessionF
     server, channel, stub = await _start(session_factory, scope)
     # It reports the plugin but cannot run a probe.
     call = await _open_stream(
-        stub, tokens["gateway-a"], "gateway-a", scope=scope, plugins=(_probe_plugin(),)
+        stub, tokens["gateway-a"], "gateway-a", zone=scope, plugins=(_probe_plugin(),)
     )
     try:
         assert (await asyncio.wait_for(call.read(), 2)).WhichOneof("update") == "full"
@@ -2261,7 +2240,7 @@ async def test_an_unanswered_probe_times_out(session_factory: SessionFactory):
         stub,
         tokens["gateway-a"],
         "gateway-a",
-        scope=scope,
+        zone=scope,
         plugins=(_probe_plugin(),),
         capabilities=("upstream_probe",),
     )
@@ -2285,7 +2264,7 @@ async def test_a_disconnect_cleans_up_a_pending_probe(session_factory: SessionFa
         stub,
         tokens["gateway-a"],
         "gateway-a",
-        scope=scope,
+        zone=scope,
         plugins=(_probe_plugin(),),
         capabilities=("upstream_probe",),
     )

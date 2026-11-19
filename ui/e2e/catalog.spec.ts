@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import { confirmDialog, dialog, ensureOrg, moreFilters, optionNames, pick } from "./helpers";
 import { teamDetails } from "./selfService";
+import { createModel } from "./catalog-helpers";
 
 /*
  * The model catalog UI through the real control plane (e2e/serve.py): Models, Aliases, Routers with
@@ -72,7 +73,7 @@ async function upstream(request: APIRequestContext, name: string) {
   return post(request, "/upstreams", { name, kind: "vllm", base_url: "http://127.0.0.1:9/v1" });
 }
 async function model(request: APIRequestContext, name: string, upstream_id: string, upstream_model = "m") {
-  return post(request, "/models", { name, upstream_id, upstream_model, model_type: "llm" });
+  return createModel(request, admin, { name, upstream_id, upstream_model, model_type: "llm" });
 }
 const noOverflow = (page: Page) => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
 
@@ -367,7 +368,7 @@ test("no usable schema: a JSON editor, for null and for a schema outside the sub
   const a = await model(request, "json/a", up.id);
   // A strategy a gateway reported in a shape outside the subset: the control plane would not store it,
   // but the form must cope should one arrive.
-  await page.route(/\/api\/v1\/plugins\?kind=router-strategy$/, async (route) => {
+  await page.route(/\/api\/v1\/plugins\?kind=router-strategy(&zone=[^&]*)?$/, async (route) => {
     const response = await route.fetch();
     const body = await response.json();
     body.items.push({ ...body.items[0], name: "e2e_weird", title: "E2E weird", builtin: false, params_schema: { type: "object", oneOf: [{ required: ["a"] }], properties: {} }, member_schema: { $ref: "#/x" }, missing_gateways: [], gateways: [] });
@@ -737,7 +738,7 @@ test("rollback: a 422 about missing strategies offers a forced confirm, other 42
   await shot(page, "rollback-force");
   await dialog(page).getByRole("button", { name: "Roll back anyway" }).click();
   await expect(dialog(page)).toBeHidden();
-  expect(sent).toEqual([{ version: withRouter }, { version: withRouter, force: true }]);
+  expect(sent).toEqual([{ version: withRouter, zone: "default" }, { version: withRouter, zone: "default", force: true }]);
   expect((await items<any>(request, "/routers")).some((r) => r.name === "rb-router")).toBe(true);
 });
 
@@ -845,7 +846,7 @@ test("saving a router sends only what changed: settings, hidden weights and spli
     ],
   });
   // The page knows an older shape of the strategy: `prefix` and `tuning.note` are settings it cannot show.
-  await page.route(/\/api\/v1\/plugins\?kind=router-strategy$/, async (route) => {
+  await page.route(/\/api\/v1\/plugins\?kind=router-strategy(&zone=[^&]*)?$/, async (route) => {
     const response = await route.fetch();
     const body = await response.json();
     const schema = body.items.find((s: any) => s.name === "e2e_presence").params_schema;

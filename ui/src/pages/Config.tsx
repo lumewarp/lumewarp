@@ -8,6 +8,7 @@ import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { ApiError } from "../api";
 import { useMut } from "../hooks";
+import { useZone } from "../zone";
 
 /**
  * The control plane refuses a rollback when connected gateways lack a router's strategy, unless forced
@@ -23,10 +24,10 @@ export const isMissingStrategy = (e: unknown): e is ApiError => e instanceof Api
  * Confirm a rollback. A 422 about strategies gateways lack offers a second, explicit confirmation that
  * sends `force`; any other failure is shown here with its message.
  */
-function RollbackDialog({ version, onClose }: { version: number | null; onClose: () => void }) {
+function RollbackDialog({ version, zone, onClose }: { version: number | null; zone: string; onClose: () => void }) {
   const [problem, setProblem] = useState<ApiError | Error | null>(null);
   const [force, setForce] = useState(false);
-  const run = useMut(({ version, force }: { version: number; force: boolean }) => api.rollback(version, force), "Rolled back: a new version was published");
+  const run = useMut(({ version, force }: { version: number; force: boolean }) => api.rollback(version, force, zone), "Rolled back: a new version was published");
   const close = () => {
     setProblem(null);
     setForce(false);
@@ -59,6 +60,9 @@ function RollbackDialog({ version, onClose }: { version: number | null; onClose:
     >
       <div className="flex flex-col gap-3 text-sm">
         <p className="text-muted-foreground">Restore the routing (models, aliases and routers) from v{version} as a new version? Keys, budgets, policies and access grants are not rolled back.</p>
+        <Alert variant="warn" data-testid="rollback-scope">
+          <AlertDescription>Rolling back is installation-wide: it restores the catalog for every zone, not only this one, and publishes a new version in each.</AlertDescription>
+        </Alert>
         {problem && (
           <Alert variant={force ? "warn" : "destructive"} data-testid="rollback-problem">
             <AlertDescription>
@@ -73,12 +77,13 @@ function RollbackDialog({ version, onClose }: { version: number | null; onClose:
 }
 
 export function Config() {
-  const list = useQuery({ queryKey: ["config-versions"], queryFn: () => api.configVersions() });
+  const { name: zone } = useZone();
+  const list = useQuery({ queryKey: ["config-versions", zone], queryFn: () => api.configVersions(zone) });
   const [target, setTarget] = useState<number | null>(null);
   const current = list.data?.reduce((m, v) => Math.max(m, v.version), 0);
   return (
     <>
-      <PageHeader title="Config versions" hint="Rolling back restores routing only; keys, budgets and policies stay current." />
+      <PageHeader title="Config versions" hint="Versions of the zone in the header. Rolling back restores routing only, for every zone; keys, budgets and policies stay current." />
       <DataTable
         rows={list.data}
         loading={list.isPending}
@@ -106,7 +111,7 @@ export function Config() {
           },
         ]}
       />
-      <RollbackDialog version={target} onClose={() => setTarget(null)} />
+      <RollbackDialog version={target} zone={zone} onClose={() => setTarget(null)} />
     </>
   );
 }

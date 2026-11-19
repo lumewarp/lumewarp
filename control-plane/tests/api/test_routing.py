@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 
-from tests.api.helpers import ADMIN_AUTH, suffix
+from tests.api.helpers import ADMIN_AUTH, app_zone, suffix
 
 
 def _upstream(client, **body):
@@ -18,14 +18,17 @@ def _upstream(client, **body):
 
 
 def _model(client, upstream_id, **body):
-    body = {
-        "name": f"dep-{suffix()}",
-        "upstream_id": upstream_id,
-        "upstream_model": "name",
-        "model_type": "llm",
-        **body,
-    }
-    return client.post("/api/v1/models", json=body, headers=ADMIN_AUTH)
+    body = {"name": f"dep-{suffix()}", "model_type": "llm", **body}
+    created = client.post("/api/v1/models", json=body, headers=ADMIN_AUTH)
+    if created.status_code != 201:
+        return created
+    model = created.json()
+    deployed = client.put(
+        f"/api/v1/models/{model['id']}/deployments/{app_zone(client)}",
+        json={"upstream_id": upstream_id, "upstream_model": "name"},
+        headers=ADMIN_AUTH,
+    )
+    return created if deployed.status_code == 200 else deployed
 
 
 def test_upstream_model_router_crud(client) -> None:

@@ -12,7 +12,7 @@ It is two programs:
   serving.
 - **The control plane** (Python, with Postgres) is where people work: the Admin UI and the
   management API for teams, keys, models and routers. It compiles every change into a
-  versioned snapshot and pushes it to the gateways, and it collects their usage reports.
+  versioned snapshot for each zone and pushes it to the gateways, and it collects their usage reports.
 
 A gateway can also run alone, from one YAML file, with no control plane and no database.
 
@@ -25,10 +25,11 @@ A gateway can also run alone, from one YAML file, with no control plane and no d
   a strategy (weighted, least in flight, lowest latency, vLLM load, or your own plugin),
   retries, fallbacks, circuit breaking and traffic splits.
 - **Tenancy and self-service.** Orgs contain teams, teams contain members and service
-  accounts, and those own API keys. Anyone who signs in manages their own keys within the
-  limits their team sets.
-- **Limits and budgets** along org → team → owner → key: requests and tokens per minute,
-  concurrency, and a monthly budget.
+  accounts, and those own API keys. Anyone who signs in manages their own zone-bound keys.
+- **Zones** separate gateways, upstreams, model deployments, keys, limits, budgets and usage;
+  orgs, teams, users and permissions remain shared across zones. See [Zones](../admin/zones.md).
+- **Limits and budgets** along org → team → owner → key are configured per zone: requests and
+  tokens per minute, concurrency, and a monthly budget.
 - **MCP servers and A2A agents** proxied on the same gateway, granted per key.
 - **Observability**: Prometheus metrics, OpenTelemetry traces, alert rules and dashboards.
 - **Extension points**: WASM plugins in the gateway, Python plugins in the control plane.

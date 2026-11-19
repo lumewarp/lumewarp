@@ -6,7 +6,7 @@ package lumewarp.usage.v1;
 // request path and reports them asynchronously; a failed report is retried
 // from a bounded buffer and dropped (and counted) when the buffer is full.
 // Authenticated with the same gateway token as ConfigService; the token only
-// authenticates the scope, and usage is attributed to ReportRequest.gateway_id.
+// authenticates the zone, and usage is attributed to ReportRequest.gateway_id.
 service UsageService {
   // Validated per event: an invalid event is skipped and logged, the rest are
   // durably accounted, and `accepted` counts what was kept (already seen
@@ -19,7 +19,7 @@ service UsageService {
 message ReportRequest {
   // The reporting gateway's id: the same value as its Hello.gateway_id,
   // 1..100 of [A-Za-z0-9._-]. Usage is attributed to it; the token only
-  // authenticates the scope. Empty or invalid fails the whole batch with
+  // authenticates the zone. Empty or invalid fails the whole batch with
   // INVALID_ARGUMENT.
   string gateway_id = 1;
   repeated UsageEvent events = 2;

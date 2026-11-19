@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from lumewarp_control_plane.api import keys as keys_module
 from lumewarp_control_plane.auth import sessions
 from lumewarp_control_plane.authz import Authorizer, Decision, Relation
-from lumewarp_control_plane.compiler import compile_scope
+from lumewarp_control_plane.compiler import compile_zone
 from lumewarp_control_plane.models import (
     ApiKey,
     AuditLog,
@@ -219,7 +219,7 @@ async def test_me_matches_the_compiled_snapshot_after_team_narrowing(
     assert narrowed.status_code == 200, narrowed.text
 
     async with AsyncSession(api_engine, expire_on_commit=False) as session:
-        compiled = await compile_scope(session, "api-test", require_local_membership=True)
+        compiled = await compile_zone(session, "api-test", require_local_membership=True)
     published = next(k for k in compiled.snapshot.api_keys if k.key_id == key_id)
     me = client.get("/api/v1/users/me", headers=auth(token))
     assert me.status_code == 200, me.text

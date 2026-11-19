@@ -32,7 +32,7 @@ class ConfigServiceStub:
     At most one update per stream is un-ACKed at a time. ACK means the version
     is validated, durably persisted and active. See docs/config-protocol.md.
     The gateway authenticates with `authorization: Bearer <gateway token>`
-    metadata; the token authenticates its scope, and any number of gateways may
+    metadata; the token authenticates its zone, and any number of gateways may
     use one token.
     """
 
@@ -56,7 +56,7 @@ class ConfigServiceServicer:
     At most one update per stream is un-ACKed at a time. ACK means the version
     is validated, durably persisted and active. See docs/config-protocol.md.
     The gateway authenticates with `authorization: Bearer <gateway token>`
-    metadata; the token authenticates its scope, and any number of gateways may
+    metadata; the token authenticates its zone, and any number of gateways may
     use one token.
     """
 
@@ -92,7 +92,7 @@ class ConfigService:
     At most one update per stream is un-ACKed at a time. ACK means the version
     is validated, durably persisted and active. See docs/config-protocol.md.
     The gateway authenticates with `authorization: Bearer <gateway token>`
-    metadata; the token authenticates its scope, and any number of gateways may
+    metadata; the token authenticates its zone, and any number of gateways may
     use one token.
     """
 

@@ -189,8 +189,8 @@ pub enum LoadError {
     Corrupt,
     #[error("snapshot file has an older format")]
     OldFormat,
-    #[error("snapshot scope {found:?} does not match the configured scope")]
-    WrongScope { found: String },
+    #[error("snapshot zone {found:?} does not match the configured zone")]
+    WrongZone { found: String },
 }
 
 fn unique<'a>(
@@ -696,10 +696,8 @@ pub fn apply(base: &Snapshot, update: ConfigUpdate) -> Result<Snapshot, ApplyErr
         // a bug in the caller, never a configuration version.
         Some(Update::Probe(_)) => Err(ApplyError::invalid("probe request is not a config update")),
         Some(Update::Full(full)) => {
-            if !base.scope.is_empty() && full.scope != base.scope {
-                return Err(ApplyError::invalid(
-                    "full snapshot is for a different scope",
-                ));
+            if !base.zone.is_empty() && full.zone != base.zone {
+                return Err(ApplyError::invalid("full snapshot is for a different zone"));
             }
             Ok(full)
         }
@@ -848,15 +846,15 @@ fn create_dir(dir: &Path) -> io::Result<()> {
 }
 
 /// Reads `<dir>/snapshot.pb`. `Ok(None)` when absent; corrupt, oversized,
-/// old-format or wrong-scope files are errors: the caller must not serve from
+/// old-format or wrong-zone files are errors: the caller must not serve from
 /// them and fetches a full snapshot instead.
 #[cfg(test)]
-pub fn load(dir: &Path, scope: &str) -> Result<Option<Snapshot>, LoadError> {
-    Ok(load_with_digest(dir, scope)?.map(|(snapshot, _)| snapshot))
+pub fn load(dir: &Path, zone: &str) -> Result<Option<Snapshot>, LoadError> {
+    Ok(load_with_digest(dir, zone)?.map(|(snapshot, _)| snapshot))
 }
 
 /// Like `load`, also returning the persisted `target_digest`.
-pub fn load_with_digest(dir: &Path, scope: &str) -> Result<Option<(Snapshot, Vec<u8>)>, LoadError> {
+pub fn load_with_digest(dir: &Path, zone: &str) -> Result<Option<(Snapshot, Vec<u8>)>, LoadError> {
     let file = match File::open(dir.join(FILE_NAME)) {
         Ok(file) => file,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -890,9 +888,9 @@ pub fn load_with_digest(dir: &Path, scope: &str) -> Result<Option<(Snapshot, Vec
     }
     let (payload, digest) = rest.split_at(rest.len() - len);
     let snapshot = Snapshot::decode(payload).map_err(|_| LoadError::Corrupt)?;
-    if snapshot.scope != scope {
-        return Err(LoadError::WrongScope {
-            found: snapshot.scope,
+    if snapshot.zone != zone {
+        return Err(LoadError::WrongZone {
+            found: snapshot.zone,
         });
     }
     Ok(Some((snapshot, digest.to_vec())))
@@ -1006,7 +1004,7 @@ pub(crate) mod tests {
             teams: vec![team("t1"), team("t2")],
             created_at_unix_ms: 10,
             required_capabilities: vec!["strategy:weighted".into()],
-            scope: "scope-a".into(),
+            zone: "zone-a".into(),
             aliases: vec![],
             ..Default::default()
         }
@@ -1409,7 +1407,7 @@ pub(crate) mod tests {
         assert_eq!(next.version, 2);
         assert_eq!(next.created_at_unix_ms, 20);
         assert_eq!(next.required_capabilities, ["x"]);
-        assert_eq!(next.scope, "scope-a");
+        assert_eq!(next.zone, "zone-a");
         let names = |v: Vec<&str>| v.into_iter().map(String::from).collect::<Vec<_>>();
         assert_eq!(
             next.upstreams
@@ -1657,7 +1655,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn full_replaces_everything_and_checks_scope() {
+    fn full_replaces_everything_and_checks_zone() {
         let mut full = base();
         full.version = 1;
         full.api_keys.clear();
@@ -1669,9 +1667,9 @@ pub(crate) mod tests {
         let mut newer = base();
         newer.version = 9;
         assert_eq!(apply(&newer, update(full.clone())).unwrap(), full);
-        // Booting without a snapshot: any scope is accepted.
+        // Booting without a snapshot: any zone is accepted.
         let mut other = base();
-        other.scope = "scope-b".into();
+        other.zone = "zone-b".into();
         assert_eq!(
             apply(&Snapshot::default(), update(other.clone())).unwrap(),
             other
@@ -1905,18 +1903,18 @@ pub(crate) mod tests {
     fn store_and_load_round_trip() {
         let root = temp_dir();
         let dir = root.path().join("state");
-        assert!(load(&dir, "scope-a").unwrap().is_none());
+        assert!(load(&dir, "zone-a").unwrap().is_none());
         store(&dir, &base()).unwrap();
-        assert_eq!(load(&dir, "scope-a").unwrap(), Some(base()));
+        assert_eq!(load(&dir, "zone-a").unwrap(), Some(base()));
         store_with_digest(&dir, &base(), b"opaque").unwrap();
         assert_eq!(
-            load_with_digest(&dir, "scope-a").unwrap(),
+            load_with_digest(&dir, "zone-a").unwrap(),
             Some((base(), b"opaque".to_vec()))
         );
         let mut next = base();
         next.version = 2;
         store(&dir, &next).unwrap();
-        assert_eq!(load(&dir, "scope-a").unwrap().unwrap().version, 2);
+        assert_eq!(load(&dir, "zone-a").unwrap().unwrap().version, 2);
         assert!(!dir.join(TMP_NAME).exists());
         #[cfg(unix)]
         {
@@ -1928,13 +1926,13 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn load_rejects_wrong_scope_corruption_and_truncation() {
+    fn load_rejects_wrong_zone_corruption_and_truncation() {
         let root = temp_dir();
         let dir = root.path();
         store(dir, &base()).unwrap();
         assert!(matches!(
-            load(dir, "scope-b"),
-            Err(LoadError::WrongScope { found }) if found == "scope-a"
+            load(dir, "zone-b"),
+            Err(LoadError::WrongZone { found }) if found == "zone-a"
         ));
         let path = dir.join(FILE_NAME);
         let good = fs::read(&path).unwrap();
@@ -1942,12 +1940,12 @@ pub(crate) mod tests {
         let mut corrupt = good.clone();
         corrupt[3] ^= 1;
         fs::write(&path, &corrupt).unwrap();
-        assert!(matches!(load(dir, "scope-a"), Err(LoadError::Corrupt)));
+        assert!(matches!(load(dir, "zone-a"), Err(LoadError::Corrupt)));
         // Truncated anywhere, including inside the digest.
         for len in [0, 10, good.len() - 32, good.len() - 1] {
             fs::write(&path, &good[..len]).unwrap();
             assert!(
-                matches!(load(dir, "scope-a"), Err(LoadError::Corrupt)),
+                matches!(load(dir, "zone-a"), Err(LoadError::Corrupt)),
                 "{len}"
             );
         }
@@ -1958,7 +1956,7 @@ pub(crate) mod tests {
         let digest = Sha256::digest(&garbage);
         garbage.extend_from_slice(&digest);
         fs::write(&path, &garbage).unwrap();
-        assert!(matches!(load(dir, "scope-a"), Err(LoadError::Corrupt)));
+        assert!(matches!(load(dir, "zone-a"), Err(LoadError::Corrupt)));
     }
 
     /// Protobuf skips unknown fields, so a file of the previous format decodes
@@ -1985,7 +1983,7 @@ pub(crate) mod tests {
         assert!(matches!(load(root.path(), ""), Err(LoadError::OldFormat)));
         // The next store replaces it.
         store(root.path(), &base()).unwrap();
-        assert_eq!(load(root.path(), "scope-a").unwrap(), Some(base()));
+        assert_eq!(load(root.path(), "zone-a").unwrap(), Some(base()));
     }
 
     #[test]
@@ -2010,8 +2008,8 @@ pub(crate) mod tests {
         let root = temp_dir();
         fs::write(root.path().join(TMP_NAME), b"partial write from a crash").unwrap();
         // The leftover never affects load, and the next store replaces it.
-        assert!(load(root.path(), "scope-a").unwrap().is_none());
+        assert!(load(root.path(), "zone-a").unwrap().is_none());
         store(root.path(), &base()).unwrap();
-        assert_eq!(load(root.path(), "scope-a").unwrap(), Some(base()));
+        assert_eq!(load(root.path(), "zone-a").unwrap(), Some(base()));
     }
 }

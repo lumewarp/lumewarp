@@ -214,7 +214,7 @@ run_service() { # mock | mcp | a2a | cp | gw | gw2 | ui
       wait_http "$cp_url/healthz" "control plane" # avoids connect-retry warnings at startup
       exec "$root/gateway/target/release/lumewarp" --control-plane http://127.0.0.1:50051 \
         --gateway-token-env LUMEWARP_GATEWAY_TOKEN --state-dir "$state/gateway$n" \
-        --scope default --local-config "$state/gateway$n.yaml"
+        --zone default --local-config "$state/gateway$n.yaml"
       ;;
     ui) exec pnpm --dir "$root/ui" dev --host 127.0.0.1 --port 5173 --strictPort ;;
     *) die "unknown service: $1" ;;

@@ -45,7 +45,7 @@ pub struct StreamConfig {
     pub url: String,
     /// Read from the environment by the caller; never persisted or logged.
     pub token: String,
-    pub scope: String,
+    pub zone: String,
     pub state_dir: PathBuf,
     /// `Some` when this gateway shares its limiter through Redis; reported in
     /// `Hello.shared_limits` for the Gateways page.
@@ -63,7 +63,7 @@ pub fn compile(snapshot: &Snapshot, runtime: &Arc<Runtime>) -> Result<RoutingTab
 }
 
 /// Starts the stream task. `current` is the snapshot already active in
-/// `slot` (an empty one carrying only the scope when cold-booting).
+/// `slot` (an empty one carrying only the zone when cold-booting).
 /// `has_base` says whether `current` is a real, complete snapshot (loaded
 /// cache); without one every delta is refused until a full has been applied.
 pub fn spawn(
@@ -168,8 +168,8 @@ impl Client {
                 } else {
                     Vec::new()
                 },
-                scope: if have > 0 {
-                    self.config.scope.clone()
+                zone: if have > 0 {
+                    self.config.zone.clone()
                 } else {
                     String::new()
                 },
@@ -558,12 +558,12 @@ mod tests {
             (addr, conns)
         }
 
-        fn full(version: u64, scope: &str) -> ConfigUpdate {
+        fn full(version: u64, zone: &str) -> ConfigUpdate {
             ConfigUpdate {
                 target_digest: vec![version as u8],
                 update: Some(Update::Full(Snapshot {
                     version,
-                    scope: scope.into(),
+                    zone: zone.into(),
                     ..Default::default()
                 })),
             }
@@ -578,14 +578,14 @@ mod tests {
             let config = StreamConfig {
                 url: format!("http://{addr}"),
                 token: "gw-token".into(),
-                scope: "scope-a".into(),
+                zone: "zone-a".into(),
                 state_dir: dir.path().to_owned(),
                 shared_limits_namespace: None,
             };
             let handle = spawn(
                 config,
                 Snapshot {
-                    scope: "scope-a".into(),
+                    zone: "zone-a".into(),
                     ..Default::default()
                 },
                 Vec::new(),
@@ -604,7 +604,7 @@ mod tests {
                 }
                 other => panic!("expected Hello, got {other:?}"),
             }
-            conn.send(full(1, "scope-a"));
+            conn.send(full(1, "zone-a"));
             match conn.recv().await {
                 Msg::Ack(ack) => assert_eq!(ack.version, 1),
                 other => panic!("expected Ack, got {other:?}"),
@@ -691,14 +691,14 @@ mod tests {
             let config = StreamConfig {
                 url: format!("http://{addr}"),
                 token: "gw-token".into(),
-                scope: "scope-a".into(),
+                zone: "zone-a".into(),
                 state_dir: dir.path().to_owned(),
                 shared_limits_namespace: None,
             };
             let handle = spawn(
                 config,
                 Snapshot {
-                    scope: "scope-a".into(),
+                    zone: "zone-a".into(),
                     ..Default::default()
                 },
                 Vec::new(),
@@ -740,7 +740,7 @@ mod tests {
                 target_digest: vec![1],
                 update: Some(Update::Full(Snapshot {
                     version: 1,
-                    scope: "scope-a".into(),
+                    zone: "zone-a".into(),
                     upstreams: vec![lumewarp_proto::config::v1::Upstream {
                         name: "u".into(),
                         kind: lumewarp_proto::config::v1::UpstreamKind::Vllm as i32,
@@ -821,14 +821,14 @@ mod tests {
             let config = StreamConfig {
                 url: format!("http://{addr}"),
                 token: "gw-token".into(),
-                scope: "scope-a".into(),
+                zone: "zone-a".into(),
                 state_dir: dir.path().to_owned(),
                 shared_limits_namespace: Some("team-ns".into()),
             };
             let handle = spawn(
                 config,
                 Snapshot {
-                    scope: "scope-a".into(),
+                    zone: "zone-a".into(),
                     ..Default::default()
                 },
                 Vec::new(),

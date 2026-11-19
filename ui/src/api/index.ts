@@ -16,6 +16,9 @@ export const hasPolicy = (team: TeamAny): team is Team => "model_access" in team
 export type Key = Schemas["KeyOut"];
 export type Member = Schemas["MemberOut"];
 export type ServiceAccount = Schemas["ServiceAccountOut"];
+export type Zone = Schemas["ZoneOut"];
+export type ZoneLimitsOut = Schemas["ZoneLimitsOut"];
+export type ZoneMemberDefaultsOut = Schemas["ZoneMemberDefaultsOut"];
 export type Upstream = Schemas["UpstreamOut"];
 export type UpstreamTest = Schemas["UpstreamTestOut"];
 export type ModelTest = Schemas["ModelTestOut"];
@@ -154,8 +157,8 @@ export const api = {
     unwrap(client.DELETE("/api/v1/installation-admins/{user_id}", { params: { path: { user_id: userId } } })),
   transferProxyAdmin: (userId: string) =>
     unwrap(client.POST("/api/v1/installation-admins/transfer", { body: { user_id: userId } })),
-  orgUsage: (orgId: string) =>
-    unwrap(client.GET("/api/v1/orgs/{org_id}/usage", { params: { path: { org_id: orgId } } })),
+  orgUsage: (orgId: string, zone?: string) =>
+    unwrap(client.GET("/api/v1/orgs/{org_id}/usage", { params: { path: { org_id: orgId }, query: { ...(zone ? { zone } : {}) } } })),
 
   teams: () => listAll((c) => unwrap(client.GET("/api/v1/teams", { params: { query: q(c) } }))),
   team: (id: string) => unwrap(client.GET("/api/v1/teams/{team_id}", { params: { path: { team_id: id } } })),
@@ -181,14 +184,15 @@ export const api = {
   deleteServiceAccount: (id: string) =>
     unwrap(client.DELETE("/api/v1/service-accounts/{account_id}", { params: { path: { account_id: id } } })),
 
-  teamKeys: (teamId: string) => listAll((c) => unwrap(client.GET("/api/v1/teams/{team_id}/keys", { params: { path: { team_id: teamId }, query: q(c) } }))),
+  teamKeys: (teamId: string, zone?: string) =>
+    listAll((c) => unwrap(client.GET("/api/v1/teams/{team_id}/keys", { params: { path: { team_id: teamId }, query: { ...q(c), ...(zone ? { zone } : {}) } } }))),
   createKey: (teamId: string, body: Schemas["KeyCreate"]) =>
     unwrap(client.POST("/api/v1/teams/{team_id}/keys", { params: { path: { team_id: teamId } }, body })),
-  ownKeys: (includeServiceAccounts = false) =>
+  ownKeys: (includeServiceAccounts = false, zone?: string) =>
     listAll((c) =>
       unwrap(
         client.GET("/api/v1/users/me/keys", {
-          params: { query: { ...q(c), ...(includeServiceAccounts ? { include_service_accounts: true } : {}) } },
+          params: { query: { ...q(c), ...(includeServiceAccounts ? { include_service_accounts: true } : {}), ...(zone ? { zone } : {}) } },
         }),
       ),
     ),
@@ -206,8 +210,13 @@ export const api = {
   testSavedUpstream: (id: string) =>
     unwrap(client.POST("/api/v1/upstreams/{upstream_id}/test", { params: { path: { upstream_id: id } } })),
   testModel: (body: Schemas["ModelTestIn"]) => unwrap(client.POST("/api/v1/models/test", { body })),
-  testSavedModel: (id: string) =>
-    unwrap(client.POST("/api/v1/models/{model_id}/test", { params: { path: { model_id: id } } })),
+  /** Saved-settings Test now of a model's deployment in one zone; the result is kept on the deployment. */
+  testDeployment: (id: string, zone: string) =>
+    unwrap(client.POST("/api/v1/models/{model_id}/deployments/{zone}/test", { params: { path: { model_id: id, zone } } })),
+  putModelDeployment: (id: string, zone: string, body: Schemas["ModelDeploymentIn"]) =>
+    unwrap(client.PUT("/api/v1/models/{model_id}/deployments/{zone}", { params: { path: { model_id: id, zone } }, body })),
+  deleteModelDeployment: (id: string, zone: string) =>
+    unwrap(client.DELETE("/api/v1/models/{model_id}/deployments/{zone}", { params: { path: { model_id: id, zone } } })),
 
   models: () => listAll((c) => unwrap(client.GET("/api/v1/models", { params: { query: q(c) } }))),
   createModel: (body: Schemas["ModelCreate"]) => unwrap(client.POST("/api/v1/models", { body })),
@@ -230,7 +239,8 @@ export const api = {
   deleteAlias: (id: string) => unwrap(client.DELETE("/api/v1/aliases/{alias_id}", { params: { path: { alias_id: id } } })),
 
   /** Every plugin of one kind, or all three kinds: built-ins plus what connected gateways report. */
-  plugins: async (kind?: PluginKind) => (await unwrap(client.GET("/api/v1/plugins", { params: { query: kind ? { kind } : {} } }))).items,
+  plugins: async (kind?: PluginKind, zone?: string) =>
+    (await unwrap(client.GET("/api/v1/plugins", { params: { query: { ...(kind ? { kind } : {}), ...(zone ? { zone } : {}) } } }))).items,
 
   mcpServers: () => listAll((c) => unwrap(client.GET("/api/v1/mcp-servers", { params: { query: q(c) } }))),
   mcpServer: (id: string) => unwrap(client.GET("/api/v1/mcp-servers/{server_id}", { params: { path: { server_id: id } } })),
@@ -270,14 +280,25 @@ export const api = {
   audit: (query: { team_id?: string; org_id?: string; actor_id?: string; action?: string; resource_type?: string; resource_id?: string; from?: string; to?: string } = {}) =>
     listAll((c) => unwrap(client.GET("/api/v1/audit", { params: { query: { ...query, ...q(c) } } }))),
 
-  gateways: () => listAll((c) => unwrap(client.GET("/api/v1/gateways", { params: { query: q(c) } }))),
-  gatewayTokens: () => listAll((c) => unwrap(client.GET("/api/v1/gateway-tokens", { params: { query: q(c) } }))),
+  gateways: (zone?: string) => listAll((c) => unwrap(client.GET("/api/v1/gateways", { params: { query: { ...q(c), zone } } }))),
+  gatewayTokens: (zone?: string) => listAll((c) => unwrap(client.GET("/api/v1/gateway-tokens", { params: { query: { ...q(c), zone } } }))),
   createGatewayToken: (body: Schemas["GatewayTokenCreate"]) => unwrap(client.POST("/api/v1/gateway-tokens", { body })),
   revokeGatewayToken: (tokenId: string) =>
     unwrap(client.POST("/api/v1/gateway-tokens/{token_id}/revoke", { params: { path: { token_id: tokenId } } })),
 
-  configVersions: () => listAll((c) => unwrap(client.GET("/api/v1/config/versions", { params: { query: q(c) } }))),
-  rollback: (version: number, force = false) => unwrap(client.POST("/api/v1/config/rollback", { body: force ? { version, force } : { version } })),
+  configVersions: (zone?: string) => listAll((c) => unwrap(client.GET("/api/v1/config/versions", { params: { query: { ...q(c), zone } } }))),
+  /** Installation-wide: the catalog restores for every zone; `zone` names the version list the version came from. */
+  rollback: (version: number, force = false, zone?: string) =>
+    unwrap(client.POST("/api/v1/config/rollback", { body: { version, ...(force ? { force } : {}), ...(zone ? { zone } : {}) } })),
+
+  putZoneLimits: (zone: string, body: Schemas["ZoneLimitSet"]) =>
+    unwrap(client.PUT("/api/v1/zones/{zone}/limits", { params: { path: { zone } }, body })),
+  putZoneMemberDefaults: (zone: string, body: Schemas["ZoneMemberDefaultsSet"]) =>
+    unwrap(client.PUT("/api/v1/zones/{zone}/member-defaults", { params: { path: { zone } }, body })),
+  zones: (includeArchived = false) => unwrap(client.GET("/api/v1/zones", { params: { query: { include_archived: includeArchived } } })).then((page) => page.items),
+  createZone: (body: Schemas["ZoneCreate"]) => unwrap(client.POST("/api/v1/zones", { body })),
+  updateZone: (name: string, body: Schemas["ZoneUpdate"]) => unwrap(client.PATCH("/api/v1/zones/{name}", { params: { path: { name } }, body })),
+  archiveZone: (name: string) => unwrap(client.DELETE("/api/v1/zones/{name}", { params: { path: { name } } })),
 
   a2aAgents: () => listAll((c) => unwrap(client.GET("/api/v1/a2a-agents", { params: { query: q(c) } }))),
   createA2aAgent: (body: Schemas["A2aAgentCreate"]) => unwrap(client.POST("/api/v1/a2a-agents", { body })),

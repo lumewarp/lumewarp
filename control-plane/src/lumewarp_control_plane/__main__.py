@@ -71,19 +71,21 @@ def _bootstrap(settings: Settings, args: argparse.Namespace) -> None:
 
     from lumewarp_control_plane import audit
     from lumewarp_control_plane.db import create_engine, create_session_factory
-    from lumewarp_control_plane.models import ActorType, GatewayToken, Scope
+    from lumewarp_control_plane.models import ActorType, GatewayToken, Zone
     from lumewarp_control_plane.security import SecretKind, generate_secret
 
-    scope = args.scope or settings.scope
+    zone = args.zone or settings.zone
 
     async def run() -> str:
         engine = create_engine(settings)
         try:
             async with create_session_factory(engine)() as session, session.begin():
-                await session.execute(insert(Scope).values(name=scope).on_conflict_do_nothing())
+                await session.execute(
+                    insert(Zone).values(name=zone, display_name=zone).on_conflict_do_nothing()
+                )
                 new = generate_secret(SecretKind.GATEWAY_TOKEN)
                 token = GatewayToken(
-                    scope=scope,
+                    zone=zone,
                     name=args.name or "",
                     token_hash=new.hash,
                     display_prefix=new.display_prefix,
@@ -104,7 +106,7 @@ def _bootstrap(settings: Settings, args: argparse.Namespace) -> None:
             await engine.dispose()
 
     secret = asyncio.run(run())
-    print(f"scope {scope!r} ready; gateway token {args.name or ''!r}:", file=sys.stderr)
+    print(f"zone {zone!r} ready; gateway token {args.name or ''!r}:", file=sys.stderr)
     print(secret)
 
 
@@ -149,15 +151,15 @@ def build_parser() -> argparse.ArgumentParser:
         "bootstrap",
         help=(
             "optional: create a gateway token without the Admin UI, for automated installs;"
-            " `serve` creates the config scope"
+            " `serve` creates the default zone"
         ),
         description=(
-            "Optional. `serve` creates the config scope at startup and the Admin UI's"
+            "Optional. `serve` creates the default zone at startup and the Admin UI's"
             " Gateways page creates tokens; this command creates one for scripted installs."
         ),
     )
     p.add_argument("--name", default="", help="label for the token")
-    p.add_argument("--scope", help="default: LUMEWARP_SCOPE")
+    p.add_argument("--zone", help="default: LUMEWARP_ZONE")
 
     p = sub.add_parser("openfga", help="prepare or check the OpenFGA store (LUMEWARP_OPENFGA_*)")
     actions = p.add_subparsers(dest="openfga_command", required=True)

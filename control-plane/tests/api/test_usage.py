@@ -125,7 +125,7 @@ async def test_grouping_filters_and_cursor_pagination(client, committed) -> None
     assert default.json()["items"] == rows
 
 
-async def test_monthly_team_totals_fast_path(client, committed) -> None:
+async def test_monthly_team_totals_fast_path(client, committed, api_scope) -> None:
     team = await make_team(committed)
     account = await make_service_account(committed, team)
     key = await make_key(committed, team, account)
@@ -147,7 +147,7 @@ async def test_monthly_team_totals_fast_path(client, committed) -> None:
         usage_total(ScopeType.SERVICE_ACCOUNT, account.id, window_start=START, requests=99)
     )
     await committed.flush()
-    total = await committed.get(UsageTotal, (ScopeType.TEAM, team.id, START))
+    total = await committed.get(UsageTotal, (api_scope, ScopeType.TEAM, team.id, START))
     total.audio_ms = 9876
     await committed.commit()
     from sqlalchemy import event
@@ -300,7 +300,7 @@ async def test_a_plain_member_sees_whole_team_totals_but_not_other_owners(
     assert sum(row["requests"] for row in overall) == 4
 
 
-async def test_catalog_filters_grouping_rename_and_pagination(client, committed):
+async def test_catalog_filters_grouping_rename_and_pagination(client, committed, api_scope):
     key = await key_for(committed)
     suffix = uuid.uuid4().hex
     original = f"old-{suffix}"
@@ -321,7 +321,7 @@ async def test_catalog_filters_grouping_rename_and_pagination(client, committed)
         timestamp=RENAMED,
     )
     # Delayed pre-rename event and post-rename event enter through real ingest.
-    assert await ingest(committed, "gateway", [first, second]) == 2
+    assert await ingest(committed, "gateway", [first, second], zone=api_scope) == 2
     old_alias = f"nick-{suffix}"
     old_router = f"pool-{suffix}"
     await rename_at(committed, alias, f"nick-new-{suffix}")
@@ -366,7 +366,7 @@ async def test_catalog_filters_grouping_rename_and_pagination(client, committed)
         assert all(row["served_by"] == [{"id": str(model.id), "name": current}] for row in whole)
 
 
-async def test_literal_none_distinct_from_missing_and_deleted_names(client, committed):
+async def test_literal_none_distinct_from_missing_and_deleted_names(client, committed, api_scope):
     key = await key_for(committed)
     model = await make_model(committed, f"served-{uuid.uuid4().hex}", created_at=CREATED)
     alias = await make_alias(committed, "none", model)
@@ -380,6 +380,7 @@ async def test_literal_none_distinct_from_missing_and_deleted_names(client, comm
                 wire(key, model=model.name),
                 wire(key, model=model.name, alias="none"),
             ],
+            zone=api_scope,
         )
         == 2
     )
@@ -394,7 +395,12 @@ async def test_literal_none_distinct_from_missing_and_deleted_names(client, comm
     deleted = query(client, alias="none", **base).json()["items"]
     assert (deleted[0]["alias"], deleted[0]["alias_id"]) == ("none", None)
     pool = await make_router(committed, "none", members=[model], created_at=CREATED)
-    assert await ingest(committed, "gateway", [wire(key, model=model.name, router="none")]) == 1
+    assert (
+        await ingest(
+            committed, "gateway", [wire(key, model=model.name, router="none")], zone=api_scope
+        )
+        == 1
+    )
     await committed.commit()
     base = {"team_id": str(key.team_id), "group_by": "router"}
     named = query(client, router="none", **base).json()["items"]

@@ -13,8 +13,8 @@ global:
   imagePullSecrets: []
   # Extra labels on every resource.
   commonLabels: {}
-  # Snapshot scope this installation publishes; the gateway uses the same one.
-  scope: default
+  # Config zone this installation publishes; the gateway uses the same one.
+  zone: default
   # Existing Secret with LUMEWARP_ENCRYPTION_KEY (32+ characters) that seals stored upstream
   # API keys; both components get it. Required once an upstream stores a key; changing it makes stored keys unreadable.
   encryptionKey:
@@ -151,7 +151,7 @@ gateway:
     volume: {}
     # Process-wide WASM memory budget in bytes; empty = the gateway default (1 GiB).
     memoryLimitBytes: ""
-    # Existing Secrets whose keys become env variables; name each key LUMEWARP_PLUGIN_SECRET_<NAME> (not scoped per plugin).
+    # Existing Secrets whose keys become env variables; name each key LUMEWARP_PLUGIN_SECRET_<NAME> (one namespace for every plugin).
     secretEnvs: []
   # External base URL of the MCP and A2A endpoints, used for agent cards; empty = A2A answers 503.
   publicUrl: ""
@@ -167,7 +167,7 @@ gateway:
       existingSecretKey: url
     # Sync interval in milliseconds, 10 to 1000; empty = the gateway default (100).
     syncMs: ""
-    # Namespace of the Redis keys; empty = the scope. Gateways that share counts must use the same one.
+    # Namespace of the Redis keys; empty = the zone. Gateways that share counts must use the same one.
     namespace: ""
   service:
     type: ClusterIP

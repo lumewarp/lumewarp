@@ -11,10 +11,10 @@ from __future__ import annotations
 from sqlalchemy import select
 
 from lumewarp_control_plane.auth import sessions
-from lumewarp_control_plane.compiler import compile_scope
+from lumewarp_control_plane.compiler import compile_zone
 from lumewarp_control_plane.models import CatalogName
 from tests.api.helpers import ADMIN_AUTH as H
-from tests.api.helpers import auth, suffix, user_with_token
+from tests.api.helpers import auth, create_model, suffix, user_with_token
 from tests.factories import make_alias, make_key, make_member, make_model, make_router, make_team
 
 API = "/api/v1"
@@ -28,16 +28,13 @@ def _upstream(client) -> str:
 
 
 def _model(client, upstream_id: str, **reasoning) -> dict:
-    body = {
-        "name": f"m-{suffix()}",
-        "upstream_id": upstream_id,
-        "upstream_model": "Qwen/Qwen3-8B",
-        "model_type": "llm",
-        "reasoning": reasoning or None,
-    }
-    response = client.post(f"{API}/models", json=body, headers=H)
-    assert response.status_code == 201, response.text
-    return response.json()
+    return create_model(
+        client,
+        upstream_id,
+        name=f"m-{suffix()}",
+        upstream_model="Qwen/Qwen3-8B",
+        reasoning=reasoning or None,
+    )
 
 
 def _mapped(client, upstream_id: str, levels: list[str]) -> dict:
@@ -292,7 +289,7 @@ async def test_compiled_snapshot_carries_the_level_and_capability(
     plain = _ok(_router(client, [model], name=f"r-{suffix()}"))
 
     committed.expire_all()
-    compiled = await compile_scope(committed, api_settings.scope, require_local_membership=True)
+    compiled = await compile_zone(committed, api_settings.zone, require_local_membership=True)
     routers = {router.name: router for router in compiled.snapshot.routers}
     assert routers[named["name"]].reasoning_default_level == "medium"
     assert routers[plain["name"]].reasoning_default_level == ""

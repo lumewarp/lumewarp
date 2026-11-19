@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { lazy, Suspense, useEffect, useMemo, useState, type ComponentProps } from "react";
 import { api, type UsageQuery, type UsageRow } from "../api";
-import { Badge, fmtNumber as n, fmtUsd, PageHeader, TypeBadge } from "../components/Bits";
+import { Badge, fmtCompact, fmtNumber as n, fmtUsd, PageHeader, TypeBadge } from "../components/Bits";
 import { FilterBar } from "../components/FilterBar";
 import { SelectField, TextField } from "../components/Form";
 import { UsageChart } from "../components/UsageChart";
@@ -14,7 +14,8 @@ import { dayStart, isoDay, shiftDay } from "../lib/days";
 import { MODEL_TYPES, type ModelType } from "../lib/modelType";
 import type { RequestsSearch } from "../lib/requests";
 import { useUsageMetric } from "../lib/usageMetric";
-import { useCan, useMe, useModels, useNames, useTeamDirectory, useTeams } from "../hooks";
+import { useCan, useMe, useModels, useNames, useTeamDirectory, useTeams, useZoneFilter } from "../hooks";
+import { ZoneBadge } from "../zone";
 import { ENDPOINTS, endpointLabel } from "../lib/endpoints";
 import { KeyPill } from "../components/KeyPill";
 import { Leaderboard } from "../components/Leaderboard";
@@ -88,11 +89,14 @@ const daysAgo = (count: number) => new Date(today.getTime() - count * 86_400_000
 
 type Row = UsageRow;
 
-export function Stat({ label, value }: { label: string; value: string }) {
+/** A summary tile; `title` carries the exact value when `value` is shortened. */
+export function Stat({ label, value, title }: { label: string; value: string; title?: string }) {
   return (
     <Card className="gap-0 p-3.5">
       <div className="text-muted-foreground">{label}</div>
-      <div className="text-2xl font-bold tabular-nums">{value}</div>
+      <div className="text-2xl font-bold tabular-nums" title={title}>
+        {value}
+      </div>
     </Card>
   );
 }
@@ -105,6 +109,8 @@ interface RangeProps {
   onFrom: (value: string) => void;
   onTo: (value: string) => void;
   onTeam: (value: string) => void;
+  /** The zone filter shared by the tabs: `param` is the `?zone=` value (absent = all zones). */
+  zone: ReturnType<typeof useZoneFilter>;
 }
 
 function RangeFields({ range, teams }: { range: RangeProps; teams: { id: string; name: string }[] | undefined }) {
@@ -118,6 +124,7 @@ function RangeFields({ range, teams }: { range: RangeProps; teams: { id: string;
         onChange={range.onTeam}
         options={[{ value: "", label: "All teams" }, ...(teams ?? []).map((team) => ({ value: team.id, label: team.name }))]}
       />
+      <SelectField label="Zone" value={range.zone.value} onChange={range.zone.set} options={range.zone.options} />
     </>
   );
 }
@@ -207,7 +214,8 @@ export function Usage() {
   const [to, setTo] = useState(isoDay(today));
   const [teamId, setTeamId] = useState("");
   const [tab, setTab] = useState<"llm" | "mcp" | "a2a">("llm");
-  const range: RangeProps = { from, to, teamId, onFrom: setFrom, onTo: setTo, onTeam: setTeamId };
+  const zone = useZoneFilter();
+  const range: RangeProps = { from, to, teamId, onFrom: setFrom, onTo: setTo, onTeam: setTeamId, zone };
   return (
     <>
       <PageHeader title="Usage" hint="Spend is for the model that served each request." />
@@ -278,7 +286,9 @@ function LlmUsage({ range }: { range: RangeProps }) {
     ...rangeQuery,
     // An MCP or A2A event carries no model, tokens or cost: the LLM tab asks for LLM only.
     kind: "llm",
-    group_by: groupBy,
+    // With "All zones" each row names its zone.
+    group_by: range.zone.all ? `zone,${groupBy}` : groupBy,
+    zone: range.zone.param,
     team_id: range.teamId || undefined,
     endpoint: endpoint || undefined,
     model_type: modelType || undefined,
@@ -324,19 +334,24 @@ function LlmUsage({ range }: { range: RangeProps }) {
   );
 
   // Suggestions only: the filter takes any string, as old usage keeps the upstream name it was served under.
-  const upstreamSuggestions = [...new Set((models.data ?? []).map((m) => m.upstream_model))].sort();
+  const upstreamSuggestions = [...new Set((models.data ?? []).flatMap((m) => (m.deployments ?? []).map((d) => d.upstream_model)))].sort();
   const provenanceModes = (kind: "alias" | "router") => [
     { value: ANY, label: "Any" },
     { value: NONE, label: kind === "alias" ? "None (no alias)" : "None (no router)" },
     { value: HAS, label: kind === "alias" ? "Via any alias" : "Via any router" },
   ];
 
-  const dims = groupBy.split(",");
+  const dims = [...(range.zone.all ? ["zone"] : []), ...groupBy.split(",")];
+  const zoneOf = (name: string | null | undefined) => {
+    const zone = range.zone.zones.find((z) => z.name === name);
+    return zone ? <ZoneBadge zone={zone} /> : <span className="text-muted-foreground">{name ?? "—"}</span>;
+  };
   const ownerLabel = (kind: string | null | undefined, id: string | null | undefined) => {
     if (!id) return "—";
     return kind === "service_account" ? accountName(id) : ownName(id);
   };
   const dimCols: Record<string, Column<Row>[]> = {
+    zone: [{ key: "zone", header: "Zone", sort: (a, b) => (a.zone ?? "").localeCompare(b.zone ?? ""), cell: (row) => zoneOf(row.zone) }],
     day: [{ key: "day", header: "Date", sort: (a, b) => (a.date ?? "").localeCompare(b.date ?? ""), cell: (row) => row.date ?? "—" }],
     endpoint: [{ key: "endpoint", header: "Endpoint", sort: (a, b) => (a.endpoint ?? "").localeCompare(b.endpoint ?? ""), cell: (row) => (row.endpoint ? <code>{endpointLabel(row.endpoint)}</code> : <span className="text-muted-foreground">—</span>) }],
     model_type: [{ key: "model_type", header: "Type", sort: (a, b) => (a.model_type ?? "").localeCompare(b.model_type ?? ""), cell: (row) => <TypeBadge type={row.model_type} /> }],
@@ -379,7 +394,7 @@ function LlmUsage({ range }: { range: RangeProps }) {
     <>
       <FilterBar
         testId="usage-filters"
-        className={routing ? "lg:grid-cols-[10rem_10rem_repeat(3,minmax(0,1fr))_auto]" : "lg:grid-cols-[10rem_10rem_repeat(2,minmax(0,1fr))_auto]"}
+        className={routing ? "lg:grid-cols-[10rem_10rem_repeat(4,minmax(0,1fr))_auto]" : "lg:grid-cols-[10rem_10rem_repeat(3,minmax(0,1fr))_auto]"}
         more={{
           active: [routing && upstreamText, routing && alias, routing && router, endpoint, modelType].filter(Boolean).length,
           onClear: () => {
@@ -407,10 +422,10 @@ function LlmUsage({ range }: { range: RangeProps }) {
         <SelectField label="Group by" value={groupBy} onChange={setGroupBy} options={groupOptions} />
       </FilterBar>
       <div className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3">
-        <Stat label="Requests" value={n(total.requests)} />
+        <Stat label="Requests" value={fmtCompact(total.requests)} title={n(total.requests)} />
         {total.audio > 0 && <Stat label="Audio (seconds)" value={fmtSeconds(total.audio)} />}
-        <Stat label="Total tokens" value={n(total.tokens)} />
-        <Stat label="Prompt / completion" value={`${n(total.prompt)} / ${n(total.completion)}`} />
+        <Stat label="Total tokens" value={fmtCompact(total.tokens)} title={n(total.tokens)} />
+        <Stat label="Prompt / completion" value={`${fmtCompact(total.prompt)} / ${fmtCompact(total.completion)}`} title={`${n(total.prompt)} / ${n(total.completion)}`} />
         <Stat label="Spend" value={fmtUsd(total.cost)} />
       </div>
       {total.unpriced > 0 && <p className="text-muted-foreground">{n(total.unpriced)} request(s) had no price configured and are counted at $0.</p>}
@@ -429,13 +444,13 @@ function LlmUsage({ range }: { range: RangeProps }) {
           title="Usage by day"
         />
       </div>
-      {ranged && <Leaderboard from={rangeQuery.from} to={rangeQuery.to} teamId={range.teamId} />}
+      {ranged && <Leaderboard from={rangeQuery.from} to={rangeQuery.to} teamId={range.teamId} zone={range.zone.param} />}
       <DataTable
         rows={query.data}
         loading={query.isPending || teams.isPending || (directoryEnabled && directory.isPending)}
         error={query.error ?? teams.error ?? (directoryEnabled ? directory.error : null)}
         onRetry={() => void query.refetch()}
-        rowKey={(row) => [row.date, row.endpoint, row.model_type, row.requested, row.model_id ?? row.model, row.alias_id ?? row.alias, row.router_id ?? row.router, row.upstream_model, row.team_id, row.owner_kind, row.owner_id, row.key_id].join("|")}
+        rowKey={(row) => [row.zone, row.date, row.endpoint, row.model_type, row.requested, row.model_id ?? row.model, row.alias_id ?? row.alias, row.router_id ?? row.router, row.upstream_model, row.team_id, row.owner_kind, row.owner_id, row.key_id].join("|")}
         empty="No usage in this period."
         columns={[
           ...dims.flatMap((dimension) => dimCols[dimension] ?? []),
@@ -486,7 +501,8 @@ function TrafficUsage({ kind, range }: { kind: "mcp" | "a2a"; range: RangeProps 
     from: dayStart(range.from),
     to: dayStart(shiftDay(range.to, 1)),
     kind,
-    group_by: groupBy,
+    group_by: range.zone.all ? `zone,${groupBy}` : groupBy,
+    zone: range.zone.param,
     team_id: range.teamId || undefined,
   };
   const query = useQuery({
@@ -507,6 +523,17 @@ function TrafficUsage({ kind, range }: { kind: "mcp" | "a2a"; range: RangeProps 
     [query.data],
   );
   const dimCols: Record<string, Column<Row>[]> = {
+    zone: [
+      {
+        key: "zone",
+        header: "Zone",
+        sort: (a, b) => (a.zone ?? "").localeCompare(b.zone ?? ""),
+        cell: (row) => {
+          const zone = range.zone.zones.find((z) => z.name === row.zone);
+          return zone ? <ZoneBadge zone={zone} /> : <span className="text-muted-foreground">{row.zone ?? "—"}</span>;
+        },
+      },
+    ],
     target: [
       {
         key: "target",
@@ -532,16 +559,16 @@ function TrafficUsage({ kind, range }: { kind: "mcp" | "a2a"; range: RangeProps 
       },
     ],
   };
-  const dims = groupBy.split(",");
+  const dims = [...(range.zone.all ? ["zone"] : []), ...groupBy.split(",")];
   return (
     <>
-      <FilterBar testId="usage-filters" className="lg:grid-cols-[10rem_10rem_repeat(2,minmax(0,1fr))]">
+      <FilterBar testId="usage-filters" className="lg:grid-cols-[10rem_10rem_repeat(3,minmax(0,1fr))]">
         <RangeFields range={range} teams={teams.data} />
         <SelectField label="Group by" value={groupBy} onChange={setGroupBy} options={groups} />
       </FilterBar>
       <div className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3">
-        <Stat label="Requests" value={n(total.requests)} />
-        <Stat label="Errors" value={n(total.errors)} />
+        <Stat label="Requests" value={fmtCompact(total.requests)} title={n(total.requests)} />
+        <Stat label="Errors" value={fmtCompact(total.errors)} title={n(total.errors)} />
         <Stat label="Error share" value={fmtShare(total.errors, total.requests)} />
         <Stat label="Mean duration" value={fmtDuration(total.requests ? total.duration / total.requests : 0)} />
       </div>
@@ -553,7 +580,7 @@ function TrafficUsage({ kind, range }: { kind: "mcp" | "a2a"; range: RangeProps 
         loading={ranged && query.isPending}
         error={query.error ?? teams.error}
         onRetry={() => void query.refetch()}
-        rowKey={(row) => [row.kind, row.target, row.method, row.tool, row.team_id].join("|")}
+        rowKey={(row) => [row.zone, row.kind, row.target, row.method, row.tool, row.team_id].join("|")}
         empty={ranged ? `No ${kind === "mcp" ? "MCP" : "A2A"} traffic in this range.` : "Choose a date range."}
         columns={[
           ...dims.flatMap((dimension) => dimCols[dimension] ?? []),

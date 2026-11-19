@@ -10,6 +10,7 @@ from sqlalchemy import select
 
 from lumewarp_control_plane import audit
 from lumewarp_control_plane.api.common import (
+    DefaultZoneDep,
     LimitDep,
     SessionDep,
     SettingsDep,
@@ -17,7 +18,7 @@ from lumewarp_control_plane.api.common import (
     enqueue_recompile,
     ensure_not_null,
     get_team_or_404,
-    lock_scope,
+    lock_hierarchy,
     mutation,
     uuid_page,
 )
@@ -34,11 +35,24 @@ from lumewarp_control_plane.api.schemas import (
     ServiceAccountOut,
     ServiceAccountUpdate,
 )
+from lumewarp_control_plane.api.zone_limits import (
+    apply_default_zone_limits,
+    limits_by_zone,
+    limits_of,
+)
 from lumewarp_control_plane.authz import Action, Authz
 from lumewarp_control_plane.errors import not_found
 from lumewarp_control_plane.models import ApiKey, ModelAccess, ServiceAccount, Team
 
 router = APIRouter(tags=["service-accounts"])
+
+
+def _account_out(
+    row: ServiceAccount, limits: dict[str, object] | None = None, zone: str | None = None
+) -> ServiceAccountOut:
+    out = ServiceAccountOut.model_validate(row)
+    apply_default_zone_limits(out, limits or {}, default_zone=zone)
+    return out
 
 
 async def _account_or_404(
@@ -67,6 +81,7 @@ async def list_service_accounts(
     team_id: uuid.UUID,
     authz: Authz,
     session: SessionDep,
+    zone: DefaultZoneDep,
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[ServiceAccountOut]:
@@ -77,8 +92,12 @@ async def list_service_accounts(
         select(ServiceAccount).where(ServiceAccount.team_id == team.id).order_by(ServiceAccount.id)
     )
     rows, next_cursor = await uuid_page(session, stmt, ServiceAccount.id, limit, cursor)
+    by_zone = await limits_by_zone(session, "service_account", {row.id for row in rows})
     return Page[ServiceAccountOut](
-        items=[ServiceAccountOut.model_validate(row) for row in rows], next_cursor=next_cursor
+        items=[
+            _account_out(row, by_zone.get(("service_account", row.id), {}), zone) for row in rows
+        ],
+        next_cursor=next_cursor,
     )
 
 
@@ -97,11 +116,11 @@ async def create_service_account(
 ) -> ServiceAccountOut:
     """Create a service account, a non-human key owner of the team. Requires a team admin."""
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         team = await get_team_or_404(session, authz, team_id)
         await authz.require(Action.SERVICE_ACCOUNT_MANAGE, team.id)
         policy = policy_from_fields(body, default_mode=ModelAccess.INHERIT)
-        await validate_owner_policy(session, team, policy)
+        await validate_owner_policy(session, settings.zone, team, policy)
         row = ServiceAccount(
             team_id=team.id,
             name=body.name,
@@ -123,7 +142,13 @@ async def create_service_account(
             details={"name": row.name},
         )
         await enqueue_recompile(session, settings, "api.service_account.create")
-    return ServiceAccountOut.model_validate(row)
+    return _account_out(
+        row,
+        (await limits_by_zone(session, "service_account", {row.id})).get(
+            ("service_account", row.id), {}
+        ),
+        settings.zone,
+    )
 
 
 @router.get(
@@ -132,11 +157,17 @@ async def create_service_account(
     operation_id="getServiceAccount",
 )
 async def get_service_account(
-    account_id: uuid.UUID, authz: Authz, session: SessionDep
+    account_id: uuid.UUID, authz: Authz, session: SessionDep, zone: DefaultZoneDep
 ) -> ServiceAccountOut:
     """Requires a team admin; a caller outside the team gets 404."""
     row, _ = await _account_or_404(session, authz, account_id)
-    return ServiceAccountOut.model_validate(row)
+    return _account_out(
+        row,
+        (await limits_by_zone(session, "service_account", {row.id})).get(
+            ("service_account", row.id), {}
+        ),
+        zone,
+    )
 
 
 @router.patch(
@@ -155,13 +186,17 @@ async def update_service_account(
     deactivated service account stop authenticating.
     """
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         ensure_not_null(body, "name", "description")
         row, team = await _account_or_404(session, authz, account_id)
         await authz.require(Action.SERVICE_ACCOUNT_MANAGE, row.team_id)
-        base = policy_of(row)
+        zone = settings.zone
+        limits = await limits_of(
+            session, zone, {"team_id": row.team_id, "service_account_id": row.id}
+        )
+        base = policy_of(row, limits)
         proposed = policy_from_fields(body, default_mode=ModelAccess.INHERIT, base=base)
-        await validate_owner_policy(session, team, proposed, base)
+        await validate_owner_policy(session, zone, team, proposed, base)
         changed = proposed != base
         if changed:
             apply_policy(row, proposed)
@@ -191,7 +226,13 @@ async def update_service_account(
             },
         )
         await enqueue_recompile(session, settings, "api.service_account.update")
-    return ServiceAccountOut.model_validate(row)
+    return _account_out(
+        row,
+        (await limits_by_zone(session, "service_account", {row.id})).get(
+            ("service_account", row.id), {}
+        ),
+        settings.zone,
+    )
 
 
 @router.delete(
@@ -210,7 +251,7 @@ async def delete_service_account(
     because usage history refers to them; deactivate it instead.
     """
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         row, _ = await _account_or_404(session, authz, account_id)
         await authz.require(Action.SERVICE_ACCOUNT_MANAGE, row.team_id)
         key = await session.scalar(

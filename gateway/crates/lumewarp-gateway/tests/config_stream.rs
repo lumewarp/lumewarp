@@ -26,7 +26,7 @@ use lumewarp_proto::config::v1::{
 use prost::Message;
 use sha2::{Digest, Sha256};
 
-const SCOPE: &str = "scope-a";
+const ZONE: &str = "zone-a";
 const TOKEN_ENV: &str = "LUMEWARP_G2_TEST_TOKEN";
 
 fn key(id: &str, secret: &str) -> ApiKey {
@@ -75,7 +75,7 @@ fn snapshot(version: u64, keys: &[(&str, &str)]) -> Snapshot {
         required_capabilities: vec!["strategy:weighted".into()],
         api_keys: keys.iter().map(|(id, secret)| key(id, secret)).collect(),
         created_at_unix_ms: 1,
-        scope: SCOPE.into(),
+        zone: ZONE.into(),
         ..Default::default()
     }
 }
@@ -156,7 +156,7 @@ impl Gw {
             .args(["--gateway-token-env", TOKEN_ENV])
             .arg("--state-dir")
             .arg(state)
-            .args(["--scope", SCOPE])
+            .args(["--zone", ZONE])
             .arg("--local-config")
             .arg(local)
             .env(TOKEN_ENV, "gw-token")
@@ -309,7 +309,7 @@ async fn full_then_delta_with_durable_acks() {
     assert_generated_gateway_id(&hello.gateway_id);
     assert_eq!(hello.have_version, 0);
     assert!(hello.have_digest.is_empty());
-    assert_eq!(hello.scope, "");
+    assert_eq!(hello.zone, "");
     assert!(!hello.gateway_version.is_empty());
     // The binary links every strategy feature; this test only relies on the
     // built-ins. `tests/strategies.rs` covers the custom entries.
@@ -658,11 +658,11 @@ async fn delta_changes_aliases_on_the_stream() {
 }
 
 #[tokio::test]
-async fn wrong_scope_cache_and_full_are_refused() {
+async fn wrong_zone_cache_and_full_are_refused() {
     let env = env();
     std::fs::create_dir_all(&env.state).unwrap();
     let mut foreign = snapshot(9, &[("k1", "secret-1")]);
-    foreign.scope = "other".into();
+    foreign.zone = "other".into();
     let mut file = b"LWSNAP02".to_vec();
     file.extend_from_slice(&foreign.encode_to_vec());
     file.extend_from_slice(&0u32.to_be_bytes());
@@ -678,7 +678,7 @@ async fn wrong_scope_cache_and_full_are_refused() {
     assert_eq!(gw.readyz().await, 503);
 
     let mut other = snapshot(3, &[("k1", "secret-1")]);
-    other.scope = "other".into();
+    other.zone = "other".into();
     conn.send(full(other));
     assert_eq!(nack_code(&mut conn).await, NackCode::InvalidConfig);
     assert_eq!(gw.readyz().await, 503);
@@ -701,7 +701,7 @@ async fn reconnect_resumes_from_have_version() {
     drop(conn);
     let mut conn = cp.accept().await;
     let resumed = hello(&mut conn).await;
-    assert_eq!((resumed.have_version, resumed.scope.as_str()), (2, SCOPE));
+    assert_eq!((resumed.have_version, resumed.zone.as_str()), (2, ZONE));
     assert_eq!(resumed.have_digest, digest(2));
 
     // Control-plane restart: the listener goes away and comes back.

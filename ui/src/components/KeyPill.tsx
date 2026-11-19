@@ -1,4 +1,4 @@
-import { BotIcon, KeyRoundIcon, UserIcon } from "lucide-react";
+import { BotIcon, KeyRoundIcon, TriangleAlertIcon, UserIcon } from "lucide-react";
 
 import { Badge } from "./ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
@@ -12,7 +12,28 @@ export type KeyLike = {
   org_name?: string | null;
   owner_kind?: string | null;
   service_account_name?: string | null;
+  zone?: string | null;
+  rule_violations?: string[] | null;
 };
+
+/** A warning badge when a key breaks a rule its zone tightened after it was made; nothing otherwise. */
+export function RuleViolationBadge({ keyRef }: { keyRef: Pick<KeyLike, "rule_violations"> | null | undefined }) {
+  const violations = keyRef?.rule_violations ?? [];
+  if (violations.length === 0) return null;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Badge variant="warn" tabIndex={0} data-testid="rule-violations" aria-label={`Breaks zone rules: ${violations.join(", ")}`}>
+          <TriangleAlertIcon aria-hidden="true" />
+          Breaks zone rules
+        </Badge>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-[min(24rem,calc(100vw-2rem))]">
+        The key keeps working until it expires or is rotated: {violations.join(", ")}.
+      </TooltipContent>
+    </Tooltip>
+  );
+}
 
 /**
  * Every API key shown in the Admin UI: a pill with the key name. Hovering or focusing it shows two lines:
@@ -75,6 +96,11 @@ export function KeyPill({
             )}
             <span className="text-[0.6875rem] text-background/60">{keyRef?.id ?? fallbackId}</span>
           </div>
+          {keyRef?.zone && (
+            <div className="text-xs text-background/80" data-testid="key-pill-zone">
+              Zone {keyRef.zone}
+            </div>
+          )}
         </div>
       </TooltipContent>
     </Tooltip>

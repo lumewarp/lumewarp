@@ -3,7 +3,7 @@
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumewarp_control_plane.compiler import compile_scope
+from lumewarp_control_plane.compiler import compile_zone
 from lumewarp_control_plane.models import AuditLog, ConfigOutbox, PolicyGroupGrant, Team
 from tests.api.helpers import ADMIN_AUTH, auth, create_org, suffix, user_with_token
 from tests.factories import make_alias, make_key, make_member, make_model, make_user
@@ -31,7 +31,7 @@ def create_team(client, org_id: str, **policy) -> dict:
 
 async def compiled_key(api_engine, key_id: str):
     async with AsyncSession(api_engine, expire_on_commit=False) as session:
-        compiled = await compile_scope(session, "api-test", require_local_membership=True)
+        compiled = await compile_zone(session, "api-test", require_local_membership=True)
     return next(k for k in compiled.snapshot.api_keys if k.key_id == key_id)
 
 

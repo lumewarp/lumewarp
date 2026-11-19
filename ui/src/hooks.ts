@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type Key, type McpDefinition, type McpDefinitionState, type Me, type PluginKind, type Schemas, type TeamAny } from "./api";
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useZone } from "./zone";
 import { useToast } from "./components/Toast";
 import { runSecretMutation } from "./lib/keySecret";
 import { ownerResumableReason } from "./lib/keyState";
@@ -176,8 +177,11 @@ export function useNames(rows: { id: string; name: string }[] | undefined) {
   return (id: string | null | undefined) => (id ? (map.get(id) ?? id.slice(0, 8)) : "—");
 }
 
-export const useOwnKeys = (includeServiceAccounts = false) =>
-  useQuery({ queryKey: ["own-keys", includeServiceAccounts], queryFn: () => api.ownKeys(includeServiceAccounts) });
+/** The caller's keys in the header zone. */
+export function useOwnKeys(includeServiceAccounts = false) {
+  const zone = useZone().name;
+  return useQuery({ queryKey: ["own-keys", includeServiceAccounts, zone], queryFn: () => api.ownKeys(includeServiceAccounts, zone) });
+}
 
 export const useModels = (enabled = true) =>
   useQuery({ queryKey: ["models"], queryFn: () => api.models(), enabled });
@@ -187,9 +191,25 @@ export const useAliases = () => useQuery({ queryKey: ["aliases"], queryFn: () =>
 export const useRouters = () => useQuery({ queryKey: ["routers"], queryFn: () => api.routers(), structuralSharing: false });
 export const useUpstreams = () => useQuery({ queryKey: ["upstreams"], queryFn: () => api.upstreams() });
 // A plugin's title, description and settings schema are gateway data and may hold a `__proto__` key.
-export const usePlugins = (kind?: PluginKind, enabled = true, refetchInterval?: number) =>
-  useQuery({ queryKey: ["plugins", kind ?? "all"], queryFn: () => api.plugins(kind), structuralSharing: false, enabled, refetchInterval });
-export const useStrategies = () => usePlugins("router-strategy");
+export const usePlugins = (kind?: PluginKind, enabled = true, refetchInterval?: number, zone?: string) =>
+  useQuery({ queryKey: ["plugins", kind ?? "all", zone ?? "default"], queryFn: () => api.plugins(kind, zone), structuralSharing: false, enabled, refetchInterval });
+/**
+ * The zone a catalog record edit page works in: the record's own zone, else the header zone (a new record).
+ * Opening a record of another zone switches the header to it, once per record, so the header never lies about
+ * what the page shows; the user may still switch the header afterwards without moving the page.
+ */
+export function useCatalogZone(record: { id: string; zone: string } | undefined) {
+  const { name, zones, setZone } = useZone();
+  const recordZone = record?.zone;
+  useEffect(() => {
+    if (recordZone && recordZone !== name) setZone(recordZone);
+    // Only when a different record opens.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [record?.id]);
+  const zone = recordZone ?? name;
+  return { zone, zoneLabel: zones.find((z) => z.name === zone)?.display_name || zone };
+}
+export const useStrategies = (zone?: string) => usePlugins("router-strategy", true, undefined, zone);
 export const useCatalog = (enabled = true) => useQuery({ queryKey: ["catalog"], queryFn: () => api.catalog(), enabled });
 export const useMcpServers = () => useQuery({ queryKey: ["mcp-servers"], queryFn: () => api.mcpServers() });
 
@@ -268,4 +288,25 @@ export const useA2aAgents = (enabled = true) =>
 /** id → row lookup. */
 export function useById<T extends { id: string }>(rows: T[] | undefined) {
   return useMemo(() => new Map((rows ?? []).map((r) => [r.id, r])), [rows]);
+}
+
+/** The "All zones" choice of a zone filter. */
+export const ALL_ZONES = "*";
+
+/**
+ * The zone filter of Usage, Requests and the Leaderboard: the header zone until the user picks another or "All
+ * zones" here, and back to the header zone when the header changes. `param` is what goes into `?zone=` (absent =
+ * every zone) and into the query key.
+ */
+export function useZoneFilter() {
+  const header = useZone();
+  const [choice, setChoice] = useState<string | null>(null);
+  useEffect(() => setChoice(null), [header.name]);
+  const value = choice ?? header.name;
+  const all = value === ALL_ZONES;
+  const options = [
+    { value: ALL_ZONES, label: "All zones" },
+    ...header.zones.map((zone) => ({ value: zone.name, label: zone.display_name || zone.name })),
+  ];
+  return { value, all, param: all ? undefined : value, set: setChoice, options, zones: header.zones };
 }

@@ -542,7 +542,7 @@ fn cached_snapshot(probe: SocketAddr) -> Vec<u8> {
     use prost::Message;
     let snapshot = pb::Snapshot {
         version: 5,
-        scope: "scope-a".into(),
+        zone: "zone-a".into(),
         required_capabilities: vec!["mcp".into(), "auth:auth_fixture".into()],
         api_keys: vec![pb::ApiKey {
             key_id: "one".into(),
@@ -789,7 +789,7 @@ async fn a_cached_boot_publishes_the_staged_plugins_too() {
                 .args(["--gateway-token-env", "LUMEWARP_N1_TOKEN"])
                 .arg("--state-dir")
                 .arg(&state)
-                .args(["--scope", "scope-a"])
+                .args(["--zone", "zone-a"])
                 .arg("--local-config")
                 .arg(&local)
                 .env("LUMEWARP_N1_TOKEN", "gw-token")

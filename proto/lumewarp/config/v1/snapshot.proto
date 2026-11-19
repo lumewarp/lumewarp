@@ -20,9 +20,9 @@ message Snapshot {
   // Features the gateway must understand to apply this snapshot. A gateway
   // NACKs (UNSUPPORTED_FEATURE) any snapshot naming a capability it lacks.
   repeated string required_capabilities = 8;
-  // Identifies the control-plane installation; a gateway never boots from an
-  // on-disk snapshot whose scope differs from the one it is configured for.
-  string scope = 9;
+  // Identifies the zone this snapshot configures; a gateway never boots from an
+  // on-disk snapshot whose zone differs from the one it is configured for.
+  string zone = 9;
   // Other callable names. Models, aliases and routers share one name space.
   repeated Alias aliases = 10;
   // Upstream MCP servers. Capability "mcp".
@@ -506,7 +506,7 @@ message RateLimitScope {
 // Enforced per gateway unless the gateways share a Redis and namespace
 // (`--shared-limits-redis-url`), in which case they share one window and may
 // over-admit by about the number of active gateways plus up to five sync
-// intervals of traffic when a gateway first joins the scope. Zero = unlimited
+// intervals of traffic when a gateway first joins the zone. Zero = unlimited
 // for that dimension. tokens_per_minute is retrospective: it rejects later
 // requests once usage has been charged.
 message RateLimit {

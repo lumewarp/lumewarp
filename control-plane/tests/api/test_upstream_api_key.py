@@ -12,7 +12,7 @@ from sqlalchemy import select
 
 from lumewarp_control_plane import sealing
 from lumewarp_control_plane.app import create_app
-from lumewarp_control_plane.compiler.compile import compile_scope
+from lumewarp_control_plane.compiler.compile import compile_zone
 from lumewarp_control_plane.models import AuditLog, Upstream
 from lumewarp_control_plane.settings import Settings
 from tests.api.helpers import ADMIN_AUTH, suffix
@@ -108,7 +108,7 @@ def test_api_key_needs_an_encryption_key(api_settings) -> None:
 async def test_snapshot_carries_ciphertext_only(client, committed, api_settings, sealed) -> None:
     body = _create(client, **({"api_key": PLAINTEXT} if sealed else {})).json()
     committed.expire_all()
-    compiled = await compile_scope(committed, api_settings.scope, require_local_membership=True)
+    compiled = await compile_zone(committed, api_settings.zone, require_local_membership=True)
     (up,) = [u for u in compiled.snapshot.upstreams if u.name == body["name"]]
     assert PLAINTEXT.encode() not in compiled.snapshot.SerializeToString()
     if sealed:

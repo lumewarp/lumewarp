@@ -41,7 +41,7 @@ from lumewarp_control_plane.metrics import (
     run_db_gauges,
     start_metrics_server,
 )
-from lumewarp_control_plane.models import Scope
+from lumewarp_control_plane.models import Zone
 from lumewarp_control_plane.settings import Settings, get_settings, split_bind
 
 log = logging.getLogger(__name__)
@@ -112,9 +112,9 @@ async def start_background(app: FastAPI) -> Runtime:
     runtime.grpc_port = grpc_services.bound_port(server)
     registry = grpc_services.registry_for(server)
 
-    def on_published(scope: str, version: int) -> None:
+    def on_published(zone: str, version: int) -> None:
         if registry is not None:
-            registry.notify_published(scope, version)
+            registry.notify_published(zone, version)
 
     runtime.tasks["grpc"] = _supervise(app, runtime, "grpc", server.wait_for_termination())
     runtime.tasks["compiler"] = _supervise(
@@ -124,7 +124,6 @@ async def start_background(app: FastAPI) -> Runtime:
         compiler.run_compiler_loop(
             factory,
             runtime.stop,
-            scope=settings.scope,
             on_published=on_published,
             require_local_membership=app.state.authorizer.manages_grants,
             metrics=metrics,
@@ -154,21 +153,29 @@ async def start_background(app: FastAPI) -> Runtime:
             app,
             runtime,
             "metrics",
-            run_db_gauges(metrics, factory, runtime.stop, scope=settings.scope),
+            run_db_gauges(metrics, factory, runtime.stop),
         )
     return runtime
 
 
-async def ensure_scope(factory: SessionFactory, scope: str) -> None:
-    """Create the config scope row if it does not exist yet.
+async def ensure_zone(factory: SessionFactory, settings: Settings) -> None:
+    """Create the default zone row if it does not exist yet.
 
-    `bootstrap` used to be the only writer of this row, which made it mandatory before the
-    Admin UI could create its first gateway token. `ON CONFLICT DO NOTHING` leaves an
-    existing row alone, so its `source_revision` is not bumped and no config version is
-    published by the insert itself.
+    `bootstrap` and the zones API create the other zones. `ON CONFLICT DO NOTHING` leaves
+    an existing row alone, so its URL and key rules are not reset and its `source_revision`
+    is not bumped; no config version is published by the insert itself. The Playground URL
+    is seeded from `LUMEWARP_PLAYGROUND_GATEWAY_URL` on creation only.
     """
     async with factory() as session, session.begin():
-        await session.execute(insert(Scope).values(name=scope).on_conflict_do_nothing())
+        await session.execute(
+            insert(Zone)
+            .values(
+                name=settings.zone,
+                display_name=settings.zone,
+                playground_gateway_url=settings.playground_gateway_url,
+            )
+            .on_conflict_do_nothing()
+        )
 
 
 async def stop_background(runtime: Runtime, grace: float = SHUTDOWN_GRACE_SECONDS) -> None:
@@ -202,12 +209,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # An optional backend hook: a misconfigured backend aborts startup here.
         if (start := getattr(app.state.authorizer.backend, "start", None)) is not None:
             await start()
-        # A fresh database has no scope row until `bootstrap` runs. Create it here, before
-        # the compiler and gRPC start, so the Admin UI can create the first gateway token.
+        # A fresh database has no zone row. Create the default one here, before the
+        # compiler and gRPC start, so the Admin UI can create the first gateway token.
         # `serve` already requires a migrated database for the gRPC server below, so a
         # failure here is a startup failure and the process restarts.
         if settings.background_enabled:
-            await ensure_scope(app.state.session_factory, settings.scope)
+            await ensure_zone(app.state.session_factory, settings)
         runtime = await start_background(app) if settings.background_enabled else Runtime()
         app.state.runtime = runtime
         app.state.tasks = runtime.tasks

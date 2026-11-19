@@ -283,6 +283,7 @@ test("Discover now sends a typed token once and shows the definitions, the crede
 test("the list shows a server's approved and pending definition counts", async ({ page, request }) => {
   const stub = {
     id: "33333333-1111-4111-8111-111111111111",
+    zone: "default",
     name: "ms-stub",
     url: "https://mcp.example/mcp",
     auth: { plugin: "none", params: {}, timeout_ms: 0 },

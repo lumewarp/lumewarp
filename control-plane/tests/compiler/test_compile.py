@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as pb
-from lumewarp_control_plane.compiler import CompileError, compile_scope, narrow
+from lumewarp_control_plane.compiler import CompileError, compile_zone, narrow
 from lumewarp_control_plane.models import (
     KeyLifecycle,
     ModelAccess,
@@ -25,7 +25,7 @@ def lvl(mode: ModelAccess, *models: str) -> dict:
 async def compile_(factory, **kw):
     async with factory() as s:
         kw.setdefault("require_local_membership", True)
-        return await compile_scope(s, SCOPE, now=kw.pop("now", OCT), **kw)
+        return await compile_zone(s, SCOPE, now=kw.pop("now", OCT), **kw)
 
 
 def key_of(compiled, key) -> pb.ApiKey:
@@ -143,8 +143,15 @@ async def test_member_scope_id_is_stable_uuid5(factory) -> None:
 
 async def _spend(factory, level: ScopeType, entity_id, cost: int, window: datetime) -> None:
     async with factory() as s, s.begin():
-        s.add(UsageTotal(scope_type=level, scope_id=entity_id, window_start=window,
-                         cost_nano_usd=cost))  # fmt: skip
+        s.add(
+            UsageTotal(
+                zone=factories.DEFAULT_ZONE,
+                scope_type=level,
+                scope_id=entity_id,
+                window_start=window,
+                cost_nano_usd=cost,
+            )
+        )
 
 
 async def test_budget_status_and_rollover(factory) -> None:
@@ -337,7 +344,7 @@ async def test_key_fields(factory) -> None:
     assert k.team_id == str(t.id)
     assert k.expires_at_unix_ms == int(expires.timestamp() * 1000)
     assert list(c.snapshot.teams) == [pb.Team(id=str(t.id), name=t.name)]
-    assert c.key_count == 1 and c.snapshot.scope == SCOPE
+    assert c.key_count == 1 and c.snapshot.zone == SCOPE
 
 
 # --------------------------------------------------------------------------- routing
@@ -394,7 +401,7 @@ async def test_limits(factory) -> None:
 
 
 async def test_unknown_scope(factory) -> None:
-    with pytest.raises(CompileError, match="unknown config scope"):
+    with pytest.raises(CompileError, match="unknown config zone"):
         await compile_(factory)
 
 
