@@ -18,6 +18,7 @@ uv sync
 (cd ../ui && pnpm install && pnpm check && pnpm build:cp)
 
 uv run lumewarp-control-plane migrate
+export LUMEWARP_GATEWAY_ZONE_DEFAULT_TOKEN='replace-with-a-random-secret-at-least-32-characters'
 LUMEWARP_DEV_MODE=true LUMEWARP_BREAK_GLASS_PASSWORD=dev-break-glass \
   LUMEWARP_SESSION_COOKIE_SECURE=false \
   uv run lumewarp-control-plane serve
@@ -30,16 +31,17 @@ The HTTP API/UI listens on `127.0.0.1:8091`; gateway-facing gRPC listens on
 Open <http://127.0.0.1:8091/> and use the emergency login with the password
 `dev-break-glass` (a plaintext password needs `LUMEWARP_DEV_MODE=true`; production uses an
 argon2id hash and OIDC, see [Sign-in and authorization](../operations/identity.md)). The
-control plane creates the default zone at startup, so create a gateway token for that
-zone in **Gateways → New gateway token** and copy the `lwg-...` secret, which is shown once.
-For a scripted install without the UI, `uv run lumewarp-control-plane bootstrap --name quickstart`
-creates one and prints it.
+control plane creates the default zone and reads its fixed gateway token from
+`LUMEWARP_GATEWAY_ZONE_DEFAULT_TOKEN` at startup. The token must be at least 32 characters;
+the control plane keeps only its SHA-256 hash in memory. There is no token-creation UI, API
+or CLI.
 
 Start the gateway in another terminal with that token:
 
 ```sh
 cd gateway
-export LUMEWARP_GATEWAY_TOKEN='lwg-...'
+# Use exactly the value configured as LUMEWARP_GATEWAY_ZONE_DEFAULT_TOKEN above.
+export LUMEWARP_GATEWAY_TOKEN='replace-with-a-random-secret-at-least-32-characters'
 cargo run --release -- --control-plane http://127.0.0.1:50051 \
   --gateway-token-env LUMEWARP_GATEWAY_TOKEN \
   --state-dir /tmp/lumewarp-state --zone default
@@ -89,7 +91,8 @@ settings, SSO, authorization backends, the catalog, plugins and operations, and
 The seeded demo API key is in `.dev/demo-key`. Postgres is at `127.0.0.1:55432`, with
 database, user and password all `lumewarp`.
 
-The stack runs two gateways sharing one token, each with an id generated at startup:
+The stack runs two gateways sharing the default zone's fixed token. The control plane
+assigns each stream's gateway id in its first `Welcome`; a reconnect gets a new id and row:
 <http://127.0.0.1:4000/> (admin `127.0.0.1:9464`) and <http://127.0.0.1:4001/> (admin
 `127.0.0.1:9466`). They share rate limits through a Valkey at `127.0.0.1:56379`, without
 persistence ([shared limits](../operations/gateway.md#shared-rate-limits)).

@@ -43,17 +43,16 @@ it off the public admin ingress.
 
 ## CLI
 
-`serve` creates the default zone named by `LUMEWARP_ZONE` at startup if it is missing, so a
-fresh install can create its first gateway token in the Admin UI without a `bootstrap` run.
-The insert is idempotent and leaves an existing row alone. One compiler task iterates all
-live zones; each zone has its own source revision, outbox and config version stream.
+`serve` creates the default zone named by `LUMEWARP_ZONE` and a zone for every configured
+gateway token at startup if each row is missing. The insert is idempotent and leaves an
+existing row alone, including an archived row. One compiler task iterates all live zones;
+each zone has its own source revision, outbox and config version stream.
 
 | Command | What it does |
 | --- | --- |
 | `serve` | HTTP API + Admin UI (uvicorn, one worker), gRPC servers and background loops. `--http-bind` / `--grpc-bind` override the env settings. |
 | `migrate [REV]` | Apply Alembic migrations up to `REV` (default `head`). Downgrades are not supported; restore a database backup instead. |
 | `openapi [-o FILE]` | Print the OpenAPI document; builds the app without connecting to the database. |
-| `bootstrap [--name N] [--zone Z]` | Optional: create an optionally labeled `lwg-...` gateway token without the Admin UI, for scripted installs; `--zone` defaults to `LUMEWARP_ZONE`. The secret goes to stdout once. It creates the requested zone if missing. |
 | `hash-password` | Read a password from stdin (or prompt for it) and print its argon2id hash for `LUMEWARP_BREAK_GLASS_PASSWORD_HASH`. |
 
 The console script is `lumewarp-control-plane`; `python -m lumewarp_control_plane` is
@@ -83,7 +82,8 @@ case-insensitive. `src/lumewarp_control_plane/settings.py` is the source of trut
 | `LUMEWARP_BREAK_GLASS_ALLOWED_CIDRS` | empty (any) | Client networks allowed to use the emergency login; others get 404. |
 | `LUMEWARP_TRUSTED_PROXIES` | empty | Proxy networks whose `X-Forwarded-For` is followed to find the client address for the two limits above. |
 | `LUMEWARP_AUTHZ_BACKEND` | `builtin` | Authorization backend for direct org/team relations: `builtin` (`org_admins` + `team_members`), `openfga`, `http` or a `lumewarp.authz` entry-point name. See [Authorization](../admin/index.md); the OpenFGA settings are in [Identity](./identity.md#openfga). |
-| `LUMEWARP_ZONE` | `default` | Default config zone created at startup and used when a zone is omitted from `bootstrap`; gateways authenticate into a zone with a zone-bound token. |
+| `LUMEWARP_ZONE` | `default` | Default config zone created at startup. Gateways authenticate into a zone with that zone's fixed environment token. |
+| `LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN` | unset | One fixed token per zone; `<ID>` is the uppercase zone ID with `-` replaced by `_`. Requires at least 32 characters. Declares the zone at startup; only its SHA-256 hash is kept in memory. |
 | `LUMEWARP_MAX_SNAPSHOT_BYTES` | `67108864` (64 MiB) | Compilation fails above this serialized size. |
 | `LUMEWARP_MAX_SNAPSHOT_KEYS` | `200000` | Compilation fails above this key count. |
 | `LUMEWARP_GRPC_MAX_MESSAGE_BYTES` | `67108864` (64 MiB) | gRPC send/receive limit, additionally capped by grpcio's hard limit. |
@@ -91,6 +91,10 @@ case-insensitive. `src/lumewarp_control_plane/settings.py` is the source of trut
 | `LUMEWARP_CONFIG_VERSIONS_RETAINED` | `50` | Versions whose payloads compaction keeps (the latest is always kept; session-pinned bases are kept too). |
 | `LUMEWARP_MAX_USAGE_BATCH_EVENTS` | `10000` | Maximum events per `UsageService.Report` (1–10000; keeps asyncpg's parameter count in range). |
 | `LUMEWARP_BACKGROUND_ENABLED` | `true` | Start gRPC and the loops in `serve`. Tests set `false`; keep it true in production. |
+
+To rotate a gateway token, set the same new value in the control plane's zone variable and
+the gateway's environment variable, then restart both processes so they load it. There is
+no grace period; gateways continue serving their last good snapshot while reconnecting.
 
 Sign-in, session, authorization backend and key reconciler settings are listed in
 [Sign-in and authorization](./identity.md).

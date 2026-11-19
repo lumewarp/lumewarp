@@ -9,7 +9,13 @@ Normative rules for `lumewarp.config.v1.ConfigService` and `lumewarp.usage.v1.Us
 - **Desired version**: the latest published version for a zone.
 - **ACKed version**: per gateway (one process, one stream), the last version it confirmed.
 
-`Snapshot.zone` identifies the configuration boundary. The zone is derived from the authenticated gateway-token row, not selected by the gateway: `Hello.zone` must match the token's zone when non-empty. A new gateway with no cached snapshot sends an empty `Hello.zone`; the control plane binds it to the token's zone and the first full snapshot sets the zone.
+`Snapshot.zone` identifies the configuration boundary. Both RPCs authenticate with
+`authorization: Bearer <token>` and identify the zone with `x-lumewarp-zone`. The token is
+the fixed value configured for that zone on the control plane; the gateway sends the same
+zone in `Hello.zone` on every stream, even when it has no cached snapshot. A mismatch
+between `Hello.zone` and the metadata fails with `FAILED_PRECONDITION`. An unknown zone or
+wrong token fails with `PERMISSION_DENIED` and the same message; an archived zone fails
+with `FAILED_PRECONDITION`.
 
 ## Control plane: publishing
 
@@ -24,9 +30,10 @@ Normative rules for `lumewarp.config.v1.ConfigService` and `lumewarp.usage.v1.Us
 
 ```
 gateway                                   control plane
-  |-- Hello{gateway_id, have_version, zone,
+  |-- Hello{have_version, zone, hostname,
   |         supported_capabilities, plugins, plugin_abi, shared_limits} -->
-  |                                       authenticate token; derive zone and bind gateway_id
+  |                                       authenticate token and zone; assign gateway id
+  |<-- Welcome{gateway_id} -----------------------------------------------
   |<-- full(desired) or delta(have_version -> desired) ---------------
   |   apply privately, persist, swap
   |-- Ack{version} or Nack{version, code, have_version} ------------->
@@ -36,13 +43,13 @@ gateway                                   control plane
 - **At most one un-ACKed update per session.** If several versions are published while one is pending, the next update goes straight from the session's ACKed version to the current desired version (delta if the base is retained, otherwise full).
 - Besides updates, the control plane may send a `ProbeRequest` on the same stream. It is not a configuration version and is never ACKed or NACKed ([Probes from the control plane](#probes-from-the-control-plane)).
 - The base of a delta is always the session's ACKed version (or Hello.have_version before the first ACK) — never a global "last sent" version.
-- The first update after Hello is a delta only when `Hello.zone` matches the token-derived zone, `have_version` is retained there, `have_version <= desired` and `Hello.have_digest` equals that zone's stored digest for `have_version`; otherwise full. Until the first ACK after a full, the session has **no** delta base (a NACKed full is never followed by a delta).
+- `Welcome` is the first message on every accepted stream and carries the control-plane-assigned gateway id. The first config update follows it. A delta is sent only when `Hello.zone` matches the authenticated metadata zone, `have_version` is retained there, `have_version <= desired` and `Hello.have_digest` equals that zone's stored digest for `have_version`; otherwise full. Until the first ACK after a full, the session has **no** delta base (a NACKed full is never followed by a delta).
 - Digest = `config_versions.digest` (sha256 of the control plane's serialized payload). It is sent as `ConfigUpdate.target_digest`; the gateway treats it as opaque, persists it with the snapshot and echoes it in `Hello.have_digest` (serialization is not byte-identical across languages, so the gateway never recomputes it). `have_version > desired` (control plane restored from backup) → full.
 
 - `Hello.plugins` lists a `PluginDescriptor` per plugin the gateway has: built-ins and the WASM components loaded from its three plugin directories at startup. A descriptor carries the kind (`router-strategy`, `upstream-auth`, `a2a-middleware`), name, title, description, `builtin`, the params JSON Schema, the router-only `uses_weight`/`needs`/member schema, the component's `wasm_sha256` (empty for built-ins) and a `digest` that changes whenever any other field does. `Hello.plugin_abi` is the WIT package major version the gateway hosts (1). The list is untrusted and only informs the API and UI, which validate writes against its schemas: nothing in it can end the stream, and it does not gate snapshots, which `supported_capabilities` and the gateway's own `configure` still do. [Gateway plugins](plugins.md) has the manifest and schema rules.
   - Normalized off the event loop: at most 128 plugins per kind per gateway, descriptors first, then that kind's capabilities, names matching `^[a-z][a-z0-9_]{0,62}$`; each schema capped at 16 KiB and restricted to a subset, or dropped. The rest is ignored, logged and counted in `lumewarp_cp_gateway_plugins_ignored_total`. Other capabilities are capped at 64, of at most 128 characters each. The session's stored capabilities list every kept plugin.
-  - The status row and the stored descriptors change in one transaction, under that row's lock, and only for the session owning the row. Session ids move forward, so a slower older connection neither overwrites a newer one's report nor replaces its stream: it ends with `UNAVAILABLE`. A reader sees one Hello, never parts of two.
-  - A Hello replaces all that gateway reported before. A gateway counts while the token of its latest Hello is unrevoked and it is connected or was disconnected less than 24 h ago (its row is deleted then); a report counts while the token that made it is unrevoked. A connected gateway has what its latest Hello lists, an offline one what it last reported.
+  - The status row and the stored descriptors change in one transaction, under that row's lock, and only for the session owning the row. Every accepted stream has its own assigned id and row, so reconnects do not replace the prior stream's row. A reader sees one Hello, never parts of two.
+  - A Hello supplies the capabilities and plugin descriptors for its stream's row. A disconnected row remains for 24 hours and is then deleted with its plugin reports. A connected gateway has what its Hello lists; a disconnected row retains its last report.
 - ACK/NACK must name the session's pending version; anything else is a protocol error and the control plane closes the stream.
 - NACK handling:
   - `BASE_MISMATCH` → send full(desired).
@@ -55,9 +62,14 @@ gateway                                   control plane
 
 ### Gateway sessions
 
-A gateway is one process and one zone. At startup it generates its id (`<hostname>-<8 hex>`) and sends it as `Hello.gateway_id`; the id is fixed for the process lifetime, and a restart is a new gateway. The token authenticates one zone: any number of gateways in that zone may use one token, and no id is bound to it.
+A gateway is one process and one zone. `Hello` carries the zone and the process hostname,
+but no gateway id. Once the control plane accepts the handshake, its first stream message is
+`Welcome { gateway_id }`, with an id of `<hostname>-<8 hex>`. The control plane sanitizes the
+hostname for that id. Every stream gets a new id and row, including a reconnect; the previous
+row remains disconnected for 24 hours before cleanup. Any number of gateway processes in a
+zone may use its fixed token.
 
-- `Hello.gateway_id` is required in control-plane mode: 1–100 of `[A-Za-z0-9._-]`; empty or otherwise malformed is `INVALID_ARGUMENT`. The control plane keys the session by `(zone, gateway_id)`. A new connection with the same id replaces the previous stream; a stale connection ends with `UNAVAILABLE`.
+- `Hello.gateway_id` is reserved and is not sent. The control plane assigns the id in `Welcome`, and the gateway uses that current id on usage reports. Before the first `Welcome`, reports carry an empty id and are attributed to no gateway.
 - `Hello.shared_limits { enabled, namespace }` says whether the gateway shares its rate-limit counters and under which namespace. It is display only: the control plane shows it on the Gateways page and derives no behaviour from it. Connected gateways may disagree during a rollout; the API shows each value.
 - Each gateway has its own ACKed version, pending update, last NACK, capabilities and plugin reports. `GET /api/v1/gateways` has one row per gateway, connected first; a disconnected row stays for 24 h and is then deleted with its plugin reports.
 - A capability or plugin counts as available only if **every** connected gateway reports it; otherwise the version needing it would be NACKed by the gateways that lack it, so the compiler warns and a save needs `force`.
@@ -397,7 +409,11 @@ swaps; scrapers, like probes, are diffed only after a snapshot is accepted.
 
 ## Usage reporting and attribution
 
-- The report carries the reporting gateway's own id (`ReportRequest.gateway_id`), the same value as its `Hello.gateway_id`: 1–100 of `[A-Za-z0-9._-]`. The gateway token determines the event's zone; the control plane attributes it to that zone and gateway id, not to a zone claim in the report. An empty or invalid id fails the whole batch with `INVALID_ARGUMENT`.
+- The report carries the id most recently assigned in `Welcome.gateway_id`
+  (`ReportRequest.gateway_id`): 1–100 of `[A-Za-z0-9._-]`, or empty before the first
+  `Welcome`. An empty id is accepted and attributed to no gateway; a nonempty malformed id
+  fails the batch with `INVALID_ARGUMENT`. The `x-lumewarp-zone` metadata, authenticated
+  against the fixed token, determines the event's zone; the report has no zone field.
 - Usage is attributed to the key's team and to the key's owner (a team member or a service
   account). The event's `team_id` must match the key; the owner is read from the key, never
   from the event. There is no project level.

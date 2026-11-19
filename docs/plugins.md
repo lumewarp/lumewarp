@@ -139,7 +139,13 @@ A write is a router, an MCP server, an A2A agent or an LLM upstream that names a
 
 A rollback re-checks restored routers, MCP servers and A2A agents; it restores an LLM upstream's plugin without re-checking it, so a gateway lacking the plugin NACKs that version.
 
-Which gateways count: a gateway is one process, named by `Hello.gateway_id`; any number may share a token. It counts while the token of its latest `Hello` is unrevoked and it is connected or was disconnected less than 24 h ago, when its row is deleted; a connected gateway has what its latest `Hello` lists, an offline one what it last reported. A plugin or capability is available only while every connected gateway reports it. A report counts while the token that made it is unrevoked. Each `Hello` replaces the gateway's reports under its session row lock, and a reader sees one `Hello`, never parts of two.
+Which gateways count: one gateway row represents one accepted config stream. The control
+plane assigns its id in the stream's first `Welcome`; every reconnect gets a new id and row.
+Any number of gateways may share the zone's fixed environment token. A disconnected row
+remains for 24 hours and is then deleted with its plugin reports. A disconnected gateway
+does not block a write, but its last descriptor may be used for validation when no gateway
+is connected. A plugin or capability is available for writes only while every connected
+gateway reports it. Plugin reports are scoped to their gateway row, not to the token value.
 
 Each gateway counts for at most 128 plugins per kind: descriptors first, then that kind's capabilities, with the names above. The rest of a `Hello` is ignored, logged and counted by the control plane; the stream stays up.
 

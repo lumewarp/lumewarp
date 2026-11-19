@@ -24,22 +24,30 @@ limits and budgets in different zones without duplicating its membership.
 ## Switch zones
 
 The zone switcher is at the left of the Admin UI header. It changes the zone shown on
-zone-aware pages and adds the zone's colour to the header. The choice is remembered per tab;
+zone-aware pages; the colour dot next to the zone's name tells zones apart. The choice is remembered per tab;
 a new tab starts with the last selected zone. Global pages such as Users and model
 definitions do not become zone-specific when you switch.
 
-The switcher menu also gives installation admins **New zone** and **Manage zones**. The
-Zones page is not a sidebar item.
+The switcher menu gives installation admins **Manage zones**. The Zones page is not a
+sidebar item.
 
-## Create and configure a zone
+## Declare and configure a zone
 
-Only installation admins can create, edit or archive zones. Any signed-in user can see the
-live zones in the switcher. A new zone starts empty: create its upstreams, add deployments
-for the models it should serve, register any MCP servers or A2A agents, and connect gateways
-with tokens for that zone.
+The control plane creates the default zone named by `LUMEWARP_ZONE` at startup. It also
+creates a zone for each `LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN` environment variable, where
+`<ID>` is the zone ID upper-cased with `-` replaced by `_`. Each token must be at least 32
+characters. The control plane reads the values at startup and keeps only their SHA-256
+hashes in memory. There is no zone-creation UI or API; adding a zone means configuring its
+environment token and restarting the control plane. A zone without a token is shown on the
+Zones page as not configured for gateway access.
 
-A zone has an immutable lowercase name (the gateway/config identifier), a display name and
-a colour. Its settings also define key rules: the minimum creator role, the maximum key
+Only installation admins can edit or archive zones. Any signed-in user can see the live
+zones in the switcher. A new zone starts empty: create its upstreams, add deployments for
+the models it should serve, register any MCP servers or A2A agents, and connect gateways
+using its token.
+
+A zone has an immutable lowercase ID (the slug gateways pass as `--zone` and the API uses),
+a name shown in the Admin UI, which can be changed, and a colour. Its settings also define key rules: the minimum creator role, the maximum key
 lifetime, whether expiry is required, the maximum number of user keys per member, whether
 service-account keys are allowed, and whether the Playground is allowed. Empty maximums
 leave that zone without an additional cap; a team's own key limits still apply. Changing a
@@ -57,17 +65,45 @@ An empty URL makes Playground unavailable for that zone.
 
 Archiving is available from **Manage zones**. It is refused for the default zone, while any
 gateway is connected, or while any key in the zone is not revoked. Disconnect the gateways
-and revoke the remaining keys before trying again. On archive, the zone's unrevoked gateway
-tokens are revoked and the compiler stops publishing configurations for it. The zone is
-retained as archived history and cannot be edited or used as a live zone.
+and revoke the remaining keys before trying again. The compiler stops publishing
+configurations for an archived zone, and handshakes for it fail with `FAILED_PRECONDITION`
+even if its environment token remains configured. The Zones page shows when an archived
+zone still has a token configured. Startup does not un-archive a zone and logs a warning
+when an environment token names an archived zone. The zone is retained as archived history
+and cannot be edited or used as a live zone.
 
-## Keys and gateway tokens
+## Connect a gateway to a zone
 
-A gateway token authenticates exactly one zone. Any number of gateway processes may share a
-token, but each process serves only that zone. A key also belongs to exactly one zone; its
-zone cannot be changed by rotation. A key sent to a gateway for another zone is not present
-in that gateway's snapshot and will not authenticate. The key's zone selects its catalog
-deployments, rate limits, budget and usage accounting.
+A gateway serves the zone selected by `--zone`. Configure the zone's fixed token on the
+control plane and provide the same secret to the gateway. For a zone named `prod`, the
+control-plane variable is `LUMEWARP_GATEWAY_ZONE_PROD_TOKEN`:
+
+```sh
+export LUMEWARP_GATEWAY_ZONE_PROD_TOKEN='replace-with-a-random-secret-at-least-32-characters'
+
+# Set the same value in the gateway's environment:
+export LUMEWARP_GATEWAY_TOKEN='replace-with-a-random-secret-at-least-32-characters'
+lumewarp \
+  --control-plane http://control-plane:50051 \
+  --gateway-token-env LUMEWARP_GATEWAY_TOKEN \
+  --state-dir /var/lib/lumewarp --zone prod
+```
+
+The environment token is read by the control plane at startup. The gateway sends it with
+the zone on both config and usage RPCs; `--zone` must match the token's zone. The cached
+snapshot in `--state-dir` names its zone, so moving a gateway to another zone needs a new
+state directory. Rotation has no grace: update both environments and restart the control
+plane and gateway. The gateway keeps serving its last good snapshot while it reconnects.
+The gateway then appears on the **Gateways** page of that zone. See
+[Gateway](../operations/gateway.md) for the other flags.
+
+## Keys and gateway access
+
+The fixed gateway token authenticates exactly one zone. Any number of gateway processes may
+share it, but each process serves only that zone. A client API key also belongs to exactly
+one zone; its zone cannot be changed by rotation. A key sent to a gateway for another zone
+is not present in that gateway's snapshot and will not authenticate. The key's zone selects
+its catalog deployments, rate limits, budget and usage accounting.
 
 There is no zone component in client request paths. Configure the client with the gateway
 URL for the zone and the key created in that zone. The `/v1/models` response is the names

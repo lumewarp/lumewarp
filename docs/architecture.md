@@ -60,7 +60,7 @@ Admin UI 的呈現層全部是 shadcn/ui 元件（底層 Radix），版面用 Ta
 
 1. 管理者在 UI/API 改設定，寫入 Postgres 並留稽核紀錄。
 2. Config compiler 依 zone 編譯 org、team 與 key owner 的有效策略和該 zone 的部署，產生已解析的 protobuf 快照與遞增版本，發布前驗證。
-3. gateway 使用 zone token 訂閱 gRPC 串流，先收全量，之後收 delta（例如新增／撤銷 API key）。
+3. gateway 使用 zone 的固定環境 token 訂閱 gRPC 串流，送出 zone metadata，先收到 Welcome，再收全量與 delta（例如新增／撤銷 API key）。
 4. gateway 背景建好新索引，ArcSwap 原子替換；成功回 ACK，失敗回 NACK 並保留舊版。
 5. 最後一份成功快照寫到本地磁碟，control plane 掛掉仍可重啟服務。
 6. 回滾是 installation-wide：還原該版本的 catalog state，再依每個 zone 的資源重新編譯；不是只重播一個 zone 的舊快照。
@@ -71,15 +71,17 @@ Admin UI 的呈現層全部是 shadcn/ui 元件（底層 Radix），版面用 Ta
 
 ### Zone（設定區域）
 
-Zone 是設定與資料流量的邊界，與 org／team／user／role／grant 階層正交。Org、team、成員、角色、授權，以及 model／alias／router 的定義與名稱都是全域共用；每個 zone 各自擁有 upstream、model deployment、MCP server、A2A agent、gateway process 與 token、API key、rate limit、budget、usage 和 config version。相同 team 可在不同 zone 有不同的限額與預算，無須複製身分或授權資料。
+Zone 是設定與資料流量的邊界，與 org／team／user／role／grant 階層正交。Org、team、成員、角色、授權，以及 model／alias／router 的定義與名稱都是全域共用；每個 zone 各自擁有 upstream、model deployment、MCP server、A2A agent、gateway process 與固定 token、API key、rate limit、budget、usage 和 config version。相同 team 可在不同 zone 有不同的限額與預算，無須複製身分或授權資料。
 
 一個 control plane compiler task 逐一處理所有 live zones。全域階層寫入在固定的 hierarchy advisory lock 下，為每個 live zone 建立自己的 outbox row，將 source revision 一起推進；zone-bound 寫入只更新該 zone。compiler 對每個 zone 使用獨立的發布 advisory lock、transaction、outbox 與版本序列，因此某個 zone 的編譯錯誤不會阻塞其他 zone。
 
-Gateway token 不在查詢時由 gateway 自選 zone：control plane 以 token hash 找到 gateway token row，該列的 zone 就是 gRPC identity。`Hello.zone` 必須符合 token zone（初次連線、沒有快照時可為空），`Snapshot.zone` 與 gateway 的 `--zone`／`LUMEWARP_ZONE` 相符；session、health、plugin 支援與 quarantine 都按 `(zone, gateway_id)` 隔離。任意數量 gateway process 可共用同 zone token，每個 process 有自己的 gateway id。
+控制平面從 `LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN` 讀取各 zone 的固定 token；`<ID>` 是 zone ID 大寫並將 `-` 換成 `_`，token 至少 32 個字元。每個環境 token 會在啟動時建立對應 zone；zone 不再由 UI／API 建立。控制平面只在記憶體保留 token 的 SHA-256 hash。Gateway 在 config 與 usage 兩個 RPC 都送出 `authorization: Bearer <token>` 和 `x-lumewarp-zone`；`Hello.zone` 一律填入 `--zone`，必須與 metadata 相同。未知 zone 與錯誤 token 都回相同訊息的 `PERMISSION_DENIED`；已封存 zone 回 `FAILED_PRECONDITION`，啟動時不會自動解除封存。缺少 token 的 zone 仍保留資料並顯示未設定。輪替時兩端都更新同一 secret 並重啟控制平面與 gateway，沒有寬限期；gateway 重新連線時持續服務最後一份快照。
+
+Session、health、plugin 支援與 quarantine 都按 `(zone, gateway_id)` 隔離。控制平面在每條串流的第一則 `Welcome` 指派 `<hostname>-<8 hex>` gateway id；每條串流（包括 reconnect）都是新 id 與新列。Usage report 使用最近收到的 Welcome id；第一次 Welcome 前的 report 不帶 gateway id，且不歸屬任何 gateway。任意數量 gateway process 可共用同 zone token。
 
 Catalog 名稱仍是全域唯一。`Model` 是全域定義，`ModelDeployment(name_id, zone)` 才把 model 綁到同 zone 的 upstream、upstream model 與 probe 設定；MCP server 與 A2A agent 也各自屬於一個 zone。compiler 只讀該 zone 的 targets/deployments，沒有 deployment 的 model 不輸出；router member、traffic split member 或 fallback 若無部署會被略過並發出「not available in this zone」警告，空 router 和目標不可用的 alias 也會略過。每個 zone 都由共享的全域 model／router／alias 定義編譯出不同 snapshot。
 
-API key 建立時綁定一個 zone，rotate 不會更換 zone；compiler 只把它放入該 zone 的 snapshot。`zone_limits` 和 `zone_member_defaults` 保存 org／team／member／service account 各層的 per-zone 限流、預算與 team member defaults。Usage event 由已驗證 key 的 zone 標記，`usage_totals`、org budget window、Usage、Leaderboard、Requests 與 Playground 都按 zone 分開；API 未指定 zone 時可查全部 zone。`LUMEWARP_ZONE` 指定啟動時建立的 default zone；installation admins 透過 Admin UI 管理其他 zones。Archive 會撤銷該 zone 的 gateway tokens 並停止編譯，但在 default zone、有連線 gateway 或仍有未撤銷 key 時拒絕。
+API key 建立時綁定一個 zone，rotate 不會更換 zone；compiler 只把它放入該 zone 的 snapshot。`zone_limits` 和 `zone_member_defaults` 保存 org／team／member／service account 各層的 per-zone 限流、預算與 team member defaults。Usage event 由已驗證 key 的 zone 標記，`usage_totals`、org budget window、Usage、Leaderboard、Requests 與 Playground 都按 zone 分開；API 未指定 zone 時可查全部 zone。`LUMEWARP_ZONE` 指定啟動時建立的 default zone；installation admins 透過 Admin UI 編輯與封存 zones。Archive 會停止編譯並拒絕該 zone 的 gateway handshake，但在 default zone、有連線 gateway 或仍有未撤銷 key 時拒絕。環境中仍有該 zone token 時也不會解除封存。
 
 ## 功能
 
@@ -89,12 +91,12 @@ API key 建立時綁定一個 zone，rotate 不會更換 zone；compiler 只把�
 - 管理端登入：Authorization Code + PKCE 由 control plane 後端完成（Authlib），之後發伺服器端 session（httpOnly、`SameSite=Lax` cookie，寫入需 `X-Lumewarp-CSRF`）；以 `iss`+`sub` 認人；任何通過 IdP 驗證的使用者都能登入，首次登入 JIT 建立零權限使用者（只接受已驗證 email（`LUMEWARP_OIDC_REQUIRE_EMAIL_VERIFIED=false` 可關閉此檢查，預設 true，初始管理員 bootstrap 同樣適用）；`LUMEWARP_OIDC_JIT_USERS=false` 時只能登入已存在的帳號，唯一例外是還沒有 `proxy_admin` 時符合 `LUMEWARP_INITIAL_ADMIN_EMAIL` 的首次登入）。程式呼叫管理 API 用 PAT（bearer 只接受 PAT）。登入過程的 nonce 與 PKCE code verifier 不進 DB，放在用 `LUMEWARP_SECRET_KEY` 做 AES-256-GCM 封存的登入 cookie；沒設金鑰時服務拒絕啟動。
 - IdP 只負責認證，不授予任何 Lumewarp 角色：groups／roles claim 一律忽略。安裝層角色存在 Postgres 的 `installation_admins`（`proxy_admin` 唯一，`admin` 可多人），每次請求讀取，撤銷在下一個請求生效；org 與 team 的 admin／member 關係只來自授權後端（安裝層角色永遠讀 Postgres）。IdP 與 IAM 的人員狀態同步由部署方負責。
 - 緊急登入（break-glass）：`POST /api/v1/session/break-glass` 用密碼換 session cookie，IdP 或 IAM 故障時仍可管理。生產用 argon2id hash（`LUMEWARP_BREAK_GLASS_PASSWORD_HASH`），明文密碼要 `LUMEWARP_DEV_MODE=true`。這個 session 不是使用者，不問授權後端；有 TTL（預設 1 小時，上限 4 小時）、失敗延遲與次數限制、可限制來源網段，嘗試都寫稽核，換密碼立刻失效。
-- gateway 憑證只有虛擬 API key（只存 hash）；JWT／mTLS 呼叫 gateway 延後。
+- 用戶端呼叫 gateway 時只使用虛擬 API key（只存 hash）；gateway 連接 control plane 則使用每 zone 固定環境 token。JWT／mTLS 用戶端認證延後。
 - 停權時推撤銷 delta，所有 gateway 秒級內拒絕：內建後端在移除成員的同一交易停用 key；外部 IAM 由 key reconciler 讀變更串流，約 5 秒內停用；IAM 錯誤或逾時絕不停用 key。
 
 ### 憑證儲存與稽核
 
-- DB 只存不可逆或不可用的形式。API key、PAT、gateway token、session／CSRF token 與 OIDC state 只存 sha256：它們是 256-bit 隨機值，快速 hash 就足以防離線猜測。OIDC 的 nonce 與 PKCE code verifier 只放在 AES-256-GCM 封存的登入 cookie（金鑰由 `LUMEWARP_SECRET_KEY` 派生），`oidc_login_states` 只有 state hash、return path、redirect URI 與到期時間，用過即刪；SSO 開啟但沒設金鑰時服務拒絕啟動。Helm 以 `controlPlane.extraEnv` 的 `secretKeyRef` 傳入，範例見 [Helm 部署](./operations/helm.md#sso-and-authorization-backend)。
+- 憑證只以不可逆或不可用的形式保存。API key 與 PAT 在 DB 只存 sha256；gateway zone token 由控制平面讀取環境變數，僅在記憶體保留其 SHA-256 hash。Session／CSRF token 與 OIDC state 也只存 sha256。OIDC 的 nonce 與 PKCE code verifier 只放在 AES-256-GCM 封存的登入 cookie（金鑰由 `LUMEWARP_SECRET_KEY` 派生），`oidc_login_states` 只有 state hash、return path、redirect URI 與到期時間，用過即刪；SSO 開啟但沒設金鑰時服務拒絕啟動。Helm 以 Secret 傳入 OIDC 金鑰，範例見 [Helm 部署](./operations/helm.md#sso-and-authorization-backend)。
 - Upstream API key 有兩種來源，擇一（或用下一項的 WASM auth plugin）：`api_key_ref`（gateway 環境變數名稱）或在 API 輸入的 key。輸入的 key 以 AES-256-GCM 封存在 `upstreams.api_key_ciphertext`（金鑰由 `LUMEWARP_ENCRYPTION_KEY` 以 HKDF 派生，與 `LUMEWARP_SECRET_KEY` 分開），API 只回 `api_key_set`，稽核只記 `credential_changed`。snapshot 帶密文（capability `encrypted_api_key`），gateway 用同一把 `LUMEWARP_ENCRYPTION_KEY` 在套用 snapshot 時解開，不在請求路徑上；落地的 snapshot 也只有密文。gateway 沒有或金鑰不符時 NACK `INVALID_CONFIG`。換這把金鑰後，已存的 key 必須重新輸入。Helm 以 `encryptionKey.secretName` 同時傳給 control plane 與 gateway。
 - LLM upstream 也可改用 WASM `upstream-auth` plugin（`Upstream.auth`；只接受 WASM，內建 `none`／`static_bearer`／`passthrough` 只給 MCP／A2A，且與 API key 擇一，capability `auth:<plugin>`）；params 只放設定、不放 secret，secret 從 `LUMEWARP_PLUGIN_SECRET_*` 讀。細節見下面「Gateway plugin」。
 - `upstreams.metrics_url` 不帶 query string（`?token=...` 會把憑證放進 API 會回傳、也會進稽核的欄位）；API 與 compiler 都拒絕帶 query 或 userinfo 的值。
@@ -156,7 +158,7 @@ API key 建立時綁定一個 zone，rotate 不會更換 zone；compiler 只把�
 - Key 建立／編輯可設 `rpm_limit`、`tpm_limit`、`max_parallel`，只能收窄 key owner 在該 zone 的有效 limits。建立還會套用該 zone 的最小 creator role、expiry、lifetime、member key count、service-account key 與 Playground 規則。相同 Redis endpoint 與 namespace 的 gateways 才共享 rate limits；否則每個 gateway 各自計數。
 - 存取變更：受保護頁面每次進入都重驗 `/users/me`。快取允許時頁面先掛上，背景重驗發現權限被收回就換成「沒有權限」；快取拒絕時先等重驗。用網址打開看不到的頁面只顯示說明，不對該 team 發請求。
 - 授權後端不可用時顯示「暫時無法確認、這不是拒絕」的狀態（`authz_unavailable`），管理 API 回 503；My keys 不會把它當成「沒有 team」。
-- 一次性 secret：建立或輪替 key、建立 PAT 與 gateway token 的 secret 由 root 的同一個對話框顯示，只有「I've saved it」能關（Esc、點擊外部、標頭的 X 都無效）。它在換頁、背景檢查失敗與 session 過期（401 轉到登入頁）後仍顯示，因為對話框在 router 與 guard 之上；登出會清掉，重新載入頁面則消失。secret 不進 query cache；mutation 快取裡只有不含 secret 的結果。
+- 一次性 secret：建立或輪替 key、建立 PAT 的 secret 由 root 的同一個對話框顯示，只有「I've saved it」能關（Esc、點擊外部、標頭的 X 都無效）。它在換頁、背景檢查失敗與 session 過期（401 轉到登入頁）後仍顯示，因為對話框在 router 與 guard 之上；登出會清掉，重新載入頁面則消失。secret 不進 query cache；mutation 快取裡只有不含 secret 的結果。Gateway token 由部署環境設定，不在 UI 顯示。
 
 ### Router
 
@@ -297,16 +299,16 @@ LLM upstream auth 另輸出 `upstream_auth` span（upstream、plugin、method、
 
 - 單一 Python 程序：FastAPI（HTTP 8091）＋ gRPC（50051）的 ConfigService／UsageService／health，加上 compiler loop 與月結 rollover；`/readyz` 檢查 DB、migration head 與背景服務，`/healthz` 為 liveness，gRPC 意外停止會讓程序結束。
 - Postgres schema 由 Alembic 管理，多個 zones 共用一套安裝層身分與目錄；每人 PAT；授權為安裝層管理員、org admin 與 team admin／member，成員關係在 `team_members`，每人例外 grants 在獨立的 `member_policies`，也可換成外部 `lumewarp.authz` 後端。
-- REST `/api/v1`：org（建立、改名與政策、封存、org admin、用量彙總）、team／member／service account／key（含撤銷與輪替）、預算／限流／模型 allowlist、upstream／model／router（含價格、upstream auth plugin、已存設定的 Test now）、MCP server（含定義清單、核准／拒絕、Discover now）與 A2A agent、`/plugins`（三種 kind 的唯讀 descriptor）、使用者、安裝層角色（`/installation-admins`）、usage 聚合、request log（`/requests`）、audit、gateway 狀態與 token、config versions 與 routing rollback。
-- 設定發布：全域 hierarchy 寫入交易內為每個 live zone 更新 source revision 並寫各自 outbox，zone-bound 寫入只觸及其 zone；單一 compiler loop 逐 zone 以 advisory lock 序列化，產生不可變版本快照。gRPC 串流支援全量／delta、digest、ACK／NACK、base mismatch 重送全量、zone 內壞版本隔離與 persist 重試，舊版 payload 依保留策略壓縮。`settings.zone`（預設 `default`）的 zone 列由 control plane 啟動時建立；`bootstrap --zone` 是給自動化安裝用的選用 CLI（產生指定 zone 的 `lwg-` token，不必先進 UI）。
+- REST `/api/v1`：org（建立、改名與政策、封存、org admin、用量彙總）、team／member／service account／key（含撤銷與輪替）、預算／限流／模型 allowlist、upstream／model／router（含價格、upstream auth plugin、已存設定的 Test now）、MCP server（含定義清單、核准／拒絕、Discover now）與 A2A agent、`/plugins`（三種 kind 的唯讀 descriptor）、使用者、安裝層角色（`/installation-admins`）、usage 聚合、request log（`/requests`）、audit、gateway 狀態與刪除離線 gateway、config versions 與 routing rollback。
+- 設定發布：全域 hierarchy 寫入交易內為每個 live zone 更新 source revision 並寫各自 outbox，zone-bound 寫入只觸及其 zone；單一 compiler loop 逐 zone 以 advisory lock 序列化，產生不可變版本快照。gRPC 串流支援全量／delta、digest、ACK／NACK、base mismatch 重送全量、zone 內壞版本隔離與 persist 重試，舊版 payload 依保留策略壓縮。`settings.zone`（預設 `default`）與每個 `LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN` 都會在 control plane 啟動時建立 zone；UI/API 不建立 zone。Gateway token 不再由 CLI 建立。
 - Test now 與 probe：沒有 plugin 的 upstream／model 由 control plane 直連（未存檔可測）；有 WASM auth plugin 的須先存檔，`POST /upstreams/{id}/test`、`POST /models/{model_id}/deployments/{zone}/test` 經 zone config stream 的 `ConfigUpdate.probe`（`ProbeRequest{request_id, upstream, model}`）交給一個已連線、廣告 `upstream_probe`（plugin upstream 另需 `auth:<plugin>`）的 gateway，對它當下的 snapshot 執行；gateway 回 `GatewayMessage.probe_result`（`ProbeResult{request_id, ok, status, latency_ms, error_class}`），不回 upstream body，probe 也不是版本、不 ACK／NACK。control plane 用 request_id 對應並自己計時（504 `probe_timeout`），沒有合適 gateway 回 409 `no_gateway_for_plugin`，gateway 斷線回 502 `probe_gateway_gone`；只涵蓋與該 process 有連線的 gateway。
-- 用量與預算：`UsageService.Report` 依 token-derived zone 和 `request_id` 冪等寫入，同一交易在該 zone 累計 team 與 owner（member／service account）的 UTC 月總額並評估預算；org 花費由該 zone 旗下 team 加總，只有該 zone 設了預算才檢查，超額寫該 zone 的 `org_budget_windows` 與 audit；調高或移除預算會清掉該 zone 當月 window。超額把 key 翻成 `BUDGET_EXCEEDED` 並推新版本（eventual，約 5 秒內；不切斷進行中的串流）。
+- 用量與預算：`UsageService.Report` 依 `x-lumewarp-zone` metadata 和 `request_id` 冪等寫入，同一交易在該 zone 累計 team 與 owner（member／service account）的 UTC 月總額並評估預算；gateway id 來自最近一次 `Welcome`，Welcome 前的 report 不歸屬 gateway。org 花費由該 zone 旗下 team 加總，只有該 zone 設了預算才檢查，超額寫該 zone 的 `org_budget_windows` 與 audit；調高或移除預算會清掉該 zone 當月 window。超額把 key 翻成 `BUDGET_EXCEEDED` 並推新版本（eventual，約 5 秒內；不切斷進行中的串流）。
 - Plugin：Python 的 `lumewarp.auth`（首次 SSO 登入的身分對應）與 `lumewarp.authz`（授權後端）已接上；gateway 端的 `router-strategy`、`upstream-auth`、`a2a-middleware` 是 WASM，由 gateway 自己載入，control plane 只驗證 gateway 在 `Hello.plugins` 回報的 schema。
-- Admin UI：Vite 靜態檔由 control plane 掛在 `/`，用 SSO 或緊急登入；header zone switcher 切換 zone-aware pages，installation admins 可由選單建立／編輯／封存 zones。API 文件在 `/docs`，OpenAPI 可離線輸出。UI 沒 build 時只有 API。MCP servers 與 A2A agents 各有列表與編輯頁（A2A 編輯頁有 card 預覽），Plugins 頁唯讀列出哪台 gateway 載了什麼；team／member 的政策編輯含 MCP server／tool 與 agent grant；Usage 有 LLM／MCP／A2A 三個分頁，Requests 頁一列一個請求並可依名字、狀態、team、key、owner 與時間篩選；My keys 的 team 展開列顯示 MCP server／tool 與 A2A agent grant，team admin 另有 service account key 表。
+- Admin UI：Vite 靜態檔由 control plane 掛在 `/`，用 SSO 或緊急登入；header zone switcher 切換 zone-aware pages，installation admins 可由選單編輯／封存 zones，zone 由啟動時的環境 token 宣告。API 文件在 `/docs`，OpenAPI 可離線輸出。UI 沒 build 時只有 API。MCP servers 與 A2A agents 各有列表與編輯頁（A2A 編輯頁有 card 預覽），Plugins 頁唯讀列出哪台 gateway 載了什麼；team／member 的政策編輯含 MCP server／tool 與 agent grant；Usage 有 LLM／MCP／A2A 三個分頁，Requests 頁一列一個請求並可依名字、狀態、team、key、owner 與時間篩選；My keys 的 team 展開列顯示 MCP server／tool 與 A2A agent grant，team admin 另有 service account key 表。
 
 **Gateway（`gateway/`）**
 
-- 新增 control-plane 模式：`--control-plane`、`--gateway-token-env`、`--state-dir`、`--zone`（`LUMEWARP_ZONE`）、`--local-config`；gateway id 由行程自己產生，沒有對應的旗標。standalone YAML 模式不變。
+- control-plane 模式使用 `--control-plane`、`--gateway-token-env`、`--state-dir`、`--zone`（`LUMEWARP_ZONE`）與選用的 `--local-config`；gateway 在 `Hello.hostname` 提供 hostname，control plane 在每條串流的第一個 `Welcome` 指派 gateway id。每次 reconnect 都會取得新 id。Standalone YAML 模式不變，`--config` 不建立 gRPC 連線，也不送 usage。
 - 開機先載入三種 plugin 目錄，再載入 `<state-dir>/snapshot.pb`（驗證 zone、長度與結尾 SHA-256）並立即服務，再背景連線；沒有可用快照時 `/v1/*` 與 `/readyz` 回 503，不會退回 open router。每次套用先持久化再 swap 再 ACK，重啟可回到最後 ACK 的版本。
 - MCP／A2A 端點（`/mcp`、`/mcp/servers/*`、`/a2a`、`/a2a/*`）與 LLM 端點共用同一個 listener；它們只讀設定快照與 `LUMEWARP_GATEWAY_ID_KEY`／`LUMEWARP_GATEWAY_PUBLIC_URL`，不碰資料庫或 control plane。
 - CP 模式一律要求 key；status／expiry／allowlist 與預算狀態照舊（401／403／429）。rpm、tpm、max_parallel 在本機判斷（rpm／tpm 為對齊牆鐘整分鐘的滑動窗口，max_parallel 為進行中請求數），設定 Redis 時跨 gateway 共享，429 帶 `Retry-After`。
@@ -315,7 +317,7 @@ LLM upstream auth 另輸出 `upstream_auth` span（upstream、plugin、method、
 
 **部署**
 
-- `deploy/helm/lumewarp`：control plane 與 gateway 的 Deployment／Service、DB URL 與 gateway token 的既有 Secret 參照、`/readyz`＋`/healthz` probes、gateway 多個 pod（同一個 token、每個 pod 各自產生 gateway id；預設 Deployment＋每個 pod 的 emptyDir，開啟持久化時改為 StatefulSet 每 pod 一個 PVC；選用 PDB 與 HPA）、選用的 Valkey（`valkey.enabled`，供共享限流）、plugin 目錄的 volume 掛載（三個子目錄與 `LUMEWARP_PLUGIN_MEMORY_LIMIT_BYTES`、`LUMEWARP_GATEWAY_ID_KEY`、`LUMEWARP_GATEWAY_PUBLIC_URL`）、migration hook Job、可選 ServiceMonitor。
+- `deploy/helm/lumewarp`：control plane 與 gateway 的 Deployment／Service、依 `LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN` 環境契約提供各 zone 的同一個固定 secret、`/readyz`＋`/healthz` probes、gateway 多個 pod（同一 zone 共用 token、每條串流由 control plane 指派 gateway id；預設 Deployment＋每個 pod 的 emptyDir，開啟持久化時改為 StatefulSet 每 pod 一個 PVC；選用 PDB 與 HPA）、選用的 Valkey（`valkey.enabled`，供共享限流）、plugin 目錄的 volume 掛載（三個子目錄與 `LUMEWARP_PLUGIN_MEMORY_LIMIT_BYTES`、`LUMEWARP_GATEWAY_ID_KEY`、`LUMEWARP_GATEWAY_PUBLIC_URL`）、migration hook Job、可選 ServiceMonitor。部署環境的設定方式見 [Docker](./operations/docker.md)、[Helm](./operations/helm.md) 與 [Kubernetes](./operations/kubernetes.md)。
 - `deploy/dev/compose.yaml` 提供本機 Postgres 16。
 
 **已知限制**
@@ -325,11 +327,11 @@ LLM upstream auth 另輸出 `upstream_auth` span（upstream、plugin、method、
 
 ### 跨 gateway 共享限流與多個 gateway
 
-- 一個行程就是一個 gateway：開機時產生 `<hostname>-<8 hex>` 的 id 放在 `Hello.gateway_id`，固定到行程結束；重啟就是新的 gateway。token 代表一個 zone、不綁定 id，同 zone 任意數量的 gateway 可以共用。
-- control plane 以 `(zone, gateway_id)` 管理 config stream 與 `gateway_sessions`；同一個 id 的新連線取代舊 stream，斷線的列保留 24 小時後刪除。每個 gateway 有自己的 ACK／pending／NACK、capability、plugin 回報與 shared-limits 顯示；`GET /api/v1/gateways` 一行一個 gateway，已連線的在前。
+- 一個行程就是一個 gateway process，服務一個 zone。Gateway 在 `Hello.hostname` 傳送 hostname；control plane 在該串流的第一個 `Welcome` 指派 `<hostname>-<8 hex>` 的 id。每條串流（包括 reconnect）都有新 id 和新 row；舊 row 斷線後保留 24 小時再刪除。token 代表一個 zone、不綁定 id，同 zone 任意數量的 gateway 可以共用。
+- control plane 以 `(zone, gateway_id)` 管理 config stream 與 `gateway_sessions`。每個 gateway row 有自己的 ACK／pending／NACK、capability、plugin 回報與 shared-limits 顯示；`GET /api/v1/gateways` 一行一個 gateway，已連線的在前。Usage report 帶最近一次 Welcome 指派的 id；第一次 Welcome 前的 report 沒有 gateway 歸屬。
 - 任一 gateway 以 `INVALID_CONFIG` NACK 某版本，該 zone 的所有 gateway 都隔離該版本（`gateway_quarantines`），之後才連上的 gateway 也一樣；已在該版本上的 gateway 會保留到下一版。`UNSUPPORTED_FEATURE`（缺 plugin／capability）只影響送出 NACK 的那個 gateway：其他 gateway 照常收到並套用該版本，缺功能的 gateway 留在前一版，之後每個仍需要該功能的版本都會再 NACK。capability 與 plugin 必須每個已連線 gateway 都回報才算可用；target 只要任一已連線 gateway 回報不健康就算不健康。
 - 限流演算法：rpm、tpm 為對齊牆鐘整分鐘的滑動窗口計數（前一分鐘依剩餘比例加權＋本分鐘），tpm 仍在用量確定後才扣；max_parallel 為進行中請求數。每個計數分成「本機」與「其他 gateway」兩部分。
-- 共享：設定 `LUMEWARP_SHARED_LIMITS_REDIS_URL` 時，背景工作每 `--shared-limits-sync-ms`（預設 100 ms，慢時自動加倍到 1 s）以一支 Lua 腳本把本機各 scope 每分鐘的絕對計數 `HSET` 到 Redis（重送不會重複計數）、寫入進行中請求數（以 Redis 的時間判斷 3 秒內是否新鮮），並讀回其他 gateway 的總和與參與的 gateway 數 n。兩次同步之間每個 gateway 最多用 `ceil(剩餘額度 ÷ n)`。key 以 `{lw:<namespace>}` 為 hash tag，namespace 在 control-plane 模式預設為 zone；Redis 的欄位是各 gateway 的 id。請求路徑不做任何 I/O。
+- 共享：設定 `LUMEWARP_SHARED_LIMITS_REDIS_URL` 時，背景工作每 `--shared-limits-sync-ms`（預設 100 ms，慢時自動加倍到 1 s）以一支 Lua 腳本把本機各 scope 每分鐘的絕對計數 `HSET` 到 Redis（重送不會重複計數）、寫入進行中請求數（以 Redis 的時間判斷 3 秒內是否新鮮），並讀回其他 gateway 的總和與參與的 gateway 數 n。兩次同步之間每個 gateway 最多用 `ceil(剩餘額度 ÷ n)`。key 以 `{lw:<namespace>}` 為 hash tag，namespace 在 control-plane 模式預設為 zone；Redis 使用每個 gateway process 的內部隨機 key，不使用 Welcome 指派的 gateway id，因此第一次 handshake 前即可共享。此 key 不顯示給 control plane 或 UI。請求路徑不做任何 I/O。
 - Redis 不可用超過 1 秒時退回本機計數（每個 gateway 各算一份，與 LiteLLM 相同），`/readyz` 不受影響，恢復後自動回到共享；`lumewarp_shared_limits_fallback` 與告警 `LumewarpSharedLimitsFallback` 反映這個狀態。沒有「Redis 不可用就拒絕」的模式。
 - Helm 可用 `valkey.enabled` 部署一個不持久化的 Valkey，或以 `gateway.sharedLimits.redis.existingSecret` 指向外部 Redis。每個 pod 是一個 gateway；`gateway.replicaCount` 或 autoscaling 開幾個 pod，Gateways 頁就顯示幾個 gateway。
 

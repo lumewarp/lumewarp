@@ -11,12 +11,16 @@ What each role may do is in [Roles](../admin/index.md).
 
 ## Credentials
 
-Three token types, stored only as SHA-256 hashes, and two kinds of cookie session:
+The installation uses PATs and virtual API keys as user-facing secrets, plus a fixed
+environment token for each gateway zone. PAT and API key hashes are stored in Postgres.
+For a gateway token, the control plane reads `LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN` at startup
+and keeps only its SHA-256 hash in memory; `<ID>` is the uppercase zone ID with `-`
+replaced by `_`, and the value must be at least 32 characters.
 
 | Credential | Prefix | Used by |
 | --- | --- | --- |
 | Personal access token (PAT) | `lwp-` | A user over the admin API/UI; created under My keys in the UI or `POST /api/v1/users/me/tokens`. |
-| Gateway token | `lwg-` | A gateway for one zone's config stream and usage reporting; created in the Admin UI (**Gateways → New gateway token**) or with `bootstrap --zone`, with any number of tokens and gateway processes per zone. |
+| Gateway zone token | No prefix | Authenticates gateways for one zone's config stream and usage reports. Configure it with `LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN` and supply the same secret to the gateway through `--gateway-token-env`; any number of gateways may share it. |
 | Virtual API key | `lw-` | Clients calling one zone's gateway; owned by a team member or a service account of a team; the key is bound to one zone and the gateway only receives its hash in the snapshot. |
 | OIDC session | cookie | A user logged in through [SSO](#sso-login-oidc). |
 | Emergency session | cookie | The [break-glass](#emergency-access-break-glass) login: an installation admin that is not a user. |

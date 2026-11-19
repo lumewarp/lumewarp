@@ -31,26 +31,30 @@ it NACKs the version.
 
 ![Config versions](/screenshots/config-versions.png)
 
-## Gateways and tokens
+## Gateways and zone tokens
 
-A gateway is one process and serves exactly one zone. It generates its id at startup
-(`<hostname>-<8 hex>`), sends it as `Hello.gateway_id`, and keeps it until it exits; a
-restart is a new gateway. The Gateways page shows the selected zone's processes, connected
-first; a disconnected row stays for 24 hours and is then deleted.
+A gateway process serves one zone. After accepting each config stream, the control plane
+sends a `Welcome` with that stream's gateway id (`<hostname>-<8 hex>`); the hostname comes
+from `Hello.hostname` and is sanitized by the control plane. Every stream gets a new id and
+row, including a reconnect. Disconnected rows remain visible for 24 hours before automatic
+deletion. Usage sent before a stream has welcomed the gateway has no gateway attribution.
 
-A gateway token (`lwg-…`) authenticates one zone, not a gateway id: any number of gateway
-processes may share it. Create one with **New gateway token** on the Gateways page, with
-`POST /api/v1/gateway-tokens` and its `zone` field, or with
-`lumewarp-control-plane bootstrap [--name <label>] [--zone <name>]`. The control plane
-creates the default zone at startup, so a fresh install can create its first token in the
-UI without running `bootstrap`. The secret is shown once and only its SHA-256 hash is
-stored. Revoking a token closes every config and usage stream authenticated with it; those
-gateways keep serving their last good snapshots but cannot receive another update until
-they reconnect with a valid token.
+Each zone's fixed gateway token is configured on the control plane as
+`LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN`, where `<ID>` is the uppercase zone id with `-` replaced
+by `_`. The token must be at least 32 characters. The control plane reads it at startup and
+keeps only its SHA-256 hash in memory. The same secret is supplied to each gateway process
+for its `--gateway-token-env` setting; any number of gateways may share it. There is no
+gateway-token creation or revoke action in the UI or API; configure the credential through
+the deployment environment. A zone without an environment token is shown as having no token
+configured.
+
+To rotate a token, change the control-plane environment value and the gateway secret to the
+same new value, then restart the control plane and gateways so they load it. There is no
+rotation grace. While reconnecting, gateways continue serving their last good snapshots.
 
 ![Gateways](/screenshots/gateways.png)
 
-### The Gateways tab
+### The Gateways table
 
 A warning above the table appears only when there is something to fix:
 
@@ -65,19 +69,14 @@ NACKing gateway's row and does not withhold the version from other gateways in t
 
 | Column | What it shows |
 | --- | --- |
-| Gateway | `Hello.gateway_id`, plain text. |
+| Gateway | The id assigned in `Welcome`, plain text. |
 | State | Connected or Disconnected; disconnected rows are dimmed. |
 | Version | The build version the gateway reported in its latest `Hello`. |
 | Config | The ACKed version plus at most one badge: quarantined > NACK > pending > behind. A fresh gateway with no verified snapshot reads "—". |
 | Rate limits | "Per gateway", or "Shared (namespace)" when it shares counters through Redis ("Shared" alone when it reports no namespace). |
-| Token | The label of the token its latest `Hello` authenticated with, or its prefix when it has no label. |
 | Last seen | Its latest status write. |
 | Peer | The network peer of its config stream. |
 
-### The Tokens tab
-
-The selected zone's token list shows Label, Prefix, Created, Last used, Gateways, Status
-and Revoke. **Gateways** is the number currently connected with that token. Revoked tokens
-stay listed with their revocation time. **New gateway token** asks for a label and shows
-the secret once. **Revoke** asks for confirmation, naming how many connected gateways it
-disconnects and that they keep serving their last good config.
+A disconnected row can be deleted with `DELETE /api/v1/gateways/{zone}/{gateway_id}`.
+Deleting a connected row returns 409; disconnect it first. Deletion also removes its
+plugin reports and is audited. The normal 24-hour cleanup still applies.

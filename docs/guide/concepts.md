@@ -12,7 +12,7 @@ the control plane is down boots from the version on its disk.
 
 ## Zones
 
-An installation can have several **zones**, each with its own gateways, gateway tokens,
+An installation can have several **zones**, each with its own gateways, fixed gateway token,
 upstreams, model deployments, MCP servers, A2A agents, API keys, limits, budgets and usage.
 Orgs, teams, users, roles, grants, and model/alias/router definitions are shared. A model
 may be deployed in only some zones. A key belongs to one zone, and the zone switcher in the
@@ -92,10 +92,13 @@ which is the N-times behaviour again.
 | --- | --- | --- |
 | API key | `lw-…` | Clients calling the gateway. |
 | Personal access token | `lwp-…` | A person or script calling the management API. |
-| Gateway token | `lwg-…` | A gateway connecting to the control plane for one zone. |
+| Gateway zone token | `LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN` | A fixed environment secret shared by gateways in one zone; `<ID>` is the uppercase zone ID with `-` replaced by `_`. |
 | Session | cookie | The Admin UI after signing in. |
 
-Each secret is shown once, when it is created or rotated. Only its SHA-256 hash is stored.
+PAT and API key secrets are shown once, when created or rotated, and only their SHA-256
+hashes are stored in Postgres. The control plane reads each gateway zone token at startup
+and keeps only its SHA-256 hash in memory; the same secret is supplied to the gateway
+through the variable named by `--gateway-token-env`.
 
 ## Roles
 

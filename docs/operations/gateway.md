@@ -11,6 +11,9 @@ Two modes are available:
 - **control-plane** (`--control-plane`): boot from a cached snapshot, follow the
   versioned gRPC config stream and report usage back to the control plane.
 
+Standalone mode never contacts a control plane: it opens no config stream and has no usage
+reporter.
+
 Every YAML field is in the [Gateway YAML reference](../reference/gateway-yaml.md).
 
 ## Control-plane mode
@@ -20,11 +23,9 @@ control-plane mode the gateway follows the control plane's config stream and
 reports usage to the same endpoint:
 
 ```sh
-# Create a gateway token with a label (**Gateways → New gateway token** in the
-# Admin UI, or `bootstrap --name gateway` for a scripted install); the token
-# authenticates the zone and stores only its SHA-256 hash. Any number of
-# gateways may use it.
-export LUMEWARP_GATEWAY_TOKEN='lwg-...'
+# The control plane has the same secret in
+# LUMEWARP_GATEWAY_ZONE_DEFAULT_TOKEN. Set this variable to that value.
+export LUMEWARP_GATEWAY_TOKEN='replace-with-a-random-secret-at-least-32-characters'
 
 lumewarp \
   --control-plane http://127.0.0.1:50051 \
@@ -34,15 +35,24 @@ lumewarp \
   --local-config /etc/lumewarp/local.yaml
 ```
 
-The token is read from the named environment variable, sent as
-`authorization: Bearer <token>` on the config stream and usage reports, and never
-written to disk. The gateway generates its id at startup (`<hostname>-<8 hex>`, the
-hostname reduced to `[A-Za-z0-9._-]` plus random hex), sends it as
-`Hello.gateway_id`, and keeps it for the process lifetime: a restart is a new gateway
-and appears as a new row on the Gateways page, while the old row stays visible for 24
-hours. Every process needs its own hostname and `--state-dir` (the directory holds that
-process's last good snapshot); several gateways may share one token, and the control plane
-keys each stream by its generated id
+The control plane reads one token per zone at startup from
+`LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN`; `<ID>` is the uppercase zone id with `-` replaced by
+`_`. The token must be at least 32 characters, and the control plane keeps only its SHA-256
+hash in memory. The gateway reads the same secret from the variable named by
+`--gateway-token-env`, sends it as `authorization: Bearer <token>` and sends
+`x-lumewarp-zone` on both the config stream and usage reports. `Hello` always carries the
+configured zone and the process hostname. The control plane assigns the gateway id in the
+first `Welcome` on each stream (`<hostname>-<8 hex>`); reconnects get a new id and row.
+Usage reports use the current assigned id, or no gateway attribution before the first
+`Welcome`. Several gateways may share a zone token.
+
+To rotate a token, update the control-plane environment and the gateway secret, then restart
+the control plane and gateways. There is no grace period. Gateways keep serving their last
+good snapshots while reconnecting. The old row stays visible for 24 hours. See
+[Zones](../admin/zones.md#declare-and-configure-a-zone) for the zone-token setup.
+
+Every process needs its own `--state-dir` (the directory holds that process's last good
+snapshot); the control plane keys each stream by its assigned id
 ([protocol](../config-protocol.md#gateway-sessions)). The Helm chart runs every pod as its
 own gateway. It runs the pod as UID/GID 65532 with
 `fsGroup: 65532` so the mounted state directory is writable. `--local-config` is a YAML
@@ -57,7 +67,7 @@ upstreams, routers, teams and keys (including `server.api_keys`) are ignored in 
 | `--control-plane URL` | `LUMEWARP_CONTROL_PLANE` | unset | Control-plane gRPC URL (`http://` or `https://`). Enables control-plane mode and requires the three flags below. |
 | `--gateway-token-env NAME` | none | required in control-plane mode | Name of the environment variable that holds the gateway token. |
 | `--state-dir DIR` | none | required in control-plane mode | Directory for the last good snapshot. It is created `0700` on the first successful persist. |
-| `--zone ZONE` | `LUMEWARP_ZONE` | required in control-plane mode | Config zone this gateway serves. Must match the control plane and the cached snapshot. |
+| `--zone ZONE` | `LUMEWARP_ZONE` | required in control-plane mode | ID of the config zone this gateway serves. Must be the gateway token's zone and match the cached snapshot. |
 | `--local-config FILE` | none | unset | YAML with only `server:` listener/timeout settings. Without it the defaults from the YAML reference apply. |
 | `--shared-limits-redis-url URL` | `LUMEWARP_SHARED_LIMITS_REDIS_URL` | unset | `redis://` or `rediss://` endpoint used to share rate-limit counters between gateways. Empty/unset keeps the limits per gateway. The value is never logged. |
 | `--shared-limits-sync-ms MS` | `LUMEWARP_SHARED_LIMITS_SYNC_MS` | `100` | Background sync interval, 10–1000 ms; it doubles up to 1 s while a sync takes more than half of it. |
@@ -156,14 +166,15 @@ when a gateway first joins a scope (a clean gateway refreshes its read-only view
 fifth interval).
 
 The store layout is namespaced as `{lw:<namespace>}:<scope>:`: one hash per scope,
-dimension and minute (`HSET` of the gateway's absolute count under its gateway id,
+dimension and minute (`HSET` of the gateway's absolute count under a process-local random
+instance key, separate from the control-plane-assigned gateway id,
 150 s expiry) and one hash per scope for in-flight values (`<n>:<redis_unix_ms>`,
 entries older than 3 s ignored and deleted, 10 s expiry extended on every sync). A zero
 count is an `HDEL`, not a zero-valued field or key. A key created by a write always gets
 its expiry immediately, so even a gateway killed in the refresh gap leaves nothing
 permanent. In-flight stamps and the staleness check use Redis's clock, so gateway clock
 skew cannot hide another gateway's slots; the minute keys use the gateway's wall clock,
-so keep hosts on NTP to line the windows up. A restarted process is a new gateway id,
+so keep hosts on NTP to line the windows up. A restarted process gets a new instance key,
 so its old fields expire with their keys. One Redis or Valkey 6.2+ endpoint is supported
 (`rediss://` for TLS); Cluster and Sentinel are not.
 

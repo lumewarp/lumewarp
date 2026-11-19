@@ -129,7 +129,13 @@ There is deliberately no prompt or body interface.
 
 A rollback restores routers from an old version, but the gateways are today's, so every restored router meets the same rules, with the same `force` and the same audit. A rejection is a 422 and changes nothing.
 
-The unit is the gateway: one process named by `Hello.gateway_id`, and any number may share a token. A gateway counts while the token of its latest `Hello` is unrevoked and it is connected or was disconnected less than 24 h ago, when its row is deleted. A report counts while the token that made it is unrevoked. A connected gateway has what its latest `Hello` lists, an offline one what it last reported. A strategy is available only while every connected gateway reports it. Each `Hello` replaces the gateway's reports under its session row lock, and a reader sees one `Hello`, never parts of two.
+The unit is one accepted config stream. The control plane assigns its gateway id in the
+first `Welcome`; a reconnect gets a new id and row. Any number of gateways may share the
+zone's fixed environment token. A disconnected row stays for 24 hours, then is deleted with
+its reports. A disconnected gateway does not block a write, but its last descriptor may be
+used for validation when no gateway is connected. A strategy is available for writes only
+while every connected gateway reports it. Reports are scoped to the gateway row, not the
+token value.
 
 Each gateway counts for at most 128 strategies, descriptors first, then `strategy:<name>` capabilities, with names as in `register!`. The rest of a `Hello` is ignored, logged and counted in `lumewarp_cp_gateway_plugins_ignored_total`; the stream stays up.
 
