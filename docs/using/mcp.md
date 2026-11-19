@@ -1,7 +1,8 @@
 # MCP
 
-The gateway proxies the MCP servers an administrator registered. It speaks MCP revision
-2025-11-25 over Streamable HTTP, and passes through an upstream that negotiates 2025-06-18.
+The gateway proxies the MCP servers an administrator registered in the key's zone. A key
+cannot reach a server registered only in another zone. It speaks MCP revision 2025-11-25
+over Streamable HTTP, and passes through an upstream that negotiates 2025-06-18.
 
 ## Two endpoints
 

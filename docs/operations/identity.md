@@ -16,8 +16,8 @@ Three token types, stored only as SHA-256 hashes, and two kinds of cookie sessio
 | Credential | Prefix | Used by |
 | --- | --- | --- |
 | Personal access token (PAT) | `lwp-` | A user over the admin API/UI; created under My keys in the UI or `POST /api/v1/users/me/tokens`. |
-| Gateway token | `lwg-` | A gateway for the config stream and usage reporting; created in the Admin UI (**Gateways → New gateway token**) or with `bootstrap` for a scripted install, any number of tokens per scope. |
-| Virtual API key | `lw-` | Clients calling the gateway; owned by a team member or a service account of a team; the gateway only receives its hash in the snapshot. |
+| Gateway token | `lwg-` | A gateway for one zone's config stream and usage reporting; created in the Admin UI (**Gateways → New gateway token**) or with `bootstrap --zone`, with any number of tokens and gateway processes per zone. |
+| Virtual API key | `lw-` | Clients calling one zone's gateway; owned by a team member or a service account of a team; the key is bound to one zone and the gateway only receives its hash in the snapshot. |
 | OIDC session | cookie | A user logged in through [SSO](#sso-login-oidc). |
 | Emergency session | cookie | The [break-glass](#emergency-access-break-glass) login: an installation admin that is not a user. |
 
@@ -135,7 +135,7 @@ from right to left and stops at the first untrusted address. Configure only actu
 proxy networks, and have the edge proxy overwrite or append the real client address.
 Untrusted peers and malformed forwarding chains cannot select a forwarded identity.
 The CLI disables Uvicorn's own proxy-header rewriting so this policy sees the socket
-peer; alternate ASGI models must also disable upstream rewriting of `scope.client`.
+peer; alternate ASGI models must also disable middleware that rewrites the client address.
 
 `LUMEWARP_BREAK_GLASS_ALLOWED_CIDRS` optionally restricts the resolved client addresses
 allowed to attempt emergency login, using the same comma-separated CIDR syntax.

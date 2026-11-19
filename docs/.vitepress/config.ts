@@ -33,6 +33,7 @@ const sidebar = [
     text: "Administration",
     items: [
       { text: "Roles", link: "/admin/" },
+      { text: "Zones", link: "/admin/zones" },
       { text: "Orgs, teams and members", link: "/admin/tenancy" },
       { text: "Keys, limits and budgets", link: "/admin/keys-and-limits" },
       { text: "Upstreams, models and aliases", link: "/admin/catalog" },
@@ -106,6 +107,7 @@ export default defineConfig({
     nav: [
       { text: "Guide", link: "/guide/" },
       { text: "Administration", link: "/admin/" },
+      { text: "Zones", link: "/admin/zones" },
       { text: "Operations", link: "/operations/" },
       { text: "API", link: "/reference/control-plane-api" },
     ],

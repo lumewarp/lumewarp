@@ -43,16 +43,17 @@ it off the public admin ingress.
 
 ## CLI
 
-`serve` creates the `scopes` row for `LUMEWARP_SCOPE` at startup if it is missing, so a
+`serve` creates the default zone named by `LUMEWARP_ZONE` at startup if it is missing, so a
 fresh install can create its first gateway token in the Admin UI without a `bootstrap` run.
-The insert is idempotent and leaves an existing row alone.
+The insert is idempotent and leaves an existing row alone. One compiler task iterates all
+live zones; each zone has its own source revision, outbox and config version stream.
 
 | Command | What it does |
 | --- | --- |
 | `serve` | HTTP API + Admin UI (uvicorn, one worker), gRPC servers and background loops. `--http-bind` / `--grpc-bind` override the env settings. |
-| `migrate [REV]` | Apply Alembic migrations up to `REV` (default `head`). `--downgrade REV` exists but every revision after the v0.2.1 baseline refuses it: restore a database backup instead. |
+| `migrate [REV]` | Apply Alembic migrations up to `REV` (default `head`). Downgrades are not supported; restore a database backup instead. |
 | `openapi [-o FILE]` | Print the OpenAPI document; builds the app without connecting to the database. |
-| `bootstrap [--name N] [--scope S]` | Optional: create an optionally labeled `lwg-...` gateway token without the Admin UI, for scripted installs; the secret goes to stdout once. It also creates the config scope if it is missing. |
+| `bootstrap [--name N] [--zone Z]` | Optional: create an optionally labeled `lwg-...` gateway token without the Admin UI, for scripted installs; `--zone` defaults to `LUMEWARP_ZONE`. The secret goes to stdout once. It creates the requested zone if missing. |
 | `hash-password` | Read a password from stdin (or prompt for it) and print its argon2id hash for `LUMEWARP_BREAK_GLASS_PASSWORD_HASH`. |
 
 The console script is `lumewarp-control-plane`; `python -m lumewarp_control_plane` is
@@ -60,7 +61,9 @@ equivalent.
 
 ## Settings
 
-`pydantic-settings` reads these from the environment with the `LUMEWARP_` prefix; names are
+The schema baseline has been rebuilt for zones. An existing development database from the
+previous schema must be dropped and recreated; it is not migrated in place. `pydantic-settings` reads these
+from the environment with the `LUMEWARP_` prefix; names are
 case-insensitive. `src/lumewarp_control_plane/settings.py` is the source of truth.
 
 | Environment variable | Default | Meaning |
@@ -80,7 +83,7 @@ case-insensitive. `src/lumewarp_control_plane/settings.py` is the source of trut
 | `LUMEWARP_BREAK_GLASS_ALLOWED_CIDRS` | empty (any) | Client networks allowed to use the emergency login; others get 404. |
 | `LUMEWARP_TRUSTED_PROXIES` | empty | Proxy networks whose `X-Forwarded-For` is followed to find the client address for the two limits above. |
 | `LUMEWARP_AUTHZ_BACKEND` | `builtin` | Authorization backend for direct org/team relations: `builtin` (`org_admins` + `team_members`), `openfga`, `http` or a `lumewarp.authz` entry-point name. See [Authorization](../admin/index.md); the OpenFGA settings are in [Identity](./identity.md#openfga). |
-| `LUMEWARP_SCOPE` | `default` | `Snapshot.scope` this installation publishes. Gateways must use the same value. |
+| `LUMEWARP_ZONE` | `default` | Default config zone created at startup and used when a zone is omitted from `bootstrap`; gateways authenticate into a zone with a zone-bound token. |
 | `LUMEWARP_MAX_SNAPSHOT_BYTES` | `67108864` (64 MiB) | Compilation fails above this serialized size. |
 | `LUMEWARP_MAX_SNAPSHOT_KEYS` | `200000` | Compilation fails above this key count. |
 | `LUMEWARP_GRPC_MAX_MESSAGE_BYTES` | `67108864` (64 MiB) | gRPC send/receive limit, additionally capped by grpcio's hard limit. |

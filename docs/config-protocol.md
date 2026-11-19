@@ -4,17 +4,19 @@ Normative rules for `lumewarp.config.v1.ConfigService` and `lumewarp.usage.v1.Us
 
 ## Terms
 
-- **Scope**: one control-plane installation (`Snapshot.scope`). A gateway is configured with exactly one scope and never applies or boots from a snapshot of another scope.
-- **Version**: strictly increasing per scope. Every published version has an immutable, complete `Snapshot` payload stored by the control plane.
-- **Desired version**: the latest published version for the scope.
+- **Zone**: one configuration and traffic boundary in an installation (`Snapshot.zone`). It is independent of orgs, teams and users. A gateway process is configured for exactly one zone and never applies or boots from a snapshot of another zone.
+- **Version**: strictly increasing within a zone. Every published version has an immutable, complete `Snapshot` payload stored by the control plane.
+- **Desired version**: the latest published version for a zone.
 - **ACKed version**: per gateway (one process, one stream), the last version it confirmed.
+
+`Snapshot.zone` identifies the configuration boundary. The zone is derived from the authenticated gateway-token row, not selected by the gateway: `Hello.zone` must match the token's zone when non-empty. A new gateway with no cached snapshot sends an empty `Hello.zone`; the control plane binds it to the token's zone and the first full snapshot sets the zone.
 
 ## Control plane: publishing
 
-1. Every source mutation (API write, budget flip, rollover) and its audit row commit in one DB transaction together with an outbox row "recompile scope".
-2. A single compiler loop per scope (serialized with a Postgres advisory lock) reads source state at one consistent snapshot, compiles, validates and stores `config_versions(scope, version, payload, digest, source_revision, created_at)`. A compile failure leaves the previous version current and marks the outbox row failed with a reason; it never publishes a partial snapshot.
+1. Every source mutation and its audit row commit in one DB transaction with recompile outbox rows. A zone-bound mutation writes one zone's outbox; a hierarchy-wide mutation writes one row per live zone under the hierarchy advisory lock and advances their source revisions together.
+2. One compiler task iterates live zones. Each zone is compiled, validated and stored as `config_versions(zone, version, payload, digest, source_revision, created_at)` in its own transaction under its own publish advisory lock. A compile failure leaves that zone's previous version current and marks its outbox row failed; it never publishes a partial snapshot or blocks other zones.
 3. A later compile always sees a later source revision; a slower, older compile must not publish after a newer one (check `source_revision` under the lock).
-4. Rollback restores upstreams, models, aliases, routers, MCP servers and A2A agents and their names by id from the version's `catalog_state` and re-publishes its **routing** content (upstreams, models, aliases, routers, MCP servers, A2A agents) as a new version. An upstream's auth plugin is restored as stored and is not re-checked; a gateway lacking it NACKs the version. Grants are not restored: grants on a catalog item deleted since then stay gone, while an MCP server or A2A agent absent from the state is archived rather than deleted, so its definitions and grants survive. Reviewed definition states are not part of the state: a rollback never re-decides a definition. API keys, teams, policies and statuses are always taken from current source state, so a revoked key can never be revived by a rollback. Restored routers meet the same plugin rules as a router write, against the gateways of today: a rejection is a 422 that changes nothing, and `force` saves past connected gateways lacking a strategy, with the same audit.
+4. Rollback is installation-wide, even when it is started from a version list for one zone. It restores upstreams, global models, per-zone model deployments, aliases, routers, MCP servers and A2A agents by id from the selected version's `catalog_state`, then compiles and publishes a new version for every live zone using each zone's own deployments and targets. Grants are not restored; deleted MCP/A2A targets absent from the state are archived rather than deleted, so their definitions and grants survive. Reviewed definition states are not part of the state: a rollback never re-decides a definition. API keys, teams, limits and statuses come from current source state, so a revoked key cannot be revived. Restored routers and targets meet today's plugin rules; an upstream auth plugin is restored as stored, so a gateway lacking it NACKs its zone's version.
 5. Retention: keep the latest version, the last 50 versions and anything referenced by a connected session; older payloads may be compacted. A gateway whose base was compacted gets a full snapshot.
 6. Limits: a snapshot larger than 64 MiB or with more than 200k keys fails compilation. gRPC max message size is 64 MiB on both sides.
 
@@ -22,9 +24,9 @@ Normative rules for `lumewarp.config.v1.ConfigService` and `lumewarp.usage.v1.Us
 
 ```
 gateway                                   control plane
-  |-- Hello{gateway_id, have_version, scope,
+  |-- Hello{gateway_id, have_version, zone,
   |         supported_capabilities, plugins, plugin_abi, shared_limits} -->
-  |                                       authenticate token; bind the scope and gateway_id
+  |                                       authenticate token; derive zone and bind gateway_id
   |<-- full(desired) or delta(have_version -> desired) ---------------
   |   apply privately, persist, swap
   |-- Ack{version} or Nack{version, code, have_version} ------------->
@@ -34,7 +36,7 @@ gateway                                   control plane
 - **At most one un-ACKed update per session.** If several versions are published while one is pending, the next update goes straight from the session's ACKed version to the current desired version (delta if the base is retained, otherwise full).
 - Besides updates, the control plane may send a `ProbeRequest` on the same stream. It is not a configuration version and is never ACKed or NACKed ([Probes from the control plane](#probes-from-the-control-plane)).
 - The base of a delta is always the session's ACKed version (or Hello.have_version before the first ACK) — never a global "last sent" version.
-- The first update after Hello is a delta only when `Hello.scope` matches, `have_version` is retained, `have_version <= desired` and `Hello.have_digest` equals the stored digest of `have_version`; otherwise full. Until the first ACK after a full, the session has **no** delta base (a NACKed full is never followed by a delta).
+- The first update after Hello is a delta only when `Hello.zone` matches the token-derived zone, `have_version` is retained there, `have_version <= desired` and `Hello.have_digest` equals that zone's stored digest for `have_version`; otherwise full. Until the first ACK after a full, the session has **no** delta base (a NACKed full is never followed by a delta).
 - Digest = `config_versions.digest` (sha256 of the control plane's serialized payload). It is sent as `ConfigUpdate.target_digest`; the gateway treats it as opaque, persists it with the snapshot and echoes it in `Hello.have_digest` (serialization is not byte-identical across languages, so the gateway never recomputes it). `have_version > desired` (control plane restored from backup) → full.
 
 - `Hello.plugins` lists a `PluginDescriptor` per plugin the gateway has: built-ins and the WASM components loaded from its three plugin directories at startup. A descriptor carries the kind (`router-strategy`, `upstream-auth`, `a2a-middleware`), name, title, description, `builtin`, the params JSON Schema, the router-only `uses_weight`/`needs`/member schema, the component's `wasm_sha256` (empty for built-ins) and a `digest` that changes whenever any other field does. `Hello.plugin_abi` is the WIT package major version the gateway hosts (1). The list is untrusted and only informs the API and UI, which validate writes against its schemas: nothing in it can end the stream, and it does not gate snapshots, which `supported_capabilities` and the gateway's own `configure` still do. [Gateway plugins](plugins.md) has the manifest and schema rules.
@@ -44,8 +46,8 @@ gateway                                   control plane
 - ACK/NACK must name the session's pending version; anything else is a protocol error and the control plane closes the stream.
 - NACK handling:
   - `BASE_MISMATCH` → send full(desired).
-  - `INVALID_CONFIG` → quarantine that version for the whole scope: no gateway in it is sent the version, and a gateway connecting later starts with the quarantine. Do not resend it; send again only when a newer version is published. Surface it in gateway status and metrics. A gateway that had already been sent the version before the NACK may still ACK it and keeps it until the next version; quarantine applies from the NACK on.
-  - `UNSUPPORTED_FEATURE` → only this gateway skips the version; the other gateways in the scope still receive it. It keeps its previous config and NACKs each later version that needs the missing plugin or capability. Surface it on that gateway's row.
+  - `INVALID_CONFIG` → quarantine that version for the whole zone: no gateway in it is sent the version, and a gateway connecting later starts with the quarantine. Do not resend it; send again only when a newer version is published. Surface it in gateway status and metrics. A gateway that had already been sent the version before the NACK may still ACK it and keeps it until the next version; quarantine applies from the NACK on.
+  - `UNSUPPORTED_FEATURE` → only this gateway skips the version; the other gateways in the zone still receive it. It keeps its previous config and NACKs each later version that needs the missing plugin or capability. Surface it on that gateway's row.
   - `PERSIST_FAILED` → retry the same version with exponential backoff (1 s → 60 s).
 - ACK timeout: 30 s, then the control plane closes the stream; the gateway reconnects with backoff (0.5 s → 30 s, full jitter).
 - Keepalive: the gateway sends an HTTP/2 PING every 30 s, also while the stream is idle, and drops the connection if no ACK arrives within 10 s. The control plane must accept pings without data at least every 10 s (`grpc.http2.min_ping_interval_without_data_ms`, `grpc.keepalive_permit_without_calls`); gRPC core's default (5 min) answers them with GOAWAY `too_many_pings` and resets the stream every few minutes. The control plane pings every 60 s (20 s timeout) to notice gateways that vanished. Any L7 proxy between them must allow the same ping rate.
@@ -53,22 +55,22 @@ gateway                                   control plane
 
 ### Gateway sessions
 
-A gateway is one process. At startup it generates its id (`<hostname>-<8 hex>`) and sends it as `Hello.gateway_id`; the id is fixed for the process lifetime, and a restart is a new gateway. The token only authenticates the scope: any number of gateways may use one token, and no id is bound to it.
+A gateway is one process and one zone. At startup it generates its id (`<hostname>-<8 hex>`) and sends it as `Hello.gateway_id`; the id is fixed for the process lifetime, and a restart is a new gateway. The token authenticates one zone: any number of gateways in that zone may use one token, and no id is bound to it.
 
-- `Hello.gateway_id` is required in control-plane mode: 1–100 of `[A-Za-z0-9._-]`; empty or otherwise malformed is `INVALID_ARGUMENT`. The control plane keys the session by `(scope, gateway_id)`. A new connection with the same id replaces the previous stream; a stale connection ends with `UNAVAILABLE`.
+- `Hello.gateway_id` is required in control-plane mode: 1–100 of `[A-Za-z0-9._-]`; empty or otherwise malformed is `INVALID_ARGUMENT`. The control plane keys the session by `(zone, gateway_id)`. A new connection with the same id replaces the previous stream; a stale connection ends with `UNAVAILABLE`.
 - `Hello.shared_limits { enabled, namespace }` says whether the gateway shares its rate-limit counters and under which namespace. It is display only: the control plane shows it on the Gateways page and derives no behaviour from it. Connected gateways may disagree during a rollout; the API shows each value.
 - Each gateway has its own ACKed version, pending update, last NACK, capabilities and plugin reports. `GET /api/v1/gateways` has one row per gateway, connected first; a disconnected row stays for 24 h and is then deleted with its plugin reports.
 - A capability or plugin counts as available only if **every** connected gateway reports it; otherwise the version needing it would be NACKed by the gateways that lack it, so the compiler warns and a save needs `force`.
-- A target (upstream or model) counts as unhealthy if **any** connected gateway reports it unhealthy: one gateway that cannot reach it takes it out of rotation for the scope.
-- `INVALID_CONFIG` quarantine is per scope: a NACK from any gateway withholds that version from every gateway in the scope, including one that connects later. A gateway that already applied the version keeps it until the next one.
+- A target (upstream or model deployment) counts as unhealthy in its zone if **any** connected gateway there reports it unhealthy: one gateway that cannot reach it takes it out of rotation in that zone.
+- `INVALID_CONFIG` quarantine is per zone: a NACK from any gateway withholds that version from every gateway in that zone, including one that connects later. A gateway that already applied the version keeps it until the next one.
 - `UNSUPPORTED_FEATURE` is per gateway: only the gateway that lacks the plugin or capability skips the version; the others apply it. It keeps its previous config and NACKs later versions that still need it.
 - During a rolling upgrade, a gateway still on the old build can therefore serve an older config than the new-build gateways. Publish a config that needs the new build only when every gateway can apply it; the old-build gateways stay on their previous config until the rollout finishes or the requirement goes away.
 
 
 ## Probes from the control plane
 
-A saved Test now for an upstream or model with a WASM auth plugin runs on a gateway, because
-the control plane cannot run WASM. The control plane sends `ConfigUpdate.probe` carrying
+A saved Test now for an upstream or model deployment with a WASM auth plugin runs on a gateway, because
+the control plane cannot run WASM. A model probe is sent over a stream for that deployment's zone. The control plane sends `ConfigUpdate.probe` carrying
 `ProbeRequest { request_id, upstream, model }` on an existing stream; it is not a
 configuration version and the gateway never ACKs or NACKs it. `upstream` is an
 `Upstream.name` and `model` is a `Model.name`; an empty `model` probes the upstream with
@@ -389,20 +391,20 @@ swaps; scrapers, like probes, are diffed only after a snapshot is accepted.
   ABI or an invalid manifest refuses to start: a gateway never skips a plugin
   silently. There is no hot reload. See [Gateway plugins](plugins.md#loading).
 - CP mode always requires keys: zero keys means every `/v1/*` request is 401.
-- With a valid on-disk snapshot of the configured scope: serve it immediately, then connect in the background.
-- Without one (missing, wrong scope, corrupt, or written in an older format — the file starts with the format marker `LWSNAP02`, has a trailing sha256 and is size-capped): do not serve `/v1/*` (503 `not_ready`, readiness false) until the first full snapshot is applied. Never fall back to an open router. A file without the marker is not decoded: protobuf skips unknown fields, so an older file would otherwise decode into a snapshot with empty routers. `Hello` then offers version 0, the control plane sends a full, and the file is replaced.
+- With a valid on-disk snapshot of the configured zone: serve it immediately, then connect in the background.
+- Without one (missing, wrong zone, corrupt, or written in an older format — the file starts with the format marker `LWSNAP02`, has a trailing sha256 and is size-capped): do not serve `/v1/*` (503 `not_ready`, readiness false) until the first full snapshot is applied. Never fall back to an open router. A file without the marker is not decoded: protobuf skips unknown fields, so an older file would otherwise decode into a snapshot with empty routers. `Hello` then offers version 0, the control plane sends a full, and the file is replaced.
 - The gateway token is read from the environment and never written to disk. The state dir is created `0700`, the file `0600`.
 
 ## Usage reporting and attribution
 
-- The report carries the reporting gateway's own id (`ReportRequest.gateway_id`), the same value as its `Hello.gateway_id`: 1–100 of `[A-Za-z0-9._-]`. The token only authenticates the scope; the control plane attributes the events to this id. An empty or invalid id fails the whole batch with `INVALID_ARGUMENT`.
+- The report carries the reporting gateway's own id (`ReportRequest.gateway_id`), the same value as its `Hello.gateway_id`: 1–100 of `[A-Za-z0-9._-]`. The gateway token determines the event's zone; the control plane attributes it to that zone and gateway id, not to a zone claim in the report. An empty or invalid id fails the whole batch with `INVALID_ARGUMENT`.
 - Usage is attributed to the key's team and to the key's owner (a team member or a service
   account). The event's `team_id` must match the key; the owner is read from the key, never
   from the event. There is no project level.
-- Totals are kept per scope and UTC calendar month: the team (`usage_totals.scope_type=team`)
+- Totals are kept per zone and UTC calendar month: the team (`usage_totals.scope_type=team`)
   and the key owner (`member`, with `member_scope_id = uuid5(team_id, user_id)`, or
-  `service_account`, with the service account id). Org spend is derived on read: the sum of
-  the org's teams' totals, so there is no `org` row and no drift. `member_scope_id` is
+  `service_account`, with the service account id). Org spend is derived within each zone on
+  read: the sum of that zone's org teams' totals, so there is no `org` row and no drift. `member_scope_id` is
   derived, not stored, so removing and re-adding a member keeps the same total and bucket.
   There is no key-level total.
 - A key has at most four rate-limit scopes, one per level that sets a limit:
@@ -428,9 +430,10 @@ swaps; scrapers, like probes, are diffed only after a snapshot is accepted.
   (`MCP` or `A2A`), `target` (server or agent name), `method`, `tool` for MCP
   tool and prompt calls, `status` and the final outcome and duration. They carry
   no model, tokens, cost or `requested`, and the control plane records them
-  without adding them to the team or owner totals; budgets and limits never see
-  them. A streaming request's event is emitted when the stream ends, with the
+  without adding them to zone/team/owner usage totals. MCP `tools/call` still consumes the
+  key's RPM limit; neither protocol consumes token limits, parallel slots or budgets, and
+  A2A has no rate limit. A streaming request's event is emitted when the stream ends, with the
   final outcome (`COMPLETED`, `UPSTREAM_ERROR`, or `CLIENT_CANCELLED`/499 when
   the client disappears).
-- Budget enforcement is **eventual**: once usage is ingested, an exhausted scope flips affected keys to `BUDGET_EXCEEDED` and a new version is published within 5 s. Lost events (gateway crash, full queue) are not recovered, and streams in flight when a budget runs out are not cut.
+- Budget enforcement is **eventual**: once usage is ingested, an exhausted budget flips affected keys in that zone to `BUDGET_EXCEEDED` and a new version is published there within 5 s. Lost events (gateway crash, full queue) are not recovered, and streams in flight when a budget runs out are not cut.
 - Month rollover is driven by a scheduler (runs at startup and at each UTC month boundary), not by incoming usage. While the control plane is down, blocked keys stay blocked.

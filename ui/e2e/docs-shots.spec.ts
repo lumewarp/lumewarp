@@ -7,7 +7,8 @@ import { Admin, MEMBER, SHOTS_TOKEN, signIn } from "./selfService";
  * Screenshots for the manual (docs/public/screenshots/), regenerated with docs/scripts/screenshots.sh.
  * Skipped unless E2E_DOCS_SHOTS names the output directory, so `pnpm test:e2e` never runs it. With
  * that variable serve.py seeds a small, plausible installation instead of the specs' fixtures (one
- * team, three models on a vLLM upstream, a router, two weeks of traffic); this spec photographs the
+ * team, two zones with upstreams and deployments, three global models, a router, and two weeks of
+ * traffic in both zones); this spec photographs the
  * pages the manual describes, at one desktop size, light theme, without scrolling.
  */
 
@@ -30,8 +31,15 @@ type Row = { id: string; name: string };
 async function seeded(request: APIRequestContext) {
   const admin = await Admin.login(request);
   const find = async (path: string, name: string) => {
-    const row = (await admin.get<{ items: Row[] }>(`${path}?limit=200`)).items.find((item) => item.name === name);
-    expect(row, `${name} is seeded`).toBeTruthy();
+    const deadline = Date.now() + 30_000;
+    let items: Row[] = [];
+    let row: Row | undefined;
+    while (!row && Date.now() < deadline) {
+      items = (await admin.get<{ items: Row[] }>(`${path}?limit=200`)).items;
+      row = items.find((item) => item.name === name);
+      if (!row) await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    }
+    expect(row, `${name} is seeded at ${path}; got ${JSON.stringify(items)}`).toBeTruthy();
     return row!;
   };
   return {
@@ -65,12 +73,16 @@ test("manual screenshots", async ({ page, request, browser }) => {
   await shot(page, "router-edit", 1300);
   await page.goto("/usage");
   await expect(page.getByRole("heading", { name: "Usage" })).toBeVisible();
+  await page.getByLabel("Zone", { exact: true }).click();
+  await page.getByRole("option", { name: "All zones", exact: true }).click();
   await shot(page, "usage");
   // The seeded traffic spans two weeks; the page defaults to 24 hours, which may be an empty window.
   const to = new Date().toISOString().slice(0, 10);
   const from = new Date(Date.now() - 14 * 86_400_000).toISOString().slice(0, 10);
   await page.goto(`/requests?from=${from}&to=${to}`);
   await expect(page.getByRole("heading", { name: "Requests" })).toBeVisible();
+  await page.getByLabel("Zone", { exact: true }).click();
+  await page.getByRole("option", { name: "All zones", exact: true }).click();
   await expect(page.getByTestId("request-chain").first()).toBeVisible();
   await shot(page, "requests");
   await page.getByTestId("request-requested").getByText("chat", { exact: true }).first().click();
@@ -80,6 +92,14 @@ test("manual screenshots", async ({ page, request, browser }) => {
   await page.goto("/audit");
   await expect(page.getByRole("heading", { name: "Audit log" })).toBeVisible();
   await shot(page, "audit");
+  await page.getByTestId("zone-switcher").click();
+  await expect(page.getByTestId("zone-option-prod")).toBeVisible();
+  await shot(page, "zone-switcher");
+  await page.keyboard.press("Escape");
+  await page.goto("/zones");
+  await expect(page.getByRole("heading", { name: "Zones", level: 1 })).toBeVisible();
+  await expect(page.getByText("Production", { exact: true })).toBeVisible();
+  await shot(page, "zones");
   await page.goto("/gateways");
   await expect(page.getByRole("heading", { name: "Gateways", level: 1 })).toBeVisible();
   await expect(page.getByTestId("gateway-gw-a-7f3c1d2e")).toBeVisible();

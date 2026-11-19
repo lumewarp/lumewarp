@@ -26,9 +26,9 @@ admin listener answers 503 until then.
 
 - **First start, control plane unreachable**: there is no cached snapshot to boot from.
   Check the `--control-plane` URL, and that the token in the named environment variable is
-  unrevoked and belongs to this `--scope`.
-- **Scope mismatch**: `--scope` must equal the control plane's `LUMEWARP_SCOPE`.
-- **Cached snapshot rejected**: a corrupt or wrong-scope file in `--state-dir` is never
+  unrevoked and belongs to the zone selected by `--zone`.
+- **Zone mismatch**: the gateway's `--zone` / `LUMEWARP_ZONE` must match the zone of its gateway token and cached snapshot.
+- **Cached snapshot rejected**: a corrupt or wrong-zone file in `--state-dir` is never
   served; the next full snapshot replaces it.
 
 ## A gateway does not pick up changes

@@ -8,10 +8,12 @@ Lumewarp has a Rust data plane (the gateway) and a Python control plane
 immutable in-memory config snapshot; it never touches Postgres or Python. Config
 updates and usage events are asynchronous.
 
-Clients call a name, and a name is a **model** (one upstream model), an **alias** (another
-name for a model or router) or a **router** (a strategy over models, with retries, fallbacks
-and traffic splits). Orgs, teams, members and service accounts own API keys with budgets and
-rate limits, and any SSO user can manage their own keys. MCP servers and A2A agents are
+Clients call a name, and a name is a **model** (globally defined, deployed on an upstream
+per zone), an **alias** (another name for a model or router) or a **router** (a strategy over
+models, with retries, fallbacks and traffic splits). Orgs, teams, members and service
+accounts own zone-bound API keys with per-zone budgets and rate limits, and any SSO user can
+manage their own keys. One installation can serve several zones while sharing identity,
+teams and catalog names. MCP servers and A2A agents are
 proxied on the same gateway. Router strategies, upstream auth and A2A middleware can be
 extended with WASM plugins.
 
@@ -24,7 +26,7 @@ The manual is published at <https://lumewarp.github.io/lumewarp/> (source in [`d
 | [Getting started](docs/guide/index.md) | What Lumewarp is, concepts, the two quick starts. |
 | [Calling the gateway](docs/using/index.md) | Endpoints, errors, MCP and A2A, for client authors. |
 | [Your keys](docs/self-service/index.md) | Self-service keys and the Playground. |
-| [Administration](docs/admin/index.md) | Roles, teams, keys and limits, the catalog, routers, usage, requests and audit. |
+| [Administration](docs/admin/index.md) | Roles, [zones](docs/admin/zones.md), teams, keys and limits, the catalog, routers, usage, requests and audit. |
 | [Operations](docs/operations/index.md) | Deploying with [Helm](docs/operations/helm.md) or [Docker](docs/operations/docker.md), configuring and observing the control plane and the gateway. |
 | [Extending](docs/extending/index.md) | Gateway WASM plugins, control-plane Python plugins, the plugin development skill. |
 | [Reference](docs/reference/control-plane-api.md) | Both OpenAPI documents, gateway YAML, errors, metrics. |
@@ -93,10 +95,10 @@ docker build -f control-plane/Dockerfile -t ghcr.io/lumewarp/lumewarp-control-pl
 
 ## Releases and CI
 
-Releases are tags `vX.Y.Z` (`vX.Y.Z-<pre>` for a pre-release). From v0.2.1 on, a
-release migrates the control-plane database in place (Helm pre-upgrade hook, or
-the compose `migrate` service on start). Back up the database first: there is no
-downgrade, and going back means restoring that backup.
+Releases are tags `vX.Y.Z` (`vX.Y.Z-<pre>` for a pre-release). The database baseline has
+been rebuilt to include zones. An existing development database from the previous schema
+must be dropped and recreated; it is not upgraded in place. Downgrades are not supported,
+and going back means restoring a database backup.
 
 ```sh
 scripts/release.sh 0.2.0                 # sets every version, commits "Release v0.2.0", tags it

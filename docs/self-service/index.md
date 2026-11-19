@@ -1,41 +1,45 @@
 # Your keys
 
-Anyone who can sign in to the Admin UI can manage their own API keys, in every team they
-belong to. A new user starts with no team: a team admin has to add you first.
+Anyone who can sign in to the Admin UI can manage their own API keys in the teams they
+belong to. A new user starts with no team: a team admin has to add you first. Keys belong
+to one zone; use the header switcher to choose the zone before creating one. See
+[Zones](../admin/zones.md) for how zones relate to teams and gateway URLs.
 
 ## My keys
 
 ![My keys: a member's keys and what each team allows them](/screenshots/my-keys.png)
 
-**My keys** is your home page. For each of your teams it shows:
+**My keys** is your home page. In the selected zone, for each of your teams it shows:
 
 - the names you may call, with their model type;
 - your effective limits: requests per minute, tokens per minute and concurrent requests;
 - what is left of this month's budget;
 - how many keys you may have, and how long a key may live;
 - the keys you own, each as a pill (hover or focus it for its org, team, owner (or
-  service account), prefix and id).
+  service account), zone, prefix and id).
 
 If you administer a team (as its team admin, or as an org or installation admin), a
 **Service account keys** table below your own keys lists the keys owned by that team's
 service accounts, using the same pill. Its actions are the same as the team's **Keys**
 tab. A plain member does not see this table.
 
-These are *your* effective values: the team's policy narrowed by your own. A member does
-not see the team's full policy.
+These are *your* effective values in the selected zone: the team's grants narrowed by your
+own, and the zone's limits and budgets. A member does not see the team's full policy.
 
 ## Create a key
 
-Choose a team, give the key a name, and optionally an expiry and limits of its own. The
-secret (`lw-…`) is shown **once**; Lumewarp stores only its hash and cannot show it again.
+Choose a team in the selected zone, give the key a name, and optionally an expiry and
+limits of its own. The key works only with gateways for that zone. The secret (`lw-…`) is
+shown **once**; Lumewarp stores only its hash and cannot show it again.
 
 ![Creating a key](/screenshots/my-keys-create.png)
 
 ![The one-time secret after creating a key](/screenshots/my-keys-secret.png)
 
-- If the team sets a maximum key lifetime, a key without an expiry gets one at that
-  maximum, and a longer expiry is refused.
-- If the team limits keys per member, revoking a key frees its slot.
+- The lower applicable zone or team maximum key lifetime applies to a user key; a zone can
+  also require an expiry.
+- The lower applicable zone or team per-member key cap is counted within the zone; revoking
+  a key frees its slot.
 - A key's own limits can only narrow yours.
 
 ## Rotate

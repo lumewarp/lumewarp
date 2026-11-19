@@ -1,20 +1,21 @@
 # Keys, limits and budgets
 
-- **API key**: belongs to one team and is owned by a member (`owner_kind=user`) or a service
-  account (`owner_kind=service_account`). A key carries only its own `rpm_limit`,
-  `tpm_limit` and `max_parallel` (NULL = no key level). The compiler resolves the whole
-  chain into each key's effective policy. The snapshot carries only the key id and hash,
-  team id, status, expiry and effective policy; owner identity stays in the control plane.
+- **API key**: belongs to one team, one owner and exactly one zone. The zone is chosen when
+  the key is created and cannot be changed by rotation. A key carries only its own
+  `rpm_limit`, `tpm_limit` and `max_parallel` (NULL = no key level). The compiler resolves
+  the selected zone's limits and the key's global grants into its effective policy. The
+  snapshot carries only the key id and hash, team id, status, expiry and effective policy;
+  owner identity stays in the control plane.
 
 ## The quota hierarchy
 
-One resolver (`quota.py`) computes org -> team -> owner for the
-compiler, `/users/me` and every write validation. Models are the intersection down the
-chain (`INHERIT`/`ALL` keep the parent, `LIST` intersects). Limits are the minimum down the
-chain; a member's effective limits are `exception ?? team member_default`, then clamped by
-the team, and a service account never takes the member defaults. Remaining budget is
-`min(org, team, owner)`, each from its own accumulated spend: the org has no
-`usage_totals` row, its spend is the sum of every one of its teams (archived included).
+One resolver (`quota.py`) computes org -> team -> owner for the compiler, `/users/me` and
+every write validation, within one zone at a time. Model grants are global, but a name is
+usable in a zone only when its target is deployed there. Limits and budgets are stored per
+zone: the minimum rate limit down the chain wins; a member's effective limits are
+`exception ?? team default` for that zone, then clamped by the team, and a service account
+never takes the member defaults. Remaining budget is `min(org, team, owner)` for that zone,
+each from its own zone's accumulated spend.
 
 A key is the last level: with `model_access: "inherit"` (the default) it calls whatever its
 owner may, and with `"list"` it narrows to its own `allowed_models` and `allowed_groups`,
@@ -24,27 +25,36 @@ never beyond the owner's effective models (422 for a name outside them). `KeyOut
 UI the key dialogs have a **Models** control (Inherit or Selected) scoped to the owner's
 models, and the key tables show what each key can call.
 
-Writes only check values they actually change: a changed value may not exceed the parent's
-current effective value (422), while an unchanged old value is not rechecked, so a parent
-decrease always succeeds and the effective value clamps. Team totals and models are
-`TEAM_QUOTA_SET` (org level and above); member defaults, member exceptions, service
-accounts and any key's limits are team-admin-and-above. A key's owner may change their own
+Rate limits and budgets are edited for the selected zone, not on org or team create/update
+bodies. `PUT /zones/{zone}/limits` sets an org, team, member or service-account limit and
+budget in that zone; `PUT /zones/{zone}/member-defaults` sets a team's member defaults there.
+Owner responses expose `limits_by_zone` (and teams expose `member_defaults_by_zone`). Model
+grants remain global. Writes only check values they actually change: a changed limit may
+not exceed its parent's current effective value in that zone (422), while an unchanged old
+value is not rechecked, so a parent decrease always succeeds and the effective value clamps.
+Team quota and model grants are `TEAM_QUOTA_SET` (org level and above); member defaults,
+member exceptions, service accounts and any key's limits are team-admin-and-above. A key's owner may change their own
 key's limits within their effective limits; a service-account key's limits only by team
 admin and above. Every key has at most four rate-limit scopes (org, team, owner, key); the
 control plane (`compiler/validate.py`) and the gateway (`snapshot.rs`) both reject more.
 A key without limits emits no key scope and costs nothing on the request path.
 
-## Key lifetime
+## Key rules and lifetime
 
-A member key can be created with an optional `expires_at`. When the team sets
-`max_member_key_lifetime_seconds`, a member key created without one gets an expiry at that
-cap, and a supplied expiry beyond it is a 422. Rotation and `PATCH /keys/{id}` enforce the
-same cap (a never-expiring key gets a deadline at rotation; an existing later expiry must
-be shortened first). Team admins and installation admins are subject to these checks;
-service-account keys are not member keys and are exempt. Lowering the caps never revokes
-existing keys: lowering the lifetime cap rejects later creates, rotations or expiry
-extensions that would exceed it, while lowering the count cap only rejects later creates,
-because rotation does not add a key.
+A key is created in the selected zone (`KeyCreate.zone`; omitted by the API means the
+configured default zone). The zone can require an expiry, cap lifetime, set the minimum
+creator role, cap each member's user-key count, and allow or forbid service-account keys.
+The effective member count cap is the lower of the zone and team caps, counted within that
+zone; service-account keys do not count. For a user-owned key, lifetime is capped by the
+lower of the zone and team limits; for a service-account key, the zone limit applies. A key
+without an expiry gets the effective cap as its expiry when one applies. When expiry is
+required, a missing expiry is rejected.
+
+Creation checks the caller's role against the zone minimum (installation admins may always
+create keys; for service-account keys the caller's role is checked). Creation, rotation,
+updates and resume enforce the applicable current zone rules. Tightening a rule does not
+silently revoke an existing key; its `rule_violations` are returned for administrators to
+review. Lowering a count cap only rejects later creates; rotation does not add a key.
 
 ## Rotation
 
@@ -59,14 +69,12 @@ both hashes. The response exposes `previous_key_expires_at` but never the old se
 
 ## What a member sees
 
-`GET /users/me` returns, for every team the caller belongs to, the effective model names
-(the whole chain, org included; `all_models` when that intersection is universal), the
-effective rate limits (org, team and member defaults included), the team's member-key limits
-with the caller's current non-revoked key count (`key_limits`), and the current UTC-month
-org/team/member budgets with the remaining amount computed server-side. The org and team
-budget numbers themselves are only shown to a team admin or installation admin; a plain
-member sees the computed remainder. It never returns the team's full allowlist to a member
-whose own policy is narrower.
+`GET /users/me` returns per-zone effective values in `by_zone`: model names (the global
+permission chain intersected with names available in that zone), effective rate limits,
+key rules and count, and current UTC-month remaining budget. The org and team budget amounts
+are only shown to a team admin or installation admin; a plain member sees the computed
+remainder. It never returns the team's full allowlist to a member whose own policy is
+narrower.
 
 ## Limits on key writes
 
@@ -88,10 +96,10 @@ account is reactivated. Nothing can be resumed while the key's owner is inactive
 
 ## Attribution and rate-limit scopes
 
-Usage is attributed to the key's team and owner: the event's `team_id` must match the
-key, and the owner (member or service account) is read from the key. A member's
+Usage is attributed to the key's zone, team and owner: the event's zone and `team_id` must
+match the key, and the owner (member or service account) is read from the key. A member's
 usage/rate-limit scope id is `member_scope_id = uuid5(team_id, user_id)`; it is derived, so
-removing and re-adding a member keeps the same total and bucket. A service account uses
+removing and re-adding a member keeps the same total and bucket within each zone. A service account uses
 its own id. Rate-limit scopes are `org:<org_id>`, `team:<team_id>`,
 `member:<member_scope_id>`, `sa:<service_account_id>` and `key:<key_id>`; a level that sets
 no limit emits no scope. Rate limits are counted per gateway unless the gateways
@@ -109,10 +117,10 @@ rejection is 429 `rate_limit_exceeded` with `Retry-After`.
 
 ## Org budgets
 
-Org budgets are derived: the org's monthly spend is the sum of its teams' `usage_totals`
-(archived included), and only orgs with a budget are checked after an ingest. The first
-crossing inserts `org_budget_windows` with `ON CONFLICT DO NOTHING`, so the audit row and
-the recompile happen exactly once even when several teams of one org report concurrently;
-a batch that cannot see a sibling's uncommitted total is caught by the next ingest or
-compile. Raising a budget (or removing it) deletes the month's window row, so a later
-crossing audits and recompiles again instead of staying silent.
+Org budgets are derived separately in each zone: the zone's org spend is the sum of its
+teams' `usage_totals` (archived included). Only an org with a budget in that zone is checked
+after an ingest. The first crossing inserts that zone's `org_budget_windows` row with
+`ON CONFLICT DO NOTHING`, so its audit and recompile happen once even when several teams
+report concurrently; a batch that cannot see a sibling's uncommitted total is caught by the
+next ingest or compile. Raising or removing a budget clears that zone's current-month
+window, so a later crossing audits and recompiles again.

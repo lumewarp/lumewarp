@@ -35,8 +35,9 @@ Every response, of either kind, carries `x-lumewarp-request-id`.
 ## Limits
 
 A key can be limited in requests per minute, tokens per minute and concurrent requests, at
-four levels: its org, its team, its owner and the key itself. The lowest value applies. The
-Admin UI's **My keys** page shows your effective limits.
+four levels: its org, its team, its owner and the key itself. The lowest value applies in
+the key's zone; the same org or team can have different limits in another zone. The Admin
+UI's **My keys** page shows your effective limits for the selected zone.
 
 Limits are counted in each gateway. If the installation runs several gateways without a
 shared Redis, the total you can reach is higher than the configured number.
@@ -44,6 +45,6 @@ shared Redis, the total you can reach is higher than the configured number.
 ## Budgets
 
 A budget is an amount per UTC calendar month, checked at the org, the team and the key's
-owner. Spend is added up from usage reports a few seconds after each request, so the cut-off
+owner within the key's zone. Budgets in other zones are separate. Spend is added up from usage reports a few seconds after each request, so the cut-off
 is not exact to the request: a key can overshoot slightly, and a request already streaming
 is never cut.

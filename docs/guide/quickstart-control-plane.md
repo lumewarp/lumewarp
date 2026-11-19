@@ -30,9 +30,9 @@ The HTTP API/UI listens on `127.0.0.1:8091`; gateway-facing gRPC listens on
 Open <http://127.0.0.1:8091/> and use the emergency login with the password
 `dev-break-glass` (a plaintext password needs `LUMEWARP_DEV_MODE=true`; production uses an
 argon2id hash and OIDC, see [Sign-in and authorization](../operations/identity.md)). The
-control plane creates the config scope at startup, so create the gateway token in
-**Gateways → New gateway token** and copy the `lwg-...` secret, which is shown once. For a
-scripted install without the UI, `uv run lumewarp-control-plane bootstrap --name quickstart`
+control plane creates the default zone at startup, so create a gateway token for that
+zone in **Gateways → New gateway token** and copy the `lwg-...` secret, which is shown once.
+For a scripted install without the UI, `uv run lumewarp-control-plane bootstrap --name quickstart`
 creates one and prints it.
 
 Start the gateway in another terminal with that token:
@@ -42,7 +42,7 @@ cd gateway
 export LUMEWARP_GATEWAY_TOKEN='lwg-...'
 cargo run --release -- --control-plane http://127.0.0.1:50051 \
   --gateway-token-env LUMEWARP_GATEWAY_TOKEN \
-  --state-dir /tmp/lumewarp-state --scope default
+  --state-dir /tmp/lumewarp-state --zone default
 ```
 
 The gateway is not ready until it has a first config version (`/v1/*` and the admin
@@ -50,8 +50,8 @@ The gateway is not ready until it has a first config version (`/v1/*` and the ad
 plane publishes an empty version when it starts, so here the gateway is ready at once
 and answers 401 until a key exists. In the UI, create:
 
-- an upstream for `http://127.0.0.1:9100/v1` (kind `openai_compatible`),
-- a model named `mock-local` using upstream model `mock`,
+- an upstream in the default zone for `http://127.0.0.1:9100/v1` (kind `openai_compatible`),
+- a global model named `mock-local` deployed in the default zone using upstream model `mock`,
 - a router named `demo` with that model as its member (`mock-local` is callable by
   itself too; a router adds strategy, retries and fallbacks, and an alias is one more name),
 - a team and an API key for a service account of that team (the `lw-...` secret is
@@ -67,7 +67,8 @@ curl -sS -H "Authorization: Bearer lw-..." -H 'Content-Type: application/json' \
 ```
 
 Usage lands in the UI after the next report batch (about one second); budgets are
-enforced eventually. See [Control plane](../operations/control-plane.md) for
+enforced eventually. The default zone is ready for a first install; use the header switcher
+to view other zones. See [Zones](../admin/zones.md). See [Control plane](../operations/control-plane.md) for
 settings, SSO, authorization backends, the catalog, plugins and operations, and
 [`docs/config-protocol.md`](../config-protocol.md) for the stream contract.
 

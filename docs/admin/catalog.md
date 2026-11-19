@@ -4,24 +4,40 @@
 
 ![Editing an upstream](/screenshots/upstream-edit.png)
 
-The catalog is installation-wide. A client calls a *name*, and a name is one of three kinds,
+Catalog names and definitions are installation-wide. A client calls a *name*, and a name is one of three kinds,
 unique across all three (`catalog_names`):
 
 | Endpoint | What |
 | --- | --- |
-| `/api/v1/upstreams` | OpenAI-compatible endpoints. |
-| `/api/v1/models` | A name for one model of one upstream (`upstream_id`, `upstream_model`), with its price. One try per call. |
+| `/api/v1/upstreams` | OpenAI-compatible endpoints, each belonging to a zone; names are unique within a zone. |
+| `/api/v1/models` | Global model definitions with prices and settings. Zone-specific upstream mappings live in model deployments; one try per call. |
 | `/api/v1/aliases` | Another name for a model or a router (`target`, its id). One level only; not for another alias. Authorized on its own. |
 | `/api/v1/routers` | A name that spreads requests over models: `strategy`, `params`, `members [{model_id, weight, params}]`. Members and fallbacks are models only. |
-| `/api/v1/plugins?kind=` | Read-only, all three plugin kinds: each descriptor with its schemas and the gateways that report it. |
+| `/api/v1/plugins?kind=` | Read-only, all three plugin kinds: each descriptor with its schemas and the gateways that report it in the selected zone. |
 | `/api/v1/strategies` | **Removed** (no alias): the plugins endpoint replaced it. |
 | `/api/v1/catalog` | Read-only: every name and its kind, for permission pickers. |
 
 `/catalog` is readable by any authenticated principal; the other reads (`/upstreams`, `/models`,
 `/aliases`, `/routers`, `/plugins`) need `ROUTING_READ`, which is installation-level. Writes
-need `ROUTING_MANAGE`. Every write is audited and enqueues a recompile. A name that a router, alias or fallback references cannot be
-deleted (409, listing who references it); deleting a name deletes the grants on it, with an
-audit row. See [the architecture notes](../architecture.md#模型目錄已實作) for the reasoning.
+need `ROUTING_MANAGE`. Every write is audited. A zone-bound write recompiles that zone;
+changes to global names and definitions are compiled in every live zone. A name that a
+router, alias or fallback references cannot be deleted (409, listing who references it);
+deleting a name deletes the grants on it, with an audit row. See [the architecture
+notes](../architecture.md#模型目錄已實作) for the reasoning.
+
+## Model deployments
+
+A model definition does not itself choose an upstream. Create a deployment for each zone
+that should serve the model, using `PUT /api/v1/models/{model_id}/deployments/{zone}` with
+that zone's `upstream_id`, `upstream_model` and optional periodic `chat_check`. The upstream
+must belong to the same zone. A model with no deployment in a zone is not served there.
+
+Model lists and the edit page show deployments by zone; the edit page configures the current
+zone's deployment and lists other zones' deployments separately. The catalog remains global:
+renaming a model changes the shared name, but changing its deployment or probe affects only
+that zone. Router members, split members and fallbacks that lack a deployment are dropped
+from that zone's compiled snapshot with a warning that they are not available there. A
+router with no remaining members and an alias whose target is unavailable are also omitted.
 
 ## Credentials
 
@@ -39,7 +55,7 @@ stored in the snapshot and the audit trail: never put a secret there; the plugin
 secrets from the gateway's `LUMEWARP_PLUGIN_SECRET_*`. Saving with a connected gateway that
 does not report the plugin is 422 unless the write has `force`; a forced save is audited as
 `upstream.force_save`, and that gateway NACKs every version that uses the plugin. The
-plugin needs capability `auth:<plugin>` on the gateways that should apply the version. It
+plugin needs capability `auth:<plugin>` on connected gateways in the upstream's zone that should apply the version. It
 runs for every attempt (retries and fallbacks included), health checks, vLLM metric
 scrapes and saved Test now; `cache-ms` keeps a cached result out of the sandbox. An attempt
 whose plugin fails moves on to the router's retry and fallbacks; with none left the client
@@ -120,13 +136,14 @@ a router and its aliases, and the standard OpenAI levels (`minimal`, `low`, `med
 
 Without an auth plugin, **Test now** probes the form as it stands from the control plane:
 `POST /upstreams/test` and `POST /models/test` work before you save, and a key typed into
-the form is used once and not stored.
+the form is used once and not stored. A model test selects a zone deployment; its saved
+probe result belongs to that deployment.
 
 With an auth plugin, the control plane cannot run the plugin, so save first (the form
-disables Test now until then). `POST /upstreams/{id}/test` and `POST /models/{id}/test`
-send a probe over the config stream to a connected gateway that advertises
-`upstream_probe` and the upstream's plugin; the gateway runs it against the snapshot it
-currently serves. The response reports `credential: "plugin"`; a model probe returns no
+disables Test now until then). `POST /upstreams/{id}/test` and
+`POST /models/{model_id}/deployments/{zone}/test` send a probe over the config stream to a
+connected gateway in that zone that advertises `upstream_probe` and the upstream's plugin;
+the gateway runs it against the snapshot it currently serves. The response reports `credential: "plugin"`; a model probe returns no
 reply body.
 
 - No such gateway: 409 `no_gateway_for_plugin`.
@@ -135,7 +152,7 @@ reply body.
 
 The gateway probes its current snapshot, so right after a save it may answer `not_found`,
 `not_found_model` or `config` until it applies the new version; retry. Such an answer is shown but not stored as the
-upstream's or model's Test now result. The gateway bounds the whole probe, plugin call
+upstream's or deployment's Test now result. The gateway bounds the whole probe, plugin call
 included, to 15 s. Only gateways connected to the control-plane
 process serving the request are candidates, so with more than one replica a request can
 answer 409 even while another replica holds a capable gateway. `GET

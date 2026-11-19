@@ -122,10 +122,10 @@ these names.
 | --- | --- | --- | --- |
 | `lumewarp_cp_compile_duration_seconds` | histogram | | Compiler loop (`compiler/publish.py`), per committed compile: snapshot compile + validation, including compiles whose content is unchanged and failed ones. |
 | `lumewarp_cp_compile_failures_total` | counter | | A compile that raised `CompileError` (outbox rows marked failed; previous version stays current). |
-| `lumewarp_cp_config_version` | gauge | | Latest published version of `LUMEWARP_SCOPE`: set on publish, and refreshed from `config_versions` every 5 s (covers API rollbacks and restarts). |
-| `lumewarp_cp_outbox_pending` | gauge | | Pending `config_outbox` rows of the scope; one `COUNT` every 5 s by a background task, never per scrape. |
-| `lumewarp_cp_gateway_sessions` | gauge | | Connected config-stream sessions in this process (`grpc/` session registry). |
-| `lumewarp_cp_gateway_acks_total` | counter | `result` = `ack` \| `nack` | Each valid ACK/NACK of a pending update. Protocol errors are not counted. |
+| `lumewarp_cp_config_version` | gauge | `zone` | Latest published version in each zone: set on publish, and refreshed from `config_versions` every 5 s (covers API rollbacks and restarts). |
+| `lumewarp_cp_outbox_pending` | gauge | `zone` | Pending `config_outbox` rows in each zone; one `COUNT` every 5 s by a background task, never per scrape. |
+| `lumewarp_cp_gateway_sessions` | gauge | `zone` | Connected config-stream sessions per zone in this process (`grpc/` session registry). |
+| `lumewarp_cp_gateway_acks_total` | counter | `zone`, `result` = `ack` \| `nack` | Each valid ACK/NACK of a pending update in a zone. Protocol errors are not counted. |
 | `lumewarp_cp_gateway_plugins_ignored_total` | counter | `kind` = `router-strategy` \| `upstream-auth` \| `a2a-middleware` \| `other` | Entries of a `Hello` ignored: past the per-gateway limit of 128 per kind, an invalid name, or (for `other`) a descriptor whose kind is unusable or a non-plugin capability over its own limit of 64. The stream stays up. |
 | `lumewarp_cp_mcp_catalog_definitions_total` | counter | `result` = `approved` \| `pending` \| `known` | MCP definitions stored from a gateway `CatalogReport` or Discover now (`known`: the exact hash was already there). |
 | `lumewarp_cp_mcp_catalog_discarded_total` | counter | `reason` = `unknown_target` \| `stale_id` \| `stale_version` \| `hash_mismatch` \| `invalid` \| `pending_limit` \| `definition_limit` \| `report_limit` | Definition reports dropped by validation or bounds. |

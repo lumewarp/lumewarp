@@ -189,7 +189,11 @@ STRATEGY_DESCRIPTORS: dict[str, dict] = {
                 # Choices of every shape the Select contract has to carry: a 64 entry enum (the schema subset's
                 # limit), number enums where 0 is a value and "" as a legal value. Optional, so the other tests
                 # that use this strategy never see them in a request.
-                "big": {"type": "string", "enum": [f"opt-{i:02d}" for i in range(64)], "title": "Big list"},
+                "big": {
+                    "type": "string",
+                    "enum": [f"opt-{i:02d}" for i in range(64)],
+                    "title": "Big list",
+                },
                 "level": {"type": "integer", "enum": [0, 1, 5], "title": "Level"},
                 "ratio": {"type": "number", "enum": [0.5, 1, 2], "title": "Ratio"},
                 "scope": {"type": "string", "enum": ["", "wide", "narrow"], "title": "Scope"},
@@ -198,7 +202,13 @@ STRATEGY_DESCRIPTORS: dict[str, dict] = {
                     "type": "object",
                     "additionalProperties": False,
                     "title": "Tuning",
-                    "properties": {"fail_back_ms": {"type": "integer", "minimum": 0, "title": "Fail back after (ms)"}},
+                    "properties": {
+                        "fail_back_ms": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "title": "Fail back after (ms)",
+                        }
+                    },
                 },
             },
         },
@@ -312,7 +322,11 @@ TARGET_PLUGINS: dict[str, dict] = {
             "additionalProperties": False,
             "required": ["header"],
             "properties": {
-                "header": {"type": "string", "title": "Header", "description": "Header the signature is sent in."},
+                "header": {
+                    "type": "string",
+                    "title": "Header",
+                    "description": "Header the signature is sent in.",
+                },
                 "clock_skew_s": {"type": "integer", "minimum": 0, "title": "Clock skew (s)"},
             },
         },
@@ -325,7 +339,13 @@ TARGET_PLUGINS: dict[str, dict] = {
         "params_schema": {
             "type": "object",
             "additionalProperties": False,
-            "properties": {"mime": {"type": "string", "title": "MIME type", "description": "Artifacts of this type are dropped."}},
+            "properties": {
+                "mime": {
+                    "type": "string",
+                    "title": "MIME type",
+                    "description": "Artifacts of this type are dropped.",
+                }
+            },
         },
         "member_schema": None,
     },
@@ -368,10 +388,14 @@ async def seed_gateways(url: str) -> None:
     engine = create_async_engine(url)
     try:
         async with AsyncSession(engine) as session, session.begin():
-            token_a = await session.scalar(select(GatewayToken).where(GatewayToken.name == "primary"))
+            token_a = await session.scalar(
+                select(GatewayToken).where(GatewayToken.name == "primary")
+            )
             assert token_a is not None
             token_a.display_prefix = "lwg-e2ea"
-            token_b = await session.scalar(select(GatewayToken).where(GatewayToken.name == "secondary"))
+            token_b = await session.scalar(
+                select(GatewayToken).where(GatewayToken.name == "secondary")
+            )
             if token_b is None:
                 token_b = GatewayToken(
                     zone=token_a.zone,
@@ -393,9 +417,21 @@ async def seed_gateways(url: str) -> None:
                 names = [name for name in descriptors if token is token_a or name not in ONLY_ON_A]
                 capabilities = [
                     *BUILTIN_CAPABILITIES,
-                    *[f"strategy:{name}" for name in names if descriptors[name]["kind"] == "router-strategy"],
-                    *[f"auth:{name}" for name in names if descriptors[name]["kind"] == "upstream-auth"],
-                    *[f"a2a_middleware:{name}" for name in names if descriptors[name]["kind"] == "a2a-middleware"],
+                    *[
+                        f"strategy:{name}"
+                        for name in names
+                        if descriptors[name]["kind"] == "router-strategy"
+                    ],
+                    *[
+                        f"auth:{name}"
+                        for name in names
+                        if descriptors[name]["kind"] == "upstream-auth"
+                    ],
+                    *[
+                        f"a2a_middleware:{name}"
+                        for name in names
+                        if descriptors[name]["kind"] == "a2a-middleware"
+                    ],
                 ]
                 session.add(
                     GatewaySession(
@@ -441,7 +477,9 @@ class Api:
     """The control plane's HTTP API as the break-glass admin, for fixtures that need real catalog ids."""
 
     def __init__(self) -> None:
-        self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+        self.opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
+        )
         self.csrf = ""
         self.call("POST", "/session/break-glass", {"password": BREAK_GLASS_PASSWORD})
         self.csrf = self.call("GET", "/session")["csrf_token"]
@@ -450,7 +488,9 @@ class Api:
         if method == "POST" and path == "/models" and data and "upstream_id" in data:
             # A model is a global definition; its upstream is a deployment in the upstream's zone.
             data = dict(data)
-            deployment = {k: data.pop(k) for k in ("upstream_id", "upstream_model", "chat_check") if k in data}
+            deployment = {
+                k: data.pop(k) for k in ("upstream_id", "upstream_model", "chat_check") if k in data
+            }
             model = self.call("POST", "/models", data)
             zone = self.call("GET", f"/upstreams/{deployment['upstream_id']}")["zone"]
             self.call("PUT", f"/models/{model['id']}/deployments/{zone}", deployment)
@@ -480,18 +520,42 @@ async def seed_usage(url: str) -> None:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     api = Api()
-    upstream = api.call("POST", "/upstreams", {"name": "use-up", "kind": "vllm", "base_url": "http://127.0.0.1:9/v1"})
+    upstream = api.call(
+        "POST",
+        "/upstreams",
+        {"name": "use-up", "kind": "vllm", "base_url": "http://127.0.0.1:9/v1"},
+    )
     model = {
-        name: api.call("POST", "/models", {"name": name, "upstream_id": upstream["id"], "upstream_model": up_model, "model_type": "llm"})
-        for name, up_model in [("use/a", "Qwen/UseA"), ("use/b", "Qwen/UseA"), ("use/c", "Other/UseC")]
+        name: api.call(
+            "POST",
+            "/models",
+            {
+                "name": name,
+                "upstream_id": upstream["id"],
+                "upstream_model": up_model,
+                "model_type": "llm",
+            },
+        )
+        for name, up_model in [
+            ("use/a", "Qwen/UseA"),
+            ("use/b", "Qwen/UseA"),
+            ("use/c", "Other/UseC"),
+        ]
     }
     # Existed once: usage keeps its names, the catalog does not.
     model["use/retired"] = {"id": str(uuid.uuid4()), "upstream_model": "Org/Retired"}
     router = api.call(
-        "POST", "/routers", {"name": "use-router", "members": [{"model_id": model["use/a"]["id"]}, {"model_id": model["use/b"]["id"]}]}
+        "POST",
+        "/routers",
+        {
+            "name": "use-router",
+            "members": [{"model_id": model["use/a"]["id"]}, {"model_id": model["use/b"]["id"]}],
+        },
     )
     alias = api.call("POST", "/aliases", {"name": "use-alias", "target": router["id"]})
-    direct_alias = api.call("POST", "/aliases", {"name": "use-direct", "target": model["use/c"]["id"]})
+    direct_alias = api.call(
+        "POST", "/aliases", {"name": "use-direct", "target": model["use/c"]["id"]}
+    )
 
     now = datetime.now(UTC).replace(second=0, microsecond=0)
     owner, team, key = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
@@ -530,7 +594,17 @@ async def seed_usage(url: str) -> None:
     engine = create_async_engine(url)
     try:
         async with AsyncSession(engine) as session, session.begin():
-            def add(ts: datetime, requested: str, name: str, via_alias: dict | None, via_router: dict | None, tokens: int, known: bool, cost: int | None = None) -> None:
+
+            def add(
+                ts: datetime,
+                requested: str,
+                name: str,
+                via_alias: dict | None,
+                via_router: dict | None,
+                tokens: int,
+                known: bool,
+                cost: int | None = None,
+            ) -> None:
                 session.add(
                     UsageEvent(
                         request_id=uuid.uuid4(),
@@ -547,7 +621,9 @@ async def seed_usage(url: str) -> None:
                         alias=via_alias["name"] if via_alias else "",
                         router=via_router["name"] if via_router else "",
                         upstream="use-up",
-                        upstream_model=model[name]["upstream_model"] if name in model else "Trend/Model",
+                        upstream_model=model[name]["upstream_model"]
+                        if name in model
+                        else "Trend/Model",
                         fallback=False,
                         attempts=1,
                         model_id=uuid.UUID(model[name]["id"]) if name in model else None,
@@ -569,22 +645,34 @@ async def seed_usage(url: str) -> None:
 
             for requested, name, via_alias, via_router, tokens, count in events:
                 for n in range(count):
-                    add(now - timedelta(minutes=5 + n), requested, name, via_alias, via_router, tokens, True)
+                    add(
+                        now - timedelta(minutes=5 + n),
+                        requested,
+                        name,
+                        via_alias,
+                        via_router,
+                        tokens,
+                        True,
+                    )
             for days_ago, name, tokens, known, *explicit in trend + rank:
                 # Noon UTC, so a run at midnight cannot land two events on one day or split a bucket.
                 cost = explicit[0] if explicit else None
-                add((now - timedelta(days=days_ago)).replace(hour=12), name, name, None, None, tokens, known, cost)
+                add(
+                    (now - timedelta(days=days_ago)).replace(hour=12),
+                    name,
+                    name,
+                    None,
+                    None,
+                    tokens,
+                    known,
+                    cost,
+                )
     finally:
         await engine.dispose()
 
 
-async def published_version(url: str) -> int:
-    """Wait until the compiler has drained the outbox, then return the newest config version.
-
-    A catalog write commits a pending outbox row; the compiler loop publishes the version in
-    the background. A fixture that ACKed the first version would otherwise show every page as
-    "behind" while the later versions land. Polling the pending count is the observable state,
-    not a fixed delay."""
+async def published_versions(url: str) -> dict[str, int]:
+    """Wait until every live zone's outbox is drained and its latest version is current."""
     from sqlalchemy import func, select
     from sqlalchemy.ext.asyncio import AsyncSession
     from lumewarp_control_plane.models import ConfigOutbox, ConfigVersion, OutboxStatus, Zone
@@ -594,49 +682,110 @@ async def published_version(url: str) -> int:
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             async with AsyncSession(engine) as session:
-                pending = await session.scalar(
-                    select(func.count()).where(ConfigOutbox.status == OutboxStatus.PENDING)
+                zone_rows = list(
+                    (
+                        await session.execute(
+                            select(Zone.name, Zone.source_revision).where(
+                                Zone.archived_at.is_(None)
+                            )
+                        )
+                    ).all()
                 )
-                latest = (
-                    await session.execute(
-                        select(ConfigVersion.version, ConfigVersion.source_revision)
-                        .order_by(ConfigVersion.version.desc())
-                        .limit(1)
+                versions: dict[str, int] = {}
+                for zone, source_revision in zone_rows:
+                    pending = await session.scalar(
+                        select(func.count()).where(
+                            ConfigOutbox.zone == zone,
+                            ConfigOutbox.status == OutboxStatus.PENDING,
+                        )
                     )
-                ).first()
-                source_revision = await session.scalar(select(func.max(Zone.source_revision)))
-                # A version exists for every committed mutation: no pending outbox row and the
-                # newest version covers the scope's current source revision.
-                if (
-                    not pending
-                    and latest is not None
-                    and latest.source_revision >= (source_revision or 0)
-                ):
-                    return latest.version
+                    latest = (
+                        await session.execute(
+                            select(ConfigVersion.version, ConfigVersion.source_revision)
+                            .where(ConfigVersion.zone == zone)
+                            .order_by(ConfigVersion.version.desc())
+                            .limit(1)
+                        )
+                    ).first()
+                    if (
+                        not pending
+                        and latest is not None
+                        and latest.source_revision >= source_revision
+                    ):
+                        versions[zone] = latest.version
+                if len(versions) == len(zone_rows):
+                    return versions
             await asyncio.sleep(0.05)
-        raise RuntimeError("the config compiler did not drain its outbox")
+        raise RuntimeError("the config compiler did not drain every zone's outbox")
     finally:
         await engine.dispose()
 
 
 async def seed_docs(url: str) -> None:
-    """The manual's screenshots (docs-shots.spec.ts) instead of the specs' fixtures: one org and
-    team, a vLLM upstream with three models and a router, three connected gateways on one
-    token sharing a namespace, and two weeks of traffic on those models."""
+    """The manual's screenshots (docs-shots.spec.ts): one global org/team and catalog, two
+    zones with their own upstreams, deployments, keys, gateway sessions and usage."""
     from sqlalchemy import select
     from sqlalchemy.ext.asyncio import AsyncSession
 
     api = Api()
     org = api.call("POST", "/orgs", {"name": "acme"})
-    team = api.call("POST", "/teams", {"name": "search", "org_id": org["id"], "model_access": "all", "max_keys_per_member": 5})
+    team = api.call(
+        "POST",
+        "/teams",
+        {"name": "search", "org_id": org["id"], "model_access": "all", "max_keys_per_member": 5},
+    )
+    api.call(
+        "PATCH", "/zones/default", {"playground_gateway_url": "https://gateway-default.example.com"}
+    )
+    api.call(
+        "POST",
+        "/zones",
+        {
+            "name": "prod",
+            "display_name": "Production",
+            "color": "blue",
+            "playground_gateway_url": "https://gateway-prod.example.com",
+        },
+    )
     users = {u["email"]: u["id"] for u in api.call("GET", "/users?limit=200")["items"]}
     api.call("PUT", f"/teams/{team['id']}/members/{users[MEMBER_EMAIL]}", {"role": "member"})
     api.call("PUT", f"/teams/{team['id']}/members/{users[TEAM_ADMIN_EMAIL]}", {"role": "admin"})
-    # The traffic below comes from one service-account key, so the request log shows a key name.
+    # The traffic below uses service-account keys bound to both zones.
     ingest = api.call("POST", f"/teams/{team['id']}/service-accounts", {"name": "search-ingest"})
-    ingest_key = api.call("POST", f"/teams/{team['id']}/keys", {"name": "prod-ingest", "service_account_id": ingest["id"]})["key"]
-    upstream = api.call("POST", "/upstreams", {"name": "vllm-gpu-a", "kind": "vllm", "base_url": "http://vllm-gpu-a.internal:8000/v1"})
-    prices = {"price_input_nano_usd_per_mtok": 200_000_000, "price_output_nano_usd_per_mtok": 600_000_000}
+    default_key = api.call(
+        "POST",
+        f"/teams/{team['id']}/keys",
+        {"name": "default-ingest", "service_account_id": ingest["id"], "zone": "default"},
+    )["key"]
+    prod_key = api.call(
+        "POST",
+        f"/teams/{team['id']}/keys",
+        {"name": "prod-ingest", "service_account_id": ingest["id"], "zone": "prod"},
+    )["key"]
+    upstream = api.call(
+        "POST",
+        "/upstreams",
+        {
+            "name": "vllm-gpu-a",
+            "kind": "vllm",
+            "base_url": "http://vllm-gpu-a.internal:8000/v1",
+            "zone": "default",
+        },
+    )
+    prod_upstream = api.call(
+        "POST",
+        "/upstreams",
+        {
+            "name": "vllm-gpu-a",
+            "kind": "vllm",
+            "base_url": "http://vllm-gpu-b.internal:8000/v1",
+            "zone": "prod",
+        },
+    )
+    prices = {
+        "price_input_nano_usd_per_mtok": 200_000_000,
+        "price_output_nano_usd_per_mtok": 600_000_000,
+    }
     model = {
         name: api.call(
             "POST",
@@ -657,18 +806,31 @@ async def seed_docs(url: str) -> None:
             ("bge-m3", "BAAI/bge-m3", "embedding"),
         ]
     }
+    for name, up_model in [
+        ("llama-3.1-8b", "meta-llama/Llama-3.1-8B-Instruct"),
+        ("qwen2.5-7b", "Qwen/Qwen2.5-7B-Instruct"),
+        ("bge-m3", "BAAI/bge-m3"),
+    ]:
+        api.call(
+            "PUT",
+            f"/models/{model[name]['id']}/deployments/prod",
+            {"upstream_id": prod_upstream["id"], "upstream_model": up_model},
+        )
     router = api.call(
         "POST",
         "/routers",
         {
             "name": "chat",
             "strategy": "least_in_flight",
-            "members": [{"model_id": model["llama-3.1-8b"]["id"]}, {"model_id": model["qwen2.5-7b"]["id"]}],
+            "members": [
+                {"model_id": model["llama-3.1-8b"]["id"]},
+                {"model_id": model["qwen2.5-7b"]["id"]},
+            ],
             "retry": {"max_attempts": 2},
         },
     )
 
-    latest = await published_version(url)
+    versions = await published_versions(url)
     now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
     engine = create_async_engine(url)
     try:
@@ -684,76 +846,99 @@ async def seed_docs(url: str) -> None:
             ):
                 user = await session.scalar(select(User).where(User.email == email))
                 user.display_name, user.email = display_name, shown
-            session.add(InstallationAdmin(user_id=uuid.UUID(users[SHOTS_EMAIL]), role=InstallationRole.PROXY_ADMIN))
+            session.add(
+                InstallationAdmin(
+                    user_id=uuid.UUID(users[SHOTS_EMAIL]), role=InstallationRole.PROXY_ADMIN
+                )
+            )
             token = await session.scalar(select(GatewayToken).where(GatewayToken.name == "primary"))
             assert token is not None
-            token.name = "production"
+            token.name = "default"
             token.display_prefix = "lwg-docs"
             token.last_used_at = datetime.now(UTC)
-            gateway_ids = ["gw-a-7f3c1d2e", "gw-a-9b1e4c6a", "gw-a-2d8f5b0c"]
-            # Three gateway processes on one token, sharing rate limits through one Redis namespace.
-            for n, gateway_id in enumerate(gateway_ids, start=1):
-                session.add(
-                    GatewaySession(
-                        zone=token.zone,
-                        gateway_id=gateway_id,
-                        token_id=token.id,
-                        connected=True,
-                        gateway_version="0.1.0",
-                        capabilities=BUILTIN_CAPABILITIES,
-                        peer=f"10.42.0.{10 + n}:51234",
-                        acked_version=latest,
-                        shared_limits_enabled=True,
-                        shared_limits_namespace="prod",
-                        connected_at=now - timedelta(days=2, hours=n),
-                        last_seen_at=datetime.now(UTC),
-                    )
-                )
-            owner, key = uuid.UUID(ingest["id"]), uuid.UUID(ingest_key["id"])
-            for day in range(14):
-                weekday = (now - timedelta(days=day)).weekday() < 5
-                for name, endpoint, requests in [
-                    ("llama-3.1-8b", "chat_completions", 30 if weekday else 8),
-                    ("qwen2.5-7b", "chat_completions", 18 if weekday else 5),
-                    ("bge-m3", "embeddings", 40 if weekday else 10),
-                ]:
-                    for n in range(requests):
-                        ts = (now - timedelta(days=day)).replace(hour=9 + n % 9)
-                        prompt = 600 + (n * 37) % 900
-                        completion = 0 if endpoint == "embeddings" else 150 + (n * 53) % 400
-                        session.add(
-                            UsageEvent(
-                                request_id=uuid.uuid4(),
-                                gateway_id=gateway_ids[0],
-                                zone="default",
-                                ts=ts,
-                                started_at=ts - timedelta(seconds=2),
-                                key_id=key,
-                                team_id=uuid.UUID(team["id"]),
-                                owner_kind=KeyOwnerKind.SERVICE_ACCOUNT,
-                                owner_id=owner,
-                                requested="chat" if endpoint == "chat_completions" else name,
-                                model=name,
-                                router="chat" if endpoint == "chat_completions" else "",
-                                upstream="vllm-gpu-a",
-                                upstream_model=model[name]["upstream_model"],
-                                fallback=False,
-                                attempts=1,
-                                model_id=uuid.UUID(model[name]["id"]),
-                                router_id=uuid.UUID(router["id"]) if endpoint == "chat_completions" else None,
-                                endpoint=endpoint,
-                                status=200,
-                                stream=endpoint == "chat_completions",
-                                prompt_tokens=prompt,
-                                completion_tokens=completion,
-                                cost_nano_usd=prompt * 200 + completion * 600,
-                                cost_known=True,
-                                duration_ms=900 if completion else 80,
-                                config_version=latest,
-                                usage_state=UsageState.REPORTED,
-                                outcome=RequestOutcome.COMPLETED,
-                            )
+            prod_token = GatewayToken(
+                zone="prod",
+                name="production",
+                token_hash=uuid.uuid4().bytes * 2,
+                display_prefix="lwg-prd",
+            )
+            session.add(prod_token)
+            await session.flush()
+            gateways = {
+                "default": (token, ["gw-a-7f3c1d2e", "gw-a-9b1e4c6a", "gw-a-2d8f5b0c"]),
+                "prod": (prod_token, ["gw-prod-6a3c2b1d"]),
+            }
+            for zone, (zone_token, gateway_ids) in gateways.items():
+                for n, gateway_id in enumerate(gateway_ids, start=1):
+                    session.add(
+                        GatewaySession(
+                            zone=zone,
+                            gateway_id=gateway_id,
+                            token_id=zone_token.id,
+                            connected=True,
+                            gateway_version="0.1.0",
+                            capabilities=BUILTIN_CAPABILITIES,
+                            peer=f"10.42.{10 if zone == 'default' else 20}.{10 + n}:51234",
+                            acked_version=versions[zone],
+                            shared_limits_enabled=True,
+                            shared_limits_namespace=zone,
+                            connected_at=now - timedelta(days=2, hours=n),
+                            last_seen_at=datetime.now(UTC),
                         )
+                    )
+            owner = uuid.UUID(ingest["id"])
+            traffic_zones = [
+                ("default", default_key, "vllm-gpu-a", "gw-a-7f3c1d2e"),
+                ("prod", prod_key, "vllm-gpu-a", "gw-prod-6a3c2b1d"),
+            ]
+            for zone, zone_key, upstream_name, gateway_id in traffic_zones:
+                key = uuid.UUID(zone_key["id"])
+                for day in range(14):
+                    weekday = (now - timedelta(days=day)).weekday() < 5
+                    for name, endpoint, requests in [
+                        ("llama-3.1-8b", "chat_completions", 30 if weekday else 8),
+                        ("qwen2.5-7b", "chat_completions", 18 if weekday else 5),
+                        ("bge-m3", "embeddings", 40 if weekday else 10),
+                    ]:
+                        for n in range(requests):
+                            ts = (now - timedelta(days=day)).replace(hour=9 + n % 9)
+                            prompt = 600 + (n * 37) % 900
+                            completion = 0 if endpoint == "embeddings" else 150 + (n * 53) % 400
+                            session.add(
+                                UsageEvent(
+                                    request_id=uuid.uuid4(),
+                                    gateway_id=gateway_id,
+                                    zone=zone,
+                                    ts=ts,
+                                    started_at=ts - timedelta(seconds=2),
+                                    key_id=key,
+                                    team_id=uuid.UUID(team["id"]),
+                                    owner_kind=KeyOwnerKind.SERVICE_ACCOUNT,
+                                    owner_id=owner,
+                                    requested="chat" if endpoint == "chat_completions" else name,
+                                    model=name,
+                                    router="chat" if endpoint == "chat_completions" else "",
+                                    upstream=upstream_name,
+                                    upstream_model=model[name]["upstream_model"],
+                                    fallback=False,
+                                    attempts=1,
+                                    model_id=uuid.UUID(model[name]["id"]),
+                                    router_id=uuid.UUID(router["id"])
+                                    if endpoint == "chat_completions"
+                                    else None,
+                                    endpoint=endpoint,
+                                    status=200,
+                                    stream=endpoint == "chat_completions",
+                                    prompt_tokens=prompt,
+                                    completion_tokens=completion,
+                                    cost_nano_usd=prompt * 200 + completion * 600,
+                                    cost_known=True,
+                                    duration_ms=900 if completion else 80,
+                                    config_version=versions[zone],
+                                    usage_state=UsageState.REPORTED,
+                                    outcome=RequestOutcome.COMPLETED,
+                                )
+                            )
     finally:
         await engine.dispose()
 
@@ -770,9 +955,7 @@ def wait_ready() -> None:
 
 
 def cp(*args: str, env: dict[str, str]) -> None:
-    subprocess.run(
-        [sys.executable, "-m", "lumewarp_control_plane", *args], env=env, check=True
-    )
+    subprocess.run([sys.executable, "-m", "lumewarp_control_plane", *args], env=env, check=True)
 
 
 def main() -> None:
