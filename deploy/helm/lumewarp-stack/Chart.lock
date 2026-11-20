@@ -1,9 +1,9 @@
 dependencies:
 - name: lumewarp
   repository: file://../lumewarp
-  version: 0.2.1
+  version: 0.3.0
 - name: openfga
   repository: https://openfga.github.io/helm-charts
   version: 0.4.1
-digest: sha256:21d89aacaff7c9715d66b82c1ba4525680eea52a349c2e8383436e98fe951c48
-generated: "2026-11-16T15:52:36.519227061Z"
+digest: sha256:c9c626068a4430df8b8b02f5cab0116e3a7343797f3b1cbb33a898d77d231082
+generated: "2026-11-20T00:05:11.913564112Z"
