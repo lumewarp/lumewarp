@@ -95,10 +95,10 @@ docker build -f control-plane/Dockerfile -t ghcr.io/lumewarp/lumewarp-control-pl
 
 ## Releases and CI
 
-Releases are tags `vX.Y.Z` (`vX.Y.Z-<pre>` for a pre-release). The database baseline has
-been rebuilt to include zones. An existing development database from the previous schema
-must be dropped and recreated; it is not upgraded in place. Downgrades are not supported,
-and going back means restoring a database backup.
+Releases are tags `vX.Y.Z` (`vX.Y.Z-<pre>` for a pre-release). v0.3.0 rebuilt the database
+baseline for zones: a v0.2.x database is not upgraded and v0.3.0 starts on a new database.
+From v0.3.0 on, a release upgrades the database in place. Downgrades are not supported, and
+going back means restoring a database backup.
 
 ```sh
 scripts/release.sh 0.2.0                 # sets every version, commits "Release v0.2.0", tags it

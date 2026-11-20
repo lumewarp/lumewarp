@@ -268,7 +268,7 @@ jobs:
           {
             echo "# v${VERSION}"
             echo
-            echo "> Lumewarp 0.x keeps no upgrade path: drop the control-plane database before installing this release."
+            echo "> Upgrades: a database from before v0.3.0 is not upgraded (the baseline was rebuilt for zones); from v0.3.0 on, \`migrate\` upgrades the database in place. See docs/operations/upgrades.md."
             echo
             echo '```sh'
             echo "docker pull ${REGISTRY}/${owner}/lumewarp-gateway:${VERSION}"

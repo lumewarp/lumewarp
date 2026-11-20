@@ -2,22 +2,22 @@
 
 ## Database schema
 
-The database baseline has been rebuilt to include zones. An existing development database
-from the previous schema must be dropped and recreated before running the current
-`lumewarp-control-plane migrate`; it is not upgraded in place, and its rows are not carried
-over. The current migrations define a fresh schema. Back up any development data that must
-be kept before recreating the database.
+v0.3.0 rebuilt the database baseline for zones. A v0.2.x database is not upgraded to it:
+install v0.3.0 on a new database (`lumewarp-control-plane migrate` on an empty one) and
+enter orgs, teams, models and keys again; rows are not carried over. Keep a backup of the
+v0.2.x database if you may need to go back to that release.
 
-After the baseline is frozen for a release, schema changes are added as new Alembic
-revisions. Downgrades are not supported: restore a database backup to roll back.
+From v0.3.0 on, `migrate` upgrades the database in place: every schema change is a new
+Alembic revision that keeps existing rows. Downgrades are not supported: restore a database
+backup to roll back.
 
 ## Important limits
 
 - **Control plane replicas must stay at 1.** One process runs the compiler loop and rollover
   scheduler for the whole installation; it iterates the live zones.
 - **Many gateway processes, one token per zone.** A gateway is one process: each
-  `gateway.replicaCount` (or autoscaled pod) uses a token for one zone and generates its own
-  gateway id at startup. The Gateways page is viewed one zone at a time. Rate limits are
+  `gateway.replicaCount` (or autoscaled pod) uses a token for one zone, and the control plane assigns it
+  a new gateway id on every connection. The Gateways page is viewed one zone at a time. Rate limits are
   counted per gateway unless the gateways share a Redis (`valkey.enabled`, or
   `gateway.sharedLimits.redis.existingSecret`).
 - **Config versions and quarantine are per zone.** An `INVALID_CONFIG` NACK quarantines the

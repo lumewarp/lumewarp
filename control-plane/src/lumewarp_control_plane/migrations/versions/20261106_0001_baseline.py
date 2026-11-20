@@ -3,9 +3,8 @@
 Revision ID: 0001
 Revises:
 
-The single baseline of the rebuilt schema: zones. It is regenerated from `models.py` while
-it is unshipped, and frozen from the next release on; every schema change after that is a
-new revision that upgrades an existing database in place and keeps its rows. Downgrades are
+The single baseline of the rebuilt schema: zones. It shipped in v0.3.0 and is frozen;
+every schema change after it is a new revision that upgrades an existing database in place and keeps its rows. Downgrades are
 not supported (restore a backup instead). `tests/test_migrations.py` compares the head with
 `models.py`.
 

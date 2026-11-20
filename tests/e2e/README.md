@@ -39,7 +39,7 @@ the prompt, the response or the key, and that `traceparent` sampled=0 does not e
 `test_shared_limits.py` (collected by `scripts/e2e-core.sh` and `scripts/e2e-identity.sh`; no IdP) is the acceptance of
 Redis-backed shared limits (`docs/operations/gateway.md`, "Shared rate limits"): three real
 gateway processes, one token and one Redis namespace, all with
-`LUMEWARP_SHARED_LIMITS_SYNC_MS=20`. Each process generates its own gateway id. It proves a
+`LUMEWARP_SHARED_LIMITS_SYNC_MS=20`. The control plane assigns each process its own gateway id. It proves a
 key's `rpm_limit` holds across the three (18 round-robin requests admit between 12 and the
 documented 12 + n, the rest 429 with `Retry-After`), and that `max_parallel` does too
 against a 1.5 s mock: a 12-request burst never holds more than 6 slots at once and the

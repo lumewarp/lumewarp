@@ -60,8 +60,7 @@ equivalent.
 
 ## Settings
 
-The schema baseline has been rebuilt for zones. An existing development database from the
-previous schema must be dropped and recreated; it is not migrated in place. `pydantic-settings` reads these
+`pydantic-settings` reads these
 from the environment with the `LUMEWARP_` prefix; names are
 case-insensitive. `src/lumewarp_control_plane/settings.py` is the source of truth.
 

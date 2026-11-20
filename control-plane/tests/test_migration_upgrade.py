@@ -1,7 +1,7 @@
 """The rebuilt baseline has no upgrade path: downgrades are refused.
 
-Schema change while the baseline is unshipped happens by regenerating it; from the next
-release on, every change is a new revision. A downgrade always asks for a database backup.
+The baseline shipped in v0.3.0 and is frozen; every schema change is a new revision. A
+downgrade always asks for a database backup.
 """
 
 import pytest

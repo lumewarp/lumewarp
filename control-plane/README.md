@@ -36,11 +36,9 @@ Tests create `lumewarp_test_<random>` on the server from `LUMEWARP_TEST_DATABASE
 
 ### Schema changes
 
-The database baseline has been rebuilt to include zones. An existing development database
-from the previous schema must be dropped and recreated; the current baseline is not an
-in-place migration for that database. The rebuilt baseline is
-`20261106_0001_baseline.py`. Until it is frozen for a release it may be regenerated; after
-that, every schema change is a new revision that preserves existing rows (backfill a new
+The baseline `20261106_0001_baseline.py` is the schema rebuilt for zones and shipped in
+v0.3.0; a v0.2.x database is not upgraded to it. It is frozen: every schema change is a new
+revision that preserves existing rows (backfill a new
 required column, for instance with a server default). Never edit a revision that shipped in
 a release. Downgrades are not supported: `downgrade()` raises, and going back means
 restoring a database backup.

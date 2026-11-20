@@ -34,9 +34,8 @@ Each release publishes:
 | `lumewarp-gateway` | `lumewarp` (distroless). Arguments are the gateway's [flags](./gateway.md#flags). | 65532 | `/var/lib/lumewarp`, for the cached snapshot |
 | `lumewarp-control-plane` | `python -m lumewarp_control_plane serve` (Python 3.12, with the Admin UI built in). The command is a [CLI command](./control-plane.md#cli): `migrate`, `hash-password`, ... | 10001 | none |
 
-The database baseline has been rebuilt for zones. Recreate an existing development database
-from the previous schema before running the current migrations; it is not upgraded in place
-([Upgrades](./upgrades.md)).
+v0.3.0 rebuilt the database baseline for zones: a v0.2.x database is not upgraded, so
+v0.3.0 starts on a new database ([Upgrades](./upgrades.md)).
 
 ### Building images
 
@@ -70,7 +69,7 @@ A zone separates gateway configuration and traffic, not teams or identity. See [
 | Setting | Where | Why |
 | --- | --- | --- |
 | `LUMEWARP_DATABASE_URL` | Control plane | PostgreSQL 16+, as a SQLAlchemy async URL. |
-| `migrate` | Control plane CLI, once | Creates the schema. `serve` creates the default zone and every zone declared by a gateway-token environment variable. Recreate an existing development database from before the rebuilt zone baseline. |
+| `migrate` | Control plane CLI, once | Creates the schema. `serve` creates the default zone and every zone declared by a gateway-token environment variable. A v0.2.x database is not upgraded to v0.3.0. |
 | `LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN` | Control plane | One fixed token per zone. `<ID>` is the uppercase zone ID with `-` replaced by `_`; the token must be at least 32 characters. It is read at startup, and only its SHA-256 hash is kept in memory. |
 | Same zone token | Gateway | Supply the same secret through the environment variable named by `--gateway-token-env`; the gateway also sends the zone on both RPCs. Any number of gateway processes may share it. |
 | A persistent `--state-dir` | Gateway | The last good snapshot, so a restart while the control plane is down still serves. |
