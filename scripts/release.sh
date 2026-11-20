@@ -110,6 +110,8 @@ scripts/release.sh --check "$version"
 git add gateway/Cargo.toml gateway/Cargo.lock control-plane/pyproject.toml \
   control-plane/src/lumewarp_control_plane/__init__.py control-plane/uv.lock \
   ui/package.json deploy/helm/lumewarp/Chart.yaml "$stack/Chart.yaml" "$stack/Chart.lock"
+# The example plugins' lockfiles pin the SDK crates' version too.
+find gateway/plugins -name Cargo.lock -print0 | xargs -0 git add
 # The images in the plain manifests carry the new version.
 deploy/kubernetes/generate.sh
 git add deploy/kubernetes
