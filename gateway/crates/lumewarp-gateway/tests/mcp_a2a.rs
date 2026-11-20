@@ -38,7 +38,7 @@ use lumewarp_proto::usage::v1::{RequestOutcome, TrafficKind, UsageEvent};
 use prost::Message;
 use sha2::{Digest, Sha256};
 
-const SCOPE: &str = "scope-mcp";
+const ZONE: &str = "zone-mcp";
 /// base64 of a 32-byte `LUMEWARP_GATEWAY_ID_KEY` (`a2a_ids::MIN_KEY_BYTES`).
 const ID_KEY: &str = "bHVtZXdhcnAtdGVzdC1nYXRld2F5LWlkLWtleS0zMmJ5";
 
@@ -99,7 +99,7 @@ fn snapshot(version: u64) -> Snapshot {
         mcp_servers: vec![mcp_server("s1")],
         a2a_agents: vec![a2a_agent("a1")],
         created_at_unix_ms: 1,
-        scope: SCOPE.into(),
+        zone: ZONE.into(),
         ..Default::default()
     }
 }
@@ -157,7 +157,7 @@ impl Gw {
             .args(["--gateway-token-env", "LUMEWARP_MCP_TEST_TOKEN"])
             .arg("--state-dir")
             .arg(state)
-            .args(["--scope", SCOPE])
+            .args(["--zone", ZONE])
             .arg("--local-config")
             .arg(local)
             .env("LUMEWARP_MCP_TEST_TOKEN", "gw-token")
@@ -400,7 +400,7 @@ fn streaming_snapshot(agent: SocketAddr) -> Snapshot {
             ..Default::default()
         }],
         created_at_unix_ms: 1,
-        scope: SCOPE.into(),
+        zone: ZONE.into(),
         ..Default::default()
     }
 }
@@ -442,12 +442,12 @@ async fn wait_ready(gw: &Gw) {
 }
 
 async fn next_usage_event(cp: &mut usage_cp::FakeCp, what: &str) -> UsageEvent {
-    let (authorization, event) = tokio::time::timeout(Duration::from_secs(10), cp.events.recv())
+    let report = tokio::time::timeout(Duration::from_secs(10), cp.events.recv())
         .await
         .unwrap_or_else(|_| panic!("no usage event for the {what} stream"))
         .expect("fake control plane stopped");
-    assert_eq!(authorization.as_deref(), Some("Bearer gw-token"));
-    event
+    assert_eq!(report.authorization.as_deref(), Some("Bearer gw-token"));
+    report.event
 }
 
 /// I2: a stream is reported when it ends, with the real outcome and duration —
@@ -538,7 +538,7 @@ fn mcp_snapshot(server: SocketAddr) -> Snapshot {
             ..Default::default()
         }],
         created_at_unix_ms: 1,
-        scope: SCOPE.into(),
+        zone: ZONE.into(),
         ..Default::default()
     }
 }

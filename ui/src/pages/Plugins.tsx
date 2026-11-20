@@ -6,6 +6,7 @@ import { DataTable } from "../components/Table";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { usePlugins } from "../hooks";
+import { useZone } from "../zone";
 import { settingTitles, strategyDescription, strategyTitle } from "../lib/schema";
 
 /*
@@ -21,7 +22,8 @@ const KINDS: { kind: PluginKind; title: string }[] = [
 ];
 
 export function Plugins() {
-  const plugins = usePlugins(undefined, true, 10_000);
+  const { id: zone } = useZone();
+  const plugins = usePlugins(undefined, true, 10_000, zone);
   const rows = plugins.data ?? [];
 
   // Every connected gateway any plugin mentions, so "which gateways have it" has a denominator.

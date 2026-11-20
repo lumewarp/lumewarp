@@ -7,7 +7,10 @@ stored; the request id finds the details in OTel.
 
 The permission scope is exactly `/usage`'s, and the parent checks are shared with it rather
 than copied. A plain member sees their own user-owned keys only, a team admin (inherited org
-admin included) the whole team, and an installation admin everything.
+admin included) the whole team, and an installation admin everything. Only an installation
+admin sees the routing chain: for every other caller `alias`, `router`, `fallback`, `model`,
+`upstream`, `upstream_model` and `attempts` are null, and the `model`/`alias`/`router`
+filters answer 403 `routing_detail_forbidden`.
 """
 
 from __future__ import annotations
@@ -33,6 +36,7 @@ from lumewarp_control_plane.api.key_refs import KeyRefOut, key_refs
 from lumewarp_control_plane.api.schemas import Page, ReadModel
 from lumewarp_control_plane.api.usage import _check_scope_filters
 from lumewarp_control_plane.authz import Authz
+from lumewarp_control_plane.errors import routing_detail_forbidden
 from lumewarp_control_plane.models import (
     CatalogKind,
     CatalogName,
@@ -58,23 +62,29 @@ ToQuery = Annotated[
 
 
 class RequestOut(ReadModel):
-    """One gateway request: the name the client called and where it landed."""
+    """One gateway request: the name the client called and where it landed.
+
+    The routing fields (`alias`, `router`, `fallback`, `model`, `upstream`,
+    `upstream_model`, `attempts`) are filled only for an installation admin; every other
+    caller receives them as null.
+    """
 
     request_id: uuid.UUID
     ts: datetime
+    zone: str
     kind: TrafficKind
     endpoint: str
     requested: str
-    alias: str
+    alias: str | None = None
     alias_id: uuid.UUID | None = None
-    router: str
+    router: str | None = None
     router_id: uuid.UUID | None = None
-    fallback: bool
-    model: str
+    fallback: bool | None = None
+    model: str | None = None
     model_id: uuid.UUID | None = None
-    upstream: str
-    upstream_model: str
-    attempts: int
+    upstream: str | None = None
+    upstream_model: str | None = None
+    attempts: int | None = None
     status: int
     outcome: RequestOutcome
     stream: bool
@@ -173,6 +183,9 @@ async def list_requests(
     router: Annotated[
         str | None, Query(description="Only requests that went through this router name.")
     ] = None,
+    zone: Annotated[
+        str | None, Query(description="Only requests of this zone; omitted reads every zone.")
+    ] = None,
     status: Annotated[
         int | None,
         Query(ge=100, le=599, description="Only responses with this HTTP status."),
@@ -200,8 +213,11 @@ async def list_requests(
     need an explicit `kind`. The permission scope is `/usage`'s: a plain member sees their
     own user-owned keys only, a team admin (inherited org admin included) their teams, and
     an installation admin everything. An out-of-scope `team_id` or `key_id` answers exactly
-    as it does on `/usage` (404 or 403). `playground_user_id` is set when the request came
-    from the Admin UI Playground.
+    as it does on `/usage` (404 or 403). Only an installation admin sees the routing chain:
+    for every other caller the `model`, `alias`, `router`, `upstream`, `upstream_model`,
+    `fallback` and `attempts` fields are null, and those name filters answer 403
+    `routing_detail_forbidden`. `playground_user_id` is set when the request came from the
+    Admin UI Playground.
     """
     now = datetime.now(UTC)
     start = (aware(from_, "from") or now - timedelta(hours=24)).astimezone(UTC)
@@ -209,10 +225,13 @@ async def list_requests(
     if end <= start:
         raise validation_error("to", "must be after from")
     ensure_range(start, end)
+    is_admin = await authz.is_admin()
+    if not is_admin and any(name is not None for name in (model, alias, router)):
+        # Refuse before resolving a name or checking scope: no routing shape leaks either way.
+        raise routing_detail_forbidden()
     scoped_team = await _check_scope_filters(
         session, authz, team_id, user_id, service_account_id, key_id
     )
-    is_admin = await authz.is_admin()
     if is_admin:
         readable = None
         admin_teams = None
@@ -220,8 +239,8 @@ async def list_requests(
         candidates = set(await session.scalars(select(Team.id)))
         # A narrowing filter already proved TEAM_READ; otherwise limit to readable teams.
         readable = None if scoped_team is not None else await authz.readable_teams(candidates)
-        # The same server-side predicate as `/usage`: a plain member only ever sees rows of
-        # their own user-owned keys, whatever filters or grouping asked for.
+        # Narrower than `/usage`, which sums whole teams for a plain member: requests are
+        # per-request, so a plain member only ever sees rows of their own user-owned keys.
         admin_teams = await authz.admin_teams(candidates)
     if readable is not None and not readable:
         return Page[RequestOut](items=[], next_cursor=None)
@@ -256,6 +275,8 @@ async def list_requests(
         filters.append(UsageEvent.owner_id == service_account_id)
     if key_id is not None:
         filters.append(UsageEvent.key_id == key_id)
+    if zone is not None:
+        filters.append(UsageEvent.zone == zone)
     if readable is not None:
         filters.append(UsageEvent.team_id.in_(readable))
     if admin_teams is not None:
@@ -293,19 +314,22 @@ async def list_requests(
         RequestOut(
             request_id=event.request_id,
             ts=event.ts,
+            zone=event.zone,
             kind=event.kind,
             endpoint=event.endpoint,
             requested=event.requested,
-            alias=event.alias,
-            alias_id=event.alias_id,
-            router=event.router,
-            router_id=event.router_id,
-            fallback=event.fallback,
-            model=event.model,
-            model_id=event.model_id,
-            upstream=event.upstream,
-            upstream_model=event.upstream_model,
-            attempts=event.attempts,
+            # Routing internals are for an installation admin only. Everything below is
+            # null for a member or team/org admin, whatever the event recorded.
+            alias=event.alias if is_admin else None,
+            alias_id=event.alias_id if is_admin else None,
+            router=event.router if is_admin else None,
+            router_id=event.router_id if is_admin else None,
+            fallback=event.fallback if is_admin else None,
+            model=event.model if is_admin else None,
+            model_id=event.model_id if is_admin else None,
+            upstream=event.upstream if is_admin else None,
+            upstream_model=event.upstream_model if is_admin else None,
+            attempts=event.attempts if is_admin else None,
             status=event.status,
             outcome=event.outcome,
             stream=event.stream,

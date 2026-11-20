@@ -80,7 +80,7 @@ for (const [where, width] of [["desktop", 1280], ["390 px", 390]] as const) {
     const panel = (id: string) => page.locator(`[id="${id}"]`);
     await expect(page.getByRole("tabpanel")).toHaveCount(1);
     await expect(panel(membersPanel)).toBeVisible();
-    await expect(panel(membersPanel)).toContainText("No members yet.");
+    await expect(panel(membersPanel)).toContainText("Add member");
     for (const id of [accountsPanel, settingsPanel]) {
       await expect(panel(id)).toBeHidden();
       await expect(panel(id)).toBeEmpty();
@@ -95,7 +95,7 @@ for (const [where, width] of [["desktop", 1280], ["390 px", 390]] as const) {
     await expect(panel(accountsPanel)).toBeHidden();
     await expect(panel(accountsPanel)).toBeEmpty();
     await expect(panel(membersPanel)).toBeVisible();
-    await expect(page.getByRole("tabpanel")).toContainText("No members yet.");
+    await expect(page.getByRole("tabpanel")).toContainText("Add member");
     await expect(page.getByRole("button", { name: "Add member" })).toBeVisible();
 
     // Enter selects the focused tab: its panel mounts, the previous one goes away.
@@ -117,7 +117,7 @@ for (const [where, width] of [["desktop", 1280], ["390 px", 390]] as const) {
     await page.keyboard.press("Space");
     await expect(members).toHaveAttribute("aria-selected", "true");
     await expect(panel(membersPanel)).toBeVisible();
-    await expect(panel(membersPanel)).toContainText("No members yet.");
+    await expect(panel(membersPanel)).toContainText("Add member");
 
     // Home and End move the focus too, without selecting.
     await page.keyboard.press("End");

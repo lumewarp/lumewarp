@@ -43,12 +43,16 @@ it off the public admin ingress.
 
 ## CLI
 
+`serve` creates the default zone named by `LUMEWARP_ZONE` and a zone for every configured
+gateway token at startup if each row is missing. The insert is idempotent and leaves an
+existing row alone, including an archived row. One compiler task iterates all live zones;
+each zone has its own source revision, outbox and config version stream.
+
 | Command | What it does |
 | --- | --- |
 | `serve` | HTTP API + Admin UI (uvicorn, one worker), gRPC servers and background loops. `--http-bind` / `--grpc-bind` override the env settings. |
-| `migrate [REV]` / `migrate --downgrade REV` | Apply or roll back Alembic migrations (default `head`). |
+| `migrate [REV]` | Apply Alembic migrations up to `REV` (default `head`). Downgrades are not supported; restore a database backup instead. |
 | `openapi [-o FILE]` | Print the OpenAPI document; builds the app without connecting to the database. |
-| `bootstrap [--name N] [--scope S]` | Create the config scope row and an optionally labeled `lwg-...` gateway token; the secret goes to stdout once. |
 | `hash-password` | Read a password from stdin (or prompt for it) and print its argon2id hash for `LUMEWARP_BREAK_GLASS_PASSWORD_HASH`. |
 
 The console script is `lumewarp-control-plane`; `python -m lumewarp_control_plane` is
@@ -56,7 +60,9 @@ equivalent.
 
 ## Settings
 
-`pydantic-settings` reads these from the environment with the `LUMEWARP_` prefix; names are
+The schema baseline has been rebuilt for zones. An existing development database from the
+previous schema must be dropped and recreated; it is not migrated in place. `pydantic-settings` reads these
+from the environment with the `LUMEWARP_` prefix; names are
 case-insensitive. `src/lumewarp_control_plane/settings.py` is the source of truth.
 
 | Environment variable | Default | Meaning |
@@ -67,7 +73,8 @@ case-insensitive. `src/lumewarp_control_plane/settings.py` is the source of trut
 | `LUMEWARP_GRPC_BIND` | `127.0.0.1:50051` | Gateway-facing gRPC bind address. |
 | `LUMEWARP_METRICS_BIND` | `127.0.0.1:9465` | Prometheus metrics listener started by `serve` (`host:port`); empty string disables it. Not the admin API port, and not 9464 (the gateway admin listener's default). A bind failure aborts startup. |
 | `LUMEWARP_GRPC_TLS_CERT_FILE` / `LUMEWARP_GRPC_TLS_KEY_FILE` | unset | PEM certificate chain and key. Both or neither; unset means plaintext gRPC. |
-| `LUMEWARP_INITIAL_ADMIN_EMAIL` | unset | Email that becomes `proxy_admin` on its first verified OIDC login while no proxy_admin exists. Unset leaves break-glass as the only way to create the first one. |
+| `LUMEWARP_INITIAL_ADMIN_EMAIL` | unset | Email that becomes `proxy_admin` on its first OIDC login while no proxy_admin exists. Unset leaves break-glass as the only way to create the first one. |
+| `LUMEWARP_OIDC_REQUIRE_EMAIL_VERIFIED` | `true` | Require `email_verified: true` before an OIDC email links an existing account, creates a user or bootstraps the initial admin. `false` trusts the claim and startup logs a warning; see [Sign-in and authorization](./identity.md#sso-login-oidc). |
 | `LUMEWARP_BREAK_GLASS_PASSWORD_HASH` | unset | Argon2id hash of the emergency password (`lumewarp-control-plane hash-password`); an invalid hash aborts startup. See [Emergency access](./identity.md#emergency-access-break-glass). |
 | `LUMEWARP_BREAK_GLASS_PASSWORD` | unset | Plaintext emergency password; refused unless `LUMEWARP_DEV_MODE=true`. The hash wins if both are set. |
 | `LUMEWARP_DEV_MODE` | `false` | Development only: allows the plaintext password above. |
@@ -75,7 +82,8 @@ case-insensitive. `src/lumewarp_control_plane/settings.py` is the source of trut
 | `LUMEWARP_BREAK_GLASS_ALLOWED_CIDRS` | empty (any) | Client networks allowed to use the emergency login; others get 404. |
 | `LUMEWARP_TRUSTED_PROXIES` | empty | Proxy networks whose `X-Forwarded-For` is followed to find the client address for the two limits above. |
 | `LUMEWARP_AUTHZ_BACKEND` | `builtin` | Authorization backend for direct org/team relations: `builtin` (`org_admins` + `team_members`), `openfga`, `http` or a `lumewarp.authz` entry-point name. See [Authorization](../admin/index.md); the OpenFGA settings are in [Identity](./identity.md#openfga). |
-| `LUMEWARP_SCOPE` | `default` | `Snapshot.scope` this installation publishes. Gateways must use the same value. |
+| `LUMEWARP_ZONE` | `default` | Default config zone created at startup. Gateways authenticate into a zone with that zone's fixed environment token. |
+| `LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN` | unset | One fixed token per zone; `<ID>` is the uppercase zone ID with `-` replaced by `_`. Requires at least 32 characters. Declares the zone at startup; only its SHA-256 hash is kept in memory. |
 | `LUMEWARP_MAX_SNAPSHOT_BYTES` | `67108864` (64 MiB) | Compilation fails above this serialized size. |
 | `LUMEWARP_MAX_SNAPSHOT_KEYS` | `200000` | Compilation fails above this key count. |
 | `LUMEWARP_GRPC_MAX_MESSAGE_BYTES` | `67108864` (64 MiB) | gRPC send/receive limit, additionally capped by grpcio's hard limit. |
@@ -83,6 +91,10 @@ case-insensitive. `src/lumewarp_control_plane/settings.py` is the source of trut
 | `LUMEWARP_CONFIG_VERSIONS_RETAINED` | `50` | Versions whose payloads compaction keeps (the latest is always kept; session-pinned bases are kept too). |
 | `LUMEWARP_MAX_USAGE_BATCH_EVENTS` | `10000` | Maximum events per `UsageService.Report` (1–10000; keeps asyncpg's parameter count in range). |
 | `LUMEWARP_BACKGROUND_ENABLED` | `true` | Start gRPC and the loops in `serve`. Tests set `false`; keep it true in production. |
+
+To rotate a gateway token, set the same new value in the control plane's zone variable and
+the gateway's environment variable, then restart both processes so they load it. There is
+no grace period; gateways continue serving their last good snapshot while reconnecting.
 
 Sign-in, session, authorization backend and key reconciler settings are listed in
 [Sign-in and authorization](./identity.md).

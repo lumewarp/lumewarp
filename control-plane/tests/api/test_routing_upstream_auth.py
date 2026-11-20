@@ -13,15 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane import upstream_client
 from lumewarp_control_plane._proto.lumewarp.config.v1 import config_service_pb2 as cpb
-from lumewarp_control_plane.compiler.compile import compile_scope
+from lumewarp_control_plane.compiler.compile import compile_zone
 from lumewarp_control_plane.grpc import ProbeGatewayGone, ProbeTimeout, ProbeUnavailable
-from lumewarp_control_plane.models import (
-    AuditLog,
-    GatewaySession,
-    GatewayToken,
-    Upstream,
-)
-from tests.api.helpers import ADMIN_AUTH, report_plugins, suffix
+from lumewarp_control_plane.models import AuditLog, GatewaySession, Upstream
+from tests.api.helpers import ADMIN_AUTH, app_zone, create_model, report_plugins, suffix
 
 H = ADMIN_AUTH
 PREFIX = "up-auth-test-"
@@ -46,14 +41,8 @@ def _create(client, **body):
 
 
 def _model(client, upstream_id, **body):
-    body = {
-        "name": f"dep-{suffix()}",
-        "upstream_id": upstream_id,
-        "upstream_model": "name",
-        "model_type": "llm",
-        **body,
-    }
-    return client.post("/api/v1/models", json=body, headers=H)
+    model = create_model(client, upstream_id, name=f"dep-{suffix()}", upstream_model="name", **body)
+    return client.get(f"/api/v1/models/{model['id']}", headers=H)
 
 
 async def _row(committed: AsyncSession, upstream_id: str) -> Upstream:
@@ -107,7 +96,6 @@ async def gateway(committed: AsyncSession, api_scope: str) -> AsyncIterator:
 
     yield report
     await committed.rollback()
-    await committed.execute(delete(GatewayToken).where(GatewayToken.name.like(f"{PREFIX}%")))
     await committed.execute(
         delete(GatewaySession).where(GatewaySession.gateway_id.like(f"{PREFIX}%"))
     )
@@ -242,7 +230,7 @@ async def test_compile_emits_auth_and_its_capability(client, committed, api_sett
     await gateway()
     body = _create(client, auth=AUTH).json()
     committed.expire_all()
-    compiled = await compile_scope(committed, api_settings.scope, require_local_membership=True)
+    compiled = await compile_zone(committed, api_settings.zone, require_local_membership=True)
     upstream = next(u for u in compiled.snapshot.upstreams if u.name == body["name"])
     assert upstream.auth.plugin.plugin == PLUGIN
     assert upstream.auth.plugin.params_json == '{"ttl_ms":1000}'
@@ -267,7 +255,7 @@ def _saved_test(client, upstream_id: str):
 
 
 def _saved_model_test(client, model_id: str):
-    return client.post(f"/api/v1/models/{model_id}/test", headers=H)
+    return client.post(f"/api/v1/models/{model_id}/deployments/{app_zone(client)}/test", headers=H)
 
 
 async def test_saved_upstream_test_uses_a_capable_gateway(client, api_scope, gateway) -> None:

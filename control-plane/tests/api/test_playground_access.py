@@ -5,11 +5,12 @@ from datetime import UTC, datetime
 from sqlalchemy import delete
 
 from lumewarp_control_plane.models import ModelAccess, TeamMember
+from tests.api.helpers import publish_zones, set_playground_url
 from tests.api.test_playground import setup_keys
 from tests.factories import make_key, make_member, make_model, make_team
 
 
-async def test_effective_models_and_live_team(client, committed):
+async def test_effective_models_and_live_team(client, committed, api_engine):
     own, _, headers, _ = await setup_keys(committed)
     team = await make_team(
         committed, model_access=ModelAccess.LIST, allowed_models=["visible", "team-only"]
@@ -24,12 +25,14 @@ async def test_effective_models_and_live_team(client, committed):
     )
     key = await make_key(committed, team, user)
     await committed.commit()
+    await publish_zones(api_engine)
     response = client.get("/api/v1/playground", headers=headers)
     entry = next(item for item in response.json()["keys"] if item["id"] == str(key.id))
     assert entry["models"] == ["visible"]
 
     team.deleted_at = datetime.now(UTC)
     await committed.commit()
+    await publish_zones(api_engine)
     response = client.get("/api/v1/playground", headers=headers)
     assert str(key.id) not in [item["id"] for item in response.json()["keys"]]
     response = client.post(
@@ -47,6 +50,7 @@ async def test_effective_models_and_live_team(client, committed):
         )
     )
     await committed.commit()
+    await publish_zones(api_engine)
     response = client.get("/api/v1/playground", headers=headers)
     assert response.json()["keys"] == []
     response = client.post(
@@ -58,7 +62,7 @@ async def test_effective_models_and_live_team(client, committed):
     assert response.json()["error"]["message"] == "key not found"
 
 
-async def test_only_llm_and_typed_effective_models(client, committed):
+async def test_only_llm_and_typed_effective_models(client, committed, api_engine):
     from pydantic import SecretStr
 
     from lumewarp_control_plane.models import ModelType
@@ -72,6 +76,7 @@ async def test_only_llm_and_typed_effective_models(client, committed):
     await make_router(committed, "chat-router", [llm])
     await make_router(committed, "embed-router", [embedding])
     await committed.commit()
+    await publish_zones(api_engine)
     response = client.get("/api/v1/playground", headers=headers)
     models = response.json()["keys"][0]["models"]
     assert {"chat", "chat-alias", "chat-router"} <= set(models)
@@ -81,7 +86,7 @@ async def test_only_llm_and_typed_effective_models(client, committed):
     typed = {m["name"]: m["model_type"] for m in team["typed_models"]}
     assert typed["chat-router"] == "llm" and typed["embed-alias"] == "embedding"
     assert set(team["models"]) == set(typed)
-    client.app.state.settings.playground_gateway_url = "http://gateway:4000"
+    await set_playground_url(client, committed, "http://gateway:4000")
     client.app.state.settings.encryption_key = SecretStr("x" * 32)
     for model in ("embed", "embed-alias", "embed-router"):
         response = client.post(
@@ -95,7 +100,7 @@ async def test_only_llm_and_typed_effective_models(client, committed):
 
 async def test_missing_encryption_key_disables(client, committed):
     own, _, headers, _ = await setup_keys(committed)
-    client.app.state.settings.playground_gateway_url = "http://gateway:4000"
+    await set_playground_url(client, committed, "http://gateway:4000")
     client.app.state.settings.encryption_key = None
     assert client.get("/api/v1/playground", headers=headers).json()["enabled"] is False
     response = client.post(

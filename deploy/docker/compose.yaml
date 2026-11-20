@@ -1,6 +1,6 @@
 # Lumewarp on one Docker host: Postgres, the control plane and one gateway.
 # Described in docs/operations/docker.md. Settings come from `.env` next to this
-# file (copy `env.example`); the gateway token is created after the first start.
+# file (copy `env.example`); the default zone's fixed token is in it too.
 name: lumewarp
 
 x-control-plane: &control-plane
@@ -13,6 +13,8 @@ x-control-plane: &control-plane
     LUMEWARP_HTTP_BIND: 0.0.0.0:8091
     LUMEWARP_GRPC_BIND: 0.0.0.0:50051
     LUMEWARP_METRICS_BIND: 0.0.0.0:9465
+    # The control plane creates the default zone from this token at startup.
+    LUMEWARP_GATEWAY_ZONE_DEFAULT_TOKEN: ${LUMEWARP_GATEWAY_ZONE_DEFAULT_TOKEN:?set LUMEWARP_GATEWAY_ZONE_DEFAULT_TOKEN in .env}
 
 services:
   postgres:
@@ -53,15 +55,14 @@ services:
   gateway:
     image: ghcr.io/lumewarp/lumewarp-gateway:${LUMEWARP_VERSION:-0.1.0}
     restart: unless-stopped
-    profiles: ["gateway"]   # started once LUMEWARP_GATEWAY_TOKEN is in .env
     command:
       - --control-plane=http://control-plane:50051
-      - --gateway-token-env=LUMEWARP_GATEWAY_TOKEN
+      - --gateway-token-env=LUMEWARP_GATEWAY_ZONE_DEFAULT_TOKEN
       - --state-dir=/var/lib/lumewarp/state
-      - --scope=default
+      - --zone=default
       - --local-config=/etc/lumewarp/local.yaml
     environment:
-      LUMEWARP_GATEWAY_TOKEN: ${LUMEWARP_GATEWAY_TOKEN:-}
+      LUMEWARP_GATEWAY_ZONE_DEFAULT_TOKEN: ${LUMEWARP_GATEWAY_ZONE_DEFAULT_TOKEN:?set LUMEWARP_GATEWAY_ZONE_DEFAULT_TOKEN in .env}
       LUMEWARP_ENCRYPTION_KEY: ${LUMEWARP_ENCRYPTION_KEY:-}
       LUMEWARP_GATEWAY_ID_KEY: ${LUMEWARP_GATEWAY_ID_KEY:-}
       LUMEWARP_GATEWAY_PUBLIC_URL: ${LUMEWARP_GATEWAY_PUBLIC_URL:-}

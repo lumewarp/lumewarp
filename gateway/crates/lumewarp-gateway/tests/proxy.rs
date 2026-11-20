@@ -486,3 +486,149 @@ async fn sigterm_drains_an_in_flight_stream_and_exits_successfully() {
     .await;
     assert!(status.success(), "gateway shutdown status: {status}");
 }
+
+async fn forwarded_body(mock: &mut Mock, gateway: &Gateway, path: &str, body: &[u8]) -> Value {
+    let response = gateway
+        .request("POST", path, Bytes::copy_from_slice(body), &[])
+        .await;
+    assert_eq!(response.status(), 200);
+    bytes(response).await;
+    serde_json::from_slice(&mock.next().await.body).unwrap()
+}
+
+#[tokio::test]
+async fn router_reasoning_default_fills_chat_and_responses() {
+    let mut mock = Mock::start(Behavior::Json).await;
+    let gateway = Gateway::start_from_yaml(
+        format!(
+            "upstreams:\n  - {{name: u, kind: openai_compatible, base_url: 'http://{}/prefix/v1'}}\nmodels:\n  - {{type: llm, name: d, upstream: u, upstream_model: actual}}\nrouters:\n  - {{name: public, members: [{{model: d}}], reasoning_default_level: low}}\naliases:\n  - {{name: alias, target: public}}\n",
+            mock.addr
+        ),
+        &[],
+    )
+    .await;
+
+    let body = forwarded_body(
+        &mut mock,
+        &gateway,
+        "/v1/chat/completions",
+        br#"{"model":"public","messages":[]}"#,
+    )
+    .await;
+    assert_eq!(body["reasoning_effort"], "low");
+
+    let body = forwarded_body(
+        &mut mock,
+        &gateway,
+        "/v1/chat/completions",
+        br#"{"model":"public","reasoning_effort":null}"#,
+    )
+    .await;
+    assert_eq!(body["reasoning_effort"], "low");
+
+    let body = forwarded_body(
+        &mut mock,
+        &gateway,
+        "/v1/chat/completions",
+        br#"{"model":"public","reasoning_effort":"high"}"#,
+    )
+    .await;
+    assert_eq!(body["reasoning_effort"], "high");
+
+    let body = forwarded_body(
+        &mut mock,
+        &gateway,
+        "/v1/chat/completions",
+        br#"{"model":"alias"}"#,
+    )
+    .await;
+    assert_eq!(body["reasoning_effort"], "low");
+
+    let body = forwarded_body(
+        &mut mock,
+        &gateway,
+        "/v1/responses",
+        br#"{"model":"public","input":"hi"}"#,
+    )
+    .await;
+    assert_eq!(body["reasoning"]["effort"], "low");
+
+    let body = forwarded_body(
+        &mut mock,
+        &gateway,
+        "/v1/responses",
+        br#"{"model":"public","reasoning":{"effort":null,"summary":"auto"}}"#,
+    )
+    .await;
+    assert_eq!(body["reasoning"]["effort"], "low");
+    assert_eq!(body["reasoning"]["summary"], "auto");
+
+    let body = forwarded_body(
+        &mut mock,
+        &gateway,
+        "/v1/responses",
+        br#"{"model":"public","reasoning":{"effort":"high","summary":"auto"}}"#,
+    )
+    .await;
+    assert_eq!(body["reasoning"]["effort"], "high");
+    assert_eq!(body["reasoning"]["summary"], "auto");
+}
+
+#[tokio::test]
+async fn router_reasoning_default_runs_before_the_member_transform() {
+    let mut mock = Mock::start(Behavior::Json).await;
+    let gateway = Gateway::start_from_yaml(
+        format!(
+            "upstreams:\n  - {{name: u, kind: openai_compatible, base_url: 'http://{}/prefix/v1'}}\nmodels:\n  - {{type: llm, name: mapped, upstream: u, upstream_model: actual, reasoning_effort: {{mode: mapped, fragments: {{low: {{chat_template_kwargs: {{enable_thinking: false}}}}}}}}}}\n  - {{type: llm, name: stripped, upstream: u, upstream_model: actual, reasoning_effort: {{mode: strip}}}}\nrouters:\n  - {{name: mapped-router, members: [{{model: mapped}}], reasoning_default_level: low}}\n  - {{name: strip-router, members: [{{model: stripped}}], reasoning_default_level: low}}\n",
+            mock.addr
+        ),
+        &[],
+    )
+    .await;
+
+    let body = forwarded_body(
+        &mut mock,
+        &gateway,
+        "/v1/chat/completions",
+        br#"{"model":"mapped-router"}"#,
+    )
+    .await;
+    assert!(body.get("reasoning_effort").is_none());
+    assert_eq!(body["chat_template_kwargs"]["enable_thinking"], false);
+
+    let body = forwarded_body(
+        &mut mock,
+        &gateway,
+        "/v1/chat/completions",
+        br#"{"model":"strip-router"}"#,
+    )
+    .await;
+    assert!(body.get("reasoning_effort").is_none());
+}
+
+#[tokio::test]
+async fn router_reasoning_default_reaches_a_fallback_attempt() {
+    let mut good = Mock::start(Behavior::Json).await;
+    let bad = Mock::start(Behavior::ImmediateClose).await;
+    let gateway = Gateway::start_from_yaml(
+        format!(
+            "upstreams:\n  - {{name: bad, kind: openai_compatible, base_url: 'http://{}/prefix/v1', timeout_ms: 1000}}\n  - {{name: good, kind: openai_compatible, base_url: 'http://{}/prefix/v1'}}\nmodels:\n  - {{type: llm, name: primary, upstream: bad, upstream_model: actual}}\n  - {{type: llm, name: backup, upstream: good, upstream_model: actual}}\nrouters:\n  - {{name: public, members: [{{model: primary}}], fallbacks: [backup], retry: {{max_attempts: 3}}, reasoning_default_level: low}}\n",
+            bad.addr, good.addr
+        ),
+        &[],
+    )
+    .await;
+
+    let response = gateway
+        .request(
+            "POST",
+            "/v1/chat/completions",
+            br#"{"model":"public"}"#.as_slice(),
+            &[],
+        )
+        .await;
+    assert_eq!(response.status(), 200);
+    bytes(response).await;
+    let body: Value = serde_json::from_slice(&good.next().await.body).unwrap();
+    assert_eq!(body["reasoning_effort"], "low");
+}

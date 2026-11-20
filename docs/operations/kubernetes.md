@@ -37,13 +37,15 @@ The manifests have no Valkey, no persistent gateway state and no monitoring obje
 ## Create the Secrets
 
 The manifests reference Secrets by name and never contain a credential. From a checkout,
-`deploy/kubernetes/create-secrets.sh` creates the namespace and the four Secrets with random
-values; a Secret that already exists is left alone, so a rerun never changes a password the
-database already uses. Without a checkout, the same by hand:
+`deploy/kubernetes/create-secrets.sh` creates the namespace and the required Secrets with
+random values, including the default zone's gateway token; an existing Secret is left alone,
+so a rerun never changes a value already in use. Without a checkout, create the other
+Secrets by hand and provide the same gateway-token environment contract:
 
 ```sh
 kubectl create namespace lumewarp --save-config
 PASSWORD="$(openssl rand -hex 24)"
+GATEWAY_TOKEN="$(openssl rand -hex 48)"
 
 kubectl -n lumewarp create secret generic lumewarp-postgres --from-literal=password="$PASSWORD"
 kubectl -n lumewarp create secret generic lumewarp-database \
@@ -52,6 +54,8 @@ kubectl -n lumewarp create secret generic lumewarp-openfga-datastore \
   --from-literal=uri="postgres://lumewarp:${PASSWORD}@lumewarp-postgres:5432/openfga?sslmode=disable"
 kubectl -n lumewarp create secret generic lumewarp-encryption-key \
   --from-literal=encryption-key="$(openssl rand -hex 32)"
+kubectl -n lumewarp create secret generic lumewarp-gateway-tokens \
+  --from-literal=LUMEWARP_GATEWAY_ZONE_DEFAULT_TOKEN="$GATEWAY_TOKEN"
 ```
 
 | Secret | Key | Content |
@@ -60,9 +64,9 @@ kubectl -n lumewarp create secret generic lumewarp-encryption-key \
 | `lumewarp-database` | `database-url` | The control plane's SQLAlchemy async URL to the `lumewarp` database. |
 | `lumewarp-openfga-datastore` | `uri` | OpenFGA's URL to the `openfga` database. |
 | `lumewarp-encryption-key` | `encryption-key` | `LUMEWARP_ENCRYPTION_KEY`, 32+ characters, given to both Lumewarp components; it seals the upstream API keys stored in the Admin UI, and changing it makes them unreadable ([Upstream API keys](./helm.md#upstream-api-keys)). |
-| `lumewarp-gateway` | `token` | A gateway token, created after the control plane runs (below). |
+| `lumewarp-gateway-tokens` | `LUMEWARP_GATEWAY_ZONE_DEFAULT_TOKEN` | The default zone's fixed token, injected into both components. Add a key for each more zone using `LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN`; `<ID>` is the uppercase zone ID with `-` replaced by `_`. Each value is at least 32 characters. |
 
-## Apply and bootstrap
+## Apply and connect the gateway
 
 Apply the release asset, or the files from a checkout:
 
@@ -88,26 +92,27 @@ kubectl -n lumewarp wait --for=condition=complete job/lumewarp-migrate-1 job/lum
 kubectl -n lumewarp rollout status deploy/lumewarp-control-plane
 ```
 
-The control plane creates gateway tokens itself, so a fresh install has none. A token is a
-scope credential, not bound to a gateway; any number of gateway pods may share it:
+The control plane creates the default zone and every zone declared by a
+`LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN` variable at startup. There is no zone-creation API or UI,
+and gateway tokens are not created through the UI, API or CLI. The gateway uses the same
+fixed zone token through the environment variable named by `--gateway-token-env`; any number
+of gateway pods may share it. See [Gateway settings](./gateway.md) for the handshake details.
+Port-forward the UI when you need to administer the installation:
 
 ```sh
-kubectl -n lumewarp exec deploy/lumewarp-control-plane -- \
-  python -m lumewarp_control_plane bootstrap --name lumewarp-gateway
-kubectl -n lumewarp create secret generic lumewarp-gateway --from-literal=token='lwg-...'
+kubectl -n lumewarp port-forward svc/lumewarp-control-plane 8091:8091
 ```
 
-The gateway pod references that Secret, so until it exists the pod waits with
-`CreateContainerConfigError`; Kubernetes starts it once the Secret is there. If it still
-waits, `kubectl -n lumewarp rollout restart deploy/lumewarp-gateway`. `/readyz` on the admin
-port turns 200 when the gateway has loaded a snapshot.
+Open <http://127.0.0.1:8091/> and sign in (the initial admin or break-glass; see below).
+The gateway becomes ready after it receives its first snapshot. To rotate a token, update
+the control-plane value and the gateway's value, then restart both workloads; there is no
+grace period, and a gateway keeps serving its last good snapshot while reconnecting.
 
 Installation admins, first login and the break-glass password work as in
 [Deploy with Helm](./helm.md#install): the first verified login whose email matches
 `LUMEWARP_INITIAL_ADMIN_EMAIL` becomes the proxy_admin, so add that variable (and the
 settings of [Control plane settings](./control-plane.md)) to the control plane's `env` ([Customize](#customize)). Team and org
-roles live in OpenFGA ([OpenFGA](./identity.md#openfga)). Reach the UI with
-`kubectl -n lumewarp port-forward svc/lumewarp-control-plane 8091:8091`.
+roles live in OpenFGA ([OpenFGA](./identity.md#openfga)).
 
 ## Customize
 

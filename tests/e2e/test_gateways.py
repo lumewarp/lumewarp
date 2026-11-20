@@ -1,8 +1,8 @@
 """Two gateways on one token: each process gets its own id, stream and status row.
 
-A gateway is one process. Both processes generate an id from HOSTNAME at startup, share
-the stack's token, and the flat fleet API lists them as two gateways. A published change
-reaches both, and losing one leaves the other connected.
+A gateway is one process. Both processes share the zone's token and the control plane
+assigns each stream an id prefixed with its HOSTNAME; the flat fleet API lists them as
+two gateways. A published change reaches both, and losing one leaves the other connected.
 """
 
 from stack import wait_for
@@ -25,14 +25,13 @@ def test_two_gateways_on_one_token_both_stay_connected_and_serve(stack):
         state_dir=stack.dir / "state-two", tag="gateway-two", extra_env={"HOSTNAME": "gw-two"}
     )
 
-    # Neither connection replaced the other: two processes, two gateway ids, one token.
+    # Neither connection replaced the other: two processes, two assigned gateway ids.
     wait_for(lambda: len(_connected(stack)) == 2, 15, "two connected gateways")
     rows = _connected(stack)
     gateway_ids = {row["gateway_id"] for row in rows}
     assert len(gateway_ids) == 2
     assert any(name.startswith("gw-one-") for name in gateway_ids), gateway_ids
     assert any(name.startswith("gw-two-") for name in gateway_ids), gateway_ids
-    assert len({row["token"]["id"] for row in rows}) == 1, rows
 
     # Both ACK the current version and both serve it.
     version = stack.current_version()

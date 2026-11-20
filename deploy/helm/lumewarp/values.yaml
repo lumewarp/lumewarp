@@ -13,8 +13,17 @@ global:
   imagePullSecrets: []
   # Extra labels on every resource.
   commonLabels: {}
-  # Snapshot scope this installation publishes; the gateway uses the same one.
-  scope: default
+  # Config zone this installation publishes and the gateway serves.
+  zone: default
+  # Gateway credentials: one fixed token per zone, read by the control plane at startup.
+  # Empty secretName = the chart creates <fullname>-gateway-tokens with a random 48-character
+  # token per zone (kept across upgrades with `lookup`); set it to use an existing Secret that
+  # holds the LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN keys instead.
+  gatewayTokens:
+    secretName: ""
+    # More zones the control plane serves; global.zone is always included. The gateway pod
+    # uses global.zone's key, so other zones need their own gateway release.
+    zones: []
   # Existing Secret with LUMEWARP_ENCRYPTION_KEY (32+ characters) that seals stored upstream
   # API keys; both components get it. Required once an upstream stores a key; changing it makes stored keys unreadable.
   encryptionKey:
@@ -53,6 +62,8 @@ controlPlane:
       key: secret-key
     # External base URL; the redirect URI is <publicUrl>/api/v1/session/oidc/callback.
     publicUrl: ""
+    # Require the IdP's email_verified claim before an email links or creates a user; false trusts it.
+    requireEmailVerified: true
   # Authorization backend (LUMEWARP_AUTHZ_BACKEND): builtin, openfga, http or a `lumewarp.authz` plugin name; settings of http and plugins go in extraEnv.
   authz:
     backend: builtin
@@ -107,7 +118,7 @@ controlPlane:
 
 gateway:
   enabled: true
-  # Every pod is its own gateway (id generated at startup); all share the token. Rate limits are per gateway unless they share Valkey or Redis.
+  # Every pod is its own gateway (the control plane assigns its id at handshake); all share the zone token. Rate limits are per gateway unless they share Valkey or Redis.
   replicaCount: 1
   # HorizontalPodAutoscaler; replaces replicaCount. The CPU target is an average over the pods' CPU requests, so no request means no scaling.
   autoscaling:
@@ -124,10 +135,6 @@ gateway:
     repository: ghcr.io/lumewarp/lumewarp-gateway
     tag: ""
     pullPolicy: IfNotPresent
-  # Existing Secret with a gateway token (`lwg-...`) created by the control plane, passed as LUMEWARP_GATEWAY_TOKEN.
-  token:
-    secretName: lumewarp-gateway
-    key: token
   # Empty = this release's control-plane Service on controlPlane.service.grpcPort; required when controlPlane.enabled=false.
   controlPlaneUrl: ""
   # Listener timeouts; the listen addresses follow service.port and service.adminPort.
@@ -149,7 +156,7 @@ gateway:
     volume: {}
     # Process-wide WASM memory budget in bytes; empty = the gateway default (1 GiB).
     memoryLimitBytes: ""
-    # Existing Secrets whose keys become env variables; name each key LUMEWARP_PLUGIN_SECRET_<NAME> (not scoped per plugin).
+    # Existing Secrets whose keys become env variables; name each key LUMEWARP_PLUGIN_SECRET_<NAME> (one namespace for every plugin).
     secretEnvs: []
   # External base URL of the MCP and A2A endpoints, used for agent cards; empty = A2A answers 503.
   publicUrl: ""
@@ -165,7 +172,7 @@ gateway:
       existingSecretKey: url
     # Sync interval in milliseconds, 10 to 1000; empty = the gateway default (100).
     syncMs: ""
-    # Namespace of the Redis keys; empty = the scope. Gateways that share counts must use the same one.
+    # Namespace of the Redis keys; empty = the zone. Gateways that share counts must use the same one.
     namespace: ""
   service:
     type: ClusterIP

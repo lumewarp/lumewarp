@@ -11,6 +11,9 @@ Control plane
   Metrics:   http://{{ include "lumewarp.controlPlane.name" . }}.{{ .Release.Namespace }}.svc:{{ .Values.controlPlane.service.metricsPort }}/metrics
   {{- end }}
 
+  Port-forward the UI:
+    kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "lumewarp.controlPlane.name" . }} {{ .Values.controlPlane.service.httpPort }}:{{ .Values.controlPlane.service.httpPort }}
+
   Log in at / with SSO. The first verified login matching
   `controlPlane.initialAdminEmail` becomes proxy_admin (then it can assign admins).
   Emergency password login is enabled only when
@@ -19,9 +22,6 @@ Control plane
 {{- end }}
 
 {{- if .Values.gateway.enabled }}
-{{- $kind := ternary "StatefulSet" "Deployment" .Values.gateway.persistence.enabled }}
-{{- $kubectlKind := ternary "statefulset" "deploy" .Values.gateway.persistence.enabled }}
-
 Gateway
   API:       http://{{ include "lumewarp.gateway.name" . }}.{{ .Release.Namespace }}.svc:{{ .Values.gateway.service.port }}/v1
   Metrics:   http://{{ include "lumewarp.gateway.name" . }}.{{ .Release.Namespace }}.svc:{{ .Values.gateway.service.adminPort }}/metrics
@@ -37,20 +37,16 @@ Gateway
              to share them.
   {{- end }}
 
-  The gateway needs a token created by the control plane (`lwg-...`) in Secret
-  {{ .Values.gateway.token.secretName | quote }} key {{ .Values.gateway.token.key | quote }}.
-  Every pod is its own gateway (its id is generated at startup); all pods share the token.
-  {{- if .Values.controlPlane.enabled }}
-  If the pod is waiting, create the Secret and restart the {{ $kind }}:
-    kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "lumewarp.controlPlane.name" . }} -- \
-      python -m lumewarp_control_plane bootstrap --name {{ include "lumewarp.gateway.name" . | quote }}
-    kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.gateway.token.secretName }} \
-      --from-literal={{ .Values.gateway.token.key }}="<the printed lwg-... token>"
-    kubectl -n {{ .Release.Namespace }} rollout restart {{ $kubectlKind }}/{{ include "lumewarp.gateway.name" . }}
-  {{- else }}
-  Create that Secret from a token issued by the external control plane, then restart the
-  {{ $kind }} if needed.
-  {{- end }}
+  The gateway authenticates with the fixed token of zone {{ .Values.global.zone | quote }} in
+  Secret {{ include "lumewarp.gatewayTokens.secretName" . | quote }}, key
+  {{ include "lumewarp.gatewayTokenKey" (dict "zone" .Values.global.zone) | quote }}.
+  The chart creates it with a random 48-character token (kept across upgrades); read it with:
+    kubectl -n {{ .Release.Namespace }} get secret {{ include "lumewarp.gatewayTokens.secretName" . }} \
+      -o jsonpath='{.data.{{ include "lumewarp.gatewayTokenKey" (dict "zone" .Values.global.zone) }}}' | base64 -d
+  Add zones with `global.gatewayTokens.zones`; set `global.gatewayTokens.secretName` to use an
+  existing Secret with the LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN keys instead.
+  Every pod is its own gateway (the control plane assigns its id at handshake); all pods
+  share the zone token.
 {{- else }}
 
 The gateway is disabled (`gateway.enabled=false`).

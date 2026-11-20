@@ -22,6 +22,7 @@ def test_user_crud(client) -> None:
     user = created.json()
     path = f"/api/v1/users/{user['id']}"
     assert user["is_active"] is True
+    assert user["has_signed_in"] is False
     assert client.get(path, headers=ADMIN_AUTH).json() == user
     updated = client.patch(
         path, json={"display_name": "Renamed", "is_active": False}, headers=ADMIN_AUTH
@@ -243,3 +244,24 @@ async def test_user_delete_leaves_a_team_without_admins(client, committed, calle
             "items"
         ]
         assert str(owner.id) not in {r["user_id"] for r in rows}
+
+
+async def test_has_signed_in_follows_the_linked_identity(client, committed) -> None:
+    from lumewarp_control_plane.models import UserIdentity
+
+    user, _ = await user_with_token(committed)
+    await committed.commit()
+    path = f"/api/v1/users/{user.id}"
+    assert client.get(path, headers=ADMIN_AUTH).json()["has_signed_in"] is False
+    committed.add(UserIdentity(user_id=user.id, issuer="test", subject=str(uuid.uuid4())))
+    await committed.commit()
+    assert client.get(path, headers=ADMIN_AUTH).json()["has_signed_in"] is True
+    listed: list[dict] = []
+    cursor = None
+    while True:
+        params = {"limit": 500, **({"cursor": cursor} if cursor else {})}
+        page = client.get("/api/v1/users", headers=ADMIN_AUTH, params=params).json()
+        listed += page["items"]
+        if not (cursor := page["next_cursor"]):
+            break
+    assert next(row for row in listed if row["id"] == str(user.id))["has_signed_in"] is True

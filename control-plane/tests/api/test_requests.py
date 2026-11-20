@@ -144,6 +144,70 @@ async def test_scope_by_role_and_out_of_scope_filters(client, committed) -> None
     assert query(client, auth(org_admin_token), team_id=str(other_team.id)).status_code == 404
 
 
+async def test_routing_detail_is_redacted_for_non_installation_admins(client, committed) -> None:
+    org = await make_org(committed)
+    team = await make_team(committed, org=org)
+    member, member_token = await user_with_token(committed)
+    team_admin, team_admin_token = await user_with_token(committed)
+    org_admin, org_admin_token = await user_with_token(committed)
+    _, installation_token = await user_with_token(committed, installation_admin=True)
+    await make_member(committed, team, member)
+    await make_member(committed, team, team_admin, role=TeamRole.ADMIN)
+    committed.add(OrgAdmin(org_id=org.id, user_id=org_admin.id))
+    key = await make_key(committed, team, member)
+    event = usage_event(key, ts=TS, requested="called")
+    event.model = "served"
+    event.model_id = uuid.uuid4()
+    event.alias = "nick"
+    event.alias_id = uuid.uuid4()
+    event.router = "pool"
+    event.router_id = uuid.uuid4()
+    event.fallback = True
+    event.upstream = "vllm-0"
+    event.upstream_model = "meta/llama"
+    event.attempts = 3
+    committed.add(event)
+    await committed.commit()
+
+    routing_fields = (
+        "model",
+        "model_id",
+        "alias",
+        "alias_id",
+        "router",
+        "router_id",
+        "fallback",
+        "upstream",
+        "upstream_model",
+        "attempts",
+    )
+    for headers in (auth(member_token), auth(team_admin_token), auth(org_admin_token)):
+        rows = items(client, headers, team_id=str(team.id))
+        assert len(rows) == 1
+        assert rows[0]["requested"] == "called"
+        assert {field: rows[0][field] for field in routing_fields} == {
+            field: None for field in routing_fields
+        }
+        for filters in ({"model": "served"}, {"alias": "nick"}, {"router": "pool"}):
+            response = query(client, headers, team_id=str(team.id), **filters)
+            assert response.status_code == 403, (filters, response.text)
+            assert response.json()["error"]["code"] == "routing_detail_forbidden"
+
+    (row,) = items(client, auth(installation_token), team_id=str(team.id))
+    assert (row["model"], row["alias"], row["router"], row["upstream"], row["attempts"]) == (
+        "served",
+        "nick",
+        "pool",
+        "vllm-0",
+        3,
+    )
+    assert row["fallback"] is True and row["upstream_model"] == "meta/llama"
+    for filters in ({"model": "served"}, {"alias": "nick"}, {"router": "pool"}):
+        assert request_ids(client, auth(installation_token), team_id=str(team.id), **filters) == {
+            str(event.request_id)
+        }
+
+
 async def test_each_filter_and_the_default_kind(client, committed) -> None:
     team = await make_team(committed)
     owner, _ = await user_with_token(committed)

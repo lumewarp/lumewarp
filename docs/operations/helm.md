@@ -40,29 +40,25 @@ CHART=oci://ghcr.io/lumewarp/charts/lumewarp
 VERSION=0.1.0
 ```
 
-The control plane creates gateway tokens itself, so a fresh install has no gateway token
-yet. A token is a scope credential with a label, not bound to a gateway id; any number of
-gateway pods may share it. Install the control plane first, bootstrap a token, then enable
-the gateway:
+Each zone has one fixed gateway token. The control plane reads
+`LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN` at startup; `<ID>` is the uppercase zone ID with `-`
+replaced by `_`, and the token must be at least 32 characters. Supply the same secret to
+the gateway through the environment variable named by `--gateway-token-env`. The control
+plane keeps only its SHA-256 hash in memory. The chart wires these environment variables
+from its configured Secret; see the [chart README](https://github.com/lumewarp/lumewarp/blob/main/deploy/helm/lumewarp/README.md)
+for its token Secret setup, the [chart values](https://github.com/lumewarp/lumewarp/blob/main/deploy/helm/lumewarp/values.yaml)
+for all current chart settings, and [Control plane settings](./control-plane.md#settings)
+for the environment contract. There is no UI, API or CLI action to create a token.
 
 ```sh
 helm install lumewarp "$CHART" --version "$VERSION" -n lumewarp \
-  --set gateway.enabled=false
-
-# Optional: the pre-install hook Job ran `migrate`. Create a gateway token:
-kubectl -n lumewarp exec deploy/lumewarp-control-plane -- \
-  python -m lumewarp_control_plane bootstrap --name lumewarp-gateway
-
-kubectl -n lumewarp create secret generic lumewarp-gateway \
-  --from-literal=token='lwg-...'
-
-helm upgrade lumewarp "$CHART" --version "$VERSION" -n lumewarp \
-  --reuse-values --set gateway.enabled=true
+  --set controlPlane.databaseUrl.secretName=lumewarp-control-plane
 ```
 
-The gateway runs one replica by default. `gateway.replicaCount` raises that: every replica
-uses the same token and is its own gateway, with an id generated at startup, so every pod
-loads the snapshot and serves the same models ([Gateway replicas](#gateway-replicas)).
+The control plane creates the default zone and any zone declared by a token environment
+variable at startup. The gateway runs one replica by default. `gateway.replicaCount` raises
+that: every replica uses the zone's token and is its own gateway
+([Gateway replicas](#gateway-replicas)).
 
 Installation admins are stored in Postgres: the first verified login whose email matches
 `controlPlane.initialAdminEmail` becomes the proxy_admin, who can then assign other admins (and
@@ -71,12 +67,10 @@ is empty, and is the recovery path when the proxy_admin leaves. A user must sign
 once before receiving an installation role (assign/transfer return 409 otherwise), because a new
 identity cannot be linked to an already privileged account. Set
 `controlPlane.breakGlass.passwordHashSecret.name` to an existing Secret holding an argon2id hash
-(`lumewarp-control-plane hash-password`). Neither replaces the first `bootstrap` call: that
-command creates the scope row, and gateway tokens can only be created after the scope exists.
+(`lumewarp-control-plane hash-password`).
 
-`controlPlane.databaseUrl.secretName` defaults to `lumewarp-control-plane` and
-`gateway.token.secretName` to `lumewarp-gateway`; both must exist before the respective
-pods start. `global.scope` (default `default`) is the config scope the control plane
+`controlPlane.databaseUrl.secretName` defaults to `lumewarp-control-plane`.
+`global.zone` (default `default`) is the config zone the control plane
 publishes and the gateway follows.
 
 ## What gets deployed
@@ -86,7 +80,7 @@ publishes and the gateway follows.
 | Control-plane Deployment | One replica. Runs the HTTP API + UI, gRPC ConfigService/UsageService, compiler loop and monthly rollover. `strategy: Recreate`. |
 | Control-plane Service | `http` (8091), `grpc` (50051) and `metrics` (9465, Prometheus `/metrics`; only with `controlPlane.metrics.enabled`) ports. |
 | Migration Job | Helm `pre-install,pre-upgrade` hook running `python -m lumewarp_control_plane migrate` with the database Secret. |
-| Gateway Deployment | One replica by default. Each pod is a gateway with an id generated at startup; all pods share the token. Boots from its state volume, then follows the config stream; `/readyz` stays 503 until a snapshot is loaded. |
+| Gateway Deployment | One replica by default. Each pod is a gateway with an id assigned by the control plane for its stream; all pods use the zone token. Boots from its state volume, then follows the config stream; `/readyz` stays 503 until a snapshot is loaded. |
 | Gateway StatefulSet | Instead of the Deployment when `gateway.persistence.enabled`: same pod, one ReadWriteOnce claim per pod from a `volumeClaimTemplate`. |
 | Gateway Service | `http` (4000) and `admin` (9464, `/metrics` + `/readyz`) ports. |
 | Gateway headless Service | Only with persistence: the governing Service of the StatefulSet (`clusterIP: None`). |
@@ -105,13 +99,13 @@ Readiness/liveness:
 ## Gateway replicas
 
 `gateway.replicaCount` sets how many gateway processes serve the deployment; with
-autoscaling the HorizontalPodAutoscaler chooses the number. Every pod is its own gateway:
-it generates `<hostname>-<8 hex>` at startup and sends it as `Hello.gateway_id`, so the
-Admin UI's Gateways page has one row per pod, connected first. All pods share the token in
-`gateway.token.secretName` and keep their own generated id. A restart or a new pod is a new
-gateway, and the old row stays listed for 24 hours after it disconnects. The
-Service load balances across the live pods, and a rolling update adds new gateways instead
-of reusing an identity.
+autoscaling the HorizontalPodAutoscaler chooses the number. Every pod is its own gateway.
+The control plane assigns each config stream a gateway id in its first `Welcome`
+(`<hostname>-<8 hex>`), so the Admin UI's Gateways page has one row per stream, connected
+first. A reconnect or pod restart gets a new id and row; the old row stays listed for 24
+hours after it disconnects. The Service load balances across the live pods, and a rolling
+update adds new gateways. See [Gateway settings](./gateway.md) for the token environment
+contract and handshake.
 
 Three consequences:
 
@@ -121,8 +115,8 @@ Three consequences:
 - **A fresh pod may be unready.** With the default state directory a new pod has no cached
   snapshot and `/readyz` answers 503 until the control plane sends one, while the other
   gateways keep serving.
-- **Rejections have two scopes.** A gateway that NACKs `INVALID_CONFIG` quarantines the
-  version for the whole scope, including gateways that start later; one that NACKs
+- **Rejections differ in blast radius.** A gateway that NACKs `INVALID_CONFIG` quarantines the
+  version for the whole zone, including gateways that start later; one that NACKs
   `UNSUPPORTED_FEATURE` skips only that version, while the others apply it. A gateway that
   already applied a version keeps it until the next one. During a rolling upgrade the
   old-build pods can keep an older config and NACK every version that needs the new build,
@@ -224,7 +218,7 @@ gateway:
     redis:
       existingSecret: lumewarp-redis-url   # key: url
     syncMs: 100          # optional, 10-1000; the gateway default is 100
-    namespace: default   # optional; the config scope by default
+    namespace: default   # optional; the config zone by default
 ```
 
 `valkey.enabled` and `gateway.sharedLimits.redis.existingSecret` are mutually exclusive: a
@@ -236,7 +230,7 @@ One release can hold the gateway replicas and their Valkey; a gateway-only relea
 (another cluster, `controlPlane.enabled=false`, `gateway.controlPlaneUrl` set) points at the
 same Redis with `gateway.sharedLimits.redis.existingSecret`. Every gateway that should share
 counts needs the same Redis and the same `gateway.sharedLimits.namespace`, which is the
-config scope unless it is set. Router state — health, circuit breakers, latency — stays local
+config zone unless it is set. Router state — health, circuit breakers, latency — stays local
 to each gateway.
 
 ## Upstream API keys
@@ -426,7 +420,7 @@ the gateway take `extraEnv`. `nameOverride` and `fullnameOverride` are top-level
 | `global.imageTag` | empty | Tag of both images; empty means the chart's app version, and a component's own `image.tag` wins. |
 | `global.imagePullSecrets` | `[]` | Pull secrets for every pod. |
 | `global.commonLabels` | `{}` | Extra labels on every object. |
-| `global.scope` | `default` | Config scope the control plane publishes and the gateway follows. |
+| `global.zone` | `default` | Config zone the control plane publishes and the gateway follows. |
 | `global.encryptionKey.secretName` / `.key` | empty / `encryption-key` | Existing Secret with `LUMEWARP_ENCRYPTION_KEY` (32+ characters), given to both components; required once an upstream stores a key. |
 | `controlPlane.enabled` | `true` | Deploy the control plane; always one pod. |
 | `controlPlane.image.repository` / `.tag` | `ghcr.io/lumewarp/lumewarp-control-plane` / `global.imageTag` | Control-plane image. |
@@ -436,6 +430,7 @@ the gateway take `extraEnv`. `nameOverride` and `fullnameOverride` are top-level
 | `controlPlane.oidc.issuer` / `.clientId` / `.publicUrl` | empty | OIDC sign-in; the variables render only with an `issuer`. See [SSO](#sso-and-authorization-backend). |
 | `controlPlane.oidc.clientSecret.secretName` / `.key` | empty / `client-secret` | Existing Secret with the client secret; empty for a public PKCE client. |
 | `controlPlane.oidc.secretKey.secretName` / `.key` | empty / `secret-key` | Existing Secret with `LUMEWARP_SECRET_KEY`; required with an `issuer`. |
+| `controlPlane.oidc.requireEmailVerified` | `true` | `LUMEWARP_OIDC_REQUIRE_EMAIL_VERIFIED`: require `email_verified` before an OIDC email links or creates a user; `false` trusts the claim. See [Sign-in and authorization](./identity.md#sso-login-oidc). |
 | `controlPlane.authz.backend` | `builtin` | `LUMEWARP_AUTHZ_BACKEND`: `builtin`, `openfga`, `http` or a plugin name. |
 | `controlPlane.authz.openfga.url` / `.store` / `.storeId` / `.modelId` / `.init` | empty / `lumewarp` / empty / empty / `false` | OpenFGA backend; needs `url` and a `store` or `storeId`. |
 | `controlPlane.authz.openfga.apiTokenSecret.name` / `.key` | empty / `api-token` | Existing Secret with OpenFGA's bearer token. |
@@ -450,7 +445,6 @@ the gateway take `extraEnv`. `nameOverride` and `fullnameOverride` are top-level
 | `gateway.autoscaling.enabled` / `.minReplicas` / `.maxReplicas` / `.targetCPUUtilizationPercentage` | `false` / `2` / `5` / `80` | HorizontalPodAutoscaler; replaces `replicaCount`. |
 | `gateway.podDisruptionBudget.enabled` / `.minAvailable` / `.maxUnavailable` | `false` / `1` / empty | Set one of the two; rendered only when the gateway can have more than one pod. |
 | `gateway.image.repository` / `.tag` | `ghcr.io/lumewarp/lumewarp-gateway` / `global.imageTag` | Gateway image. |
-| `gateway.token.secretName` / `.key` | `lumewarp-gateway` / `token` | Existing Secret with a control-plane-created gateway token, passed as `LUMEWARP_GATEWAY_TOKEN`; any number of gateways may use it. |
 | `gateway.controlPlaneUrl` | empty | Defaults to this release's control-plane gRPC Service; required with `controlPlane.enabled=false`. |
 | `gateway.server.shutdownGraceMs` / `.headerReadTimeoutMs` / `.bodyReadTimeoutMs` | `25000` / `30000` / `30000` | Listener timeouts; the listen addresses follow `service.port` and `service.adminPort`. |
 | `gateway.persistence.enabled` | `false` | `false` = Deployment with a per-pod `emptyDir`; `true` = StatefulSet with one ReadWriteOnce claim per pod. |
@@ -461,7 +455,7 @@ the gateway take `extraEnv`. `nameOverride` and `fullnameOverride` are top-level
 | `gateway.publicUrl` | `""` | `LUMEWARP_GATEWAY_PUBLIC_URL`: external base URL for agent cards; empty answers 503 on A2A. |
 | `gateway.idKey.secretName` / `.key` | empty / `gateway-id-key` | Existing Secret with `LUMEWARP_GATEWAY_ID_KEY` (base64, 32+ bytes), identical on every gateway; empty answers 503 on MCP and A2A. |
 | `gateway.sharedLimits.redis.existingSecret` / `.existingSecretKey` | empty / `url` | Existing Secret with the full `redis://` or `rediss://` URL; exclusive with `valkey.enabled`. |
-| `gateway.sharedLimits.syncMs` / `.namespace` | `""` | `LUMEWARP_SHARED_LIMITS_SYNC_MS` (10–1000; empty = 100) and the Redis key namespace (empty = the scope; gateways that share counts must agree). |
+| `gateway.sharedLimits.syncMs` / `.namespace` | `""` | `LUMEWARP_SHARED_LIMITS_SYNC_MS` (10–1000; empty = 100) and the Redis key namespace (empty = the zone; gateways that share counts must agree). |
 | `gateway.service.type` / `.port` / `.adminPort` | `ClusterIP` / `4000` / `9464` | Gateway Service; the admin port serves `/metrics` and `/readyz`. |
 | `gateway.otel.endpoint` / `.samplingRatio` | empty / `1` | OTLP/HTTP collector base URL (empty = no traces) and the share of requests exported, 0 to 1. |
 | `gateway.terminationGracePeriodSeconds` | `35` | Must exceed `server.shutdownGraceMs` / 1000 + 5 s + margin. |
@@ -489,7 +483,7 @@ is an umbrella chart for an install that should work from one command. It depend
   `authz.openfga.url` pointing at it and `init: true`, so the store and model are created at
   startup.
 
-The stack's `global.*` values are the `lumewarp` chart's (`global.imageTag`, `global.scope`,
+The stack's `global.*` values are the `lumewarp` chart's (`global.imageTag`, `global.zone`,
 `global.encryptionKey`, ...); everything else of the `lumewarp` chart goes under a
 `lumewarp:` key, for example `lumewarp.gateway.replicaCount`. The stack is not published to
 the registry: install it from a checkout of the release tag, after fetching its dependencies
@@ -507,16 +501,14 @@ kubectl -n lumewarp create secret generic lumewarp-encryption \
 
 helm install lumewarp deploy/helm/lumewarp-stack \
   -n lumewarp \
-  --set global.encryptionKey.secretName=lumewarp-encryption \
-  --set lumewarp.gateway.enabled=false
+  --set global.encryptionKey.secretName=lumewarp-encryption
 ```
 
 The `lumewarp` chart's own migration hook cannot run before the bundled database exists, so
 the stack runs `migrate` as an ordinary Job that waits for PostgreSQL (`migrate.enabled`).
-Bootstrapping the gateway token is the same step as in [Install](#install): the control plane
-has to be running, so the first install keeps the gateway off, then you run `bootstrap`,
-create the `lumewarp-gateway` Secret and upgrade with
-`--reuse-values --set lumewarp.gateway.enabled=true`.
+The control plane and gateway use the same per-zone token environment contract described in
+[Install](#install); configure a token for each zone before starting its gateway. The chart
+values define how the Secret is wired into both pods.
 
 ### Bundled PostgreSQL caveats
 
@@ -570,8 +562,7 @@ By hand:
 ```sh
 helm lint deploy/helm/lumewarp --strict
 helm template lumewarp deploy/helm/lumewarp -n lumewarp \
-  --set controlPlane.databaseUrl.secretName=db \
-  --set gateway.token.secretName=gw
+  --set controlPlane.databaseUrl.secretName=db
 
 # Expected to fail: the bundled Valkey and an external Redis URL are exclusive.
 helm template lumewarp deploy/helm/lumewarp -n lumewarp \

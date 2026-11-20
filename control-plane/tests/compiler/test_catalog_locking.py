@@ -17,6 +17,7 @@ from sqlalchemy.exc import DBAPIError
 from lumewarp_control_plane.api import config, routing
 from lumewarp_control_plane.api.schemas import (
     ModelCreate,
+    ModelDeploymentIn,
     ModelUpdate,
     RollbackCreate,
 )
@@ -33,18 +34,19 @@ from lumewarp_control_plane.models import (
     ConfigVersion,
     Model,
     ModelAccess,
+    ModelDeployment,
     PolicyGrant,
     Router,
-    Scope,
     Team,
     Upstream,
+    Zone,
 )
 from lumewarp_control_plane.security import Principal, PrincipalKind
 from lumewarp_control_plane.settings import Settings
 from tests import factories
 from tests.compiler.helpers import SCOPE, apply_delta, load_version, seed_scope, touch
 
-SETTINGS = Settings(scope=SCOPE, dev_mode=True, break_glass_password="x", background_enabled=False)
+SETTINGS = Settings(zone=SCOPE, dev_mode=True, break_glass_password="x", background_enabled=False)
 
 
 def _authz():
@@ -83,20 +85,20 @@ async def _wait_for_blocked_backend(factory) -> None:
 async def _interleave(factory, monkeypatch, first, second) -> list:
     """Run `first(session)` and `second(session)` on two connections.
 
-    `first` is paused right after it takes the scope lock in routing.lock_scope. `second`
+    `first` is paused right after it takes the hierarchy lock in routing.lock_hierarchy. `second`
     only starts then. Returns both outcomes (results or raised exceptions), never raising.
     """
     locked, release = asyncio.Event(), asyncio.Event()
-    original = routing.lock_scope
+    original = routing.lock_hierarchy
     sessions = {}
 
-    async def lock(session, settings):
-        await original(session, settings)
+    async def lock(session):
+        await original(session)
         if session is sessions["first"]:
             locked.set()
             await release.wait()
 
-    monkeypatch.setattr(routing, "lock_scope", lock)
+    monkeypatch.setattr(routing, "lock_hierarchy", lock)
 
     async with factory() as one, factory() as two:
         sessions.update(first=one, second=two)
@@ -208,13 +210,13 @@ async def test_rollback_and_delete_serialize(factory, monkeypatch):
 
 
 async def test_rollback_first_blocks_a_rename(factory):
-    """The mirror order: rollback holds the scope lock, a rename waits and then wins."""
+    """The mirror order: rollback holds the hierarchy lock, a rename waits and then wins."""
     ids = await _seed_catalog(factory)
     v1 = await _publish(factory)
     authz = _authz()
     async with factory() as rolling, factory() as renaming:
         rollback_started = asyncio.Event()
-        original = routing.lock_scope
+        original = routing.lock_hierarchy
 
         async def run_rollback():
             from lumewarp_control_plane import compiler
@@ -231,7 +233,7 @@ async def test_rollback_first_blocks_a_rename(factory):
                 ids.model, ModelUpdate(name="m3"), authz, renaming, SETTINGS
             )
 
-        assert original is routing.lock_scope
+        assert original is routing.lock_hierarchy
         async with asyncio.timeout(20):
             _, renamed = await asyncio.gather(run_rollback(), run_rename())
     assert renamed.name == "m3"
@@ -240,18 +242,17 @@ async def test_rollback_first_blocks_a_rename(factory):
 
 
 @pytest.mark.parametrize("create_first", [True, False])
-async def test_create_model_and_delete_upstream_serialize(factory, monkeypatch, create_first):
+async def test_create_deployment_and_delete_upstream_serialize(factory, monkeypatch, create_first):
     await seed_scope(factory)
     async with factory() as session, session.begin():
         upstream = await factories.make_upstream(session, "lonely")
-        upstream_id = upstream.id
+        model = await factories.make_model(session, "fresh", upstream, deploy=False)
+        upstream_id, model_id = upstream.id, model.id
     authz = _authz()
 
     def create(session):
-        body = ModelCreate(
-            name="fresh", model_type="llm", upstream_id=upstream_id, upstream_model="x"
-        )
-        return routing.create_model(body, authz, session, SETTINGS)
+        body = ModelDeploymentIn(upstream_id=upstream_id, upstream_model="x")
+        return routing.put_model_deployment(model_id, SCOPE, body, authz, session, SETTINGS)
 
     def delete(session):
         return routing.delete_upstream(upstream_id, authz, session, SETTINGS)
@@ -263,18 +264,19 @@ async def test_create_model_and_delete_upstream_serialize(factory, monkeypatch, 
     async with factory() as session:
         names = await session.scalars(select(CatalogName.name))
         if create_first:
-            # Created first, so the delete sees a referencing model.
-            assert created.name == "fresh"
+            # Created first, so the delete sees a referencing deployment.
+            assert created.upstream_id == upstream_id
             assert isinstance(deleted, ApiError) and deleted.status == 409
             assert await session.get(Upstream, upstream_id) is not None
             assert list(names) == ["fresh"]
-            assert await session.scalar(select(Model.upstream_id)) == upstream_id
+            assert await session.scalar(select(ModelDeployment.upstream_id)) == upstream_id
         else:
             assert deleted.status_code == 204
             assert isinstance(created, ApiError) and created.status == 422
             assert await session.get(Upstream, upstream_id) is None
-            assert list(names) == []
-            assert await session.scalar(select(func.count()).select_from(Model)) == 0
+            assert list(names) == ["fresh"]
+            assert await session.scalar(select(func.count()).select_from(Model)) == 1
+            assert await session.scalar(select(func.count()).select_from(ModelDeployment)) == 0
 
 
 # --------------------------------------------------------------------- malformed sidecars
@@ -312,7 +314,7 @@ async def test_malformed_sidecar_is_a_controlled_error_and_changes_nothing(facto
         bad_state = corrupt(copy.deepcopy(good.catalog_state))
         session.add(
             ConfigVersion(
-                scope=SCOPE,
+                zone=SCOPE,
                 version=v1 + 1,
                 payload=good.payload,
                 catalog_state=bad_state,
@@ -336,7 +338,7 @@ async def test_malformed_sidecar_is_a_controlled_error_and_changes_nothing(facto
                 ),
                 "audit": await session.scalar(select(func.count()).select_from(AuditLog)),
                 "outbox": await session.scalar(select(func.count()).select_from(ConfigOutbox)),
-                "revision": await session.scalar(select(Scope.source_revision)),
+                "revision": await session.scalar(select(Zone.source_revision)),
                 "versions": await session.scalar(select(func.count()).select_from(ConfigVersion)),
                 "history": await session.scalar(
                     select(func.count()).select_from(CatalogNameHistory)
@@ -412,10 +414,14 @@ async def test_diff_after_rename_keep_old_alias_reuse_and_rollback(factory):
 
     # 3. The old name m is free again: reuse it for a different model.
     async with factory() as session:
-        await routing.create_model(
-            ModelCreate(
-                name="m", model_type="llm", upstream_id=ids.upstream, upstream_model="other"
-            ),
+        created = await routing.create_model(
+            ModelCreate(name="m", model_type="llm"), authz, session, SETTINGS
+        )
+    async with factory() as session:
+        await routing.put_model_deployment(
+            created.id,
+            SCOPE,
+            ModelDeploymentIn(upstream_id=ids.upstream, upstream_model="other"),
             authz,
             session,
             SETTINGS,

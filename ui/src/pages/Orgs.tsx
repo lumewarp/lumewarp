@@ -6,7 +6,8 @@ import { api, hasPolicy, type Org, type OrgAdmin, type TeamAny } from "../api";
 import { Badge, fmtDate, fmtUsd, InheritedBadge, PageHeader } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
 import { FormDialog, required, TextField, useForm } from "../components/Form";
-import { blankPolicy, Budget, PolicyFields, policyBody, policyFrom, PolicySummary, POLICY_ALIAS, type PolicyValues } from "../components/Policy";
+import { blankPolicy, Budget, limitsChanged, PolicyFields, policyBody, policyFrom, PolicySummary, POLICY_ALIAS, saveZoneLimits, type PolicyValues } from "../components/Policy";
+import { useZone } from "../zone";
 import { CreateButton, RowActions } from "../components/RowActions";
 import { DataTable } from "../components/Table";
 import { Alert, AlertDescription } from "../components/ui/alert";
@@ -20,16 +21,22 @@ import { useCan, useMe, useMut, useOrgs, useTeams } from "../hooks";
 type OrgValues = PolicyValues & { name: string };
 
 const blankOrg = (): OrgValues => ({ name: "", ...blankPolicy(true) });
-const orgValues = (org: Org): OrgValues => ({ name: org.name, ...policyFrom(org, true) });
+const orgValues = (org: Org, zone: string): OrgValues => ({ name: org.name, ...policyFrom(org, true, zone) });
 
 /** Create or rename/set the policy of an org; installation level only. */
 function OrgEditor({ org, onClose }: { org: Org | "new"; onClose: () => void }) {
-  const form = useForm<OrgValues>(org === "new" ? blankOrg() : orgValues(org), { name: required("Name") });
+  const zone = useZone().id;
+  const form = useForm<OrgValues>(org === "new" ? blankOrg() : orgValues(org, zone), { name: required("Name") });
   const save = useMut(
-    (values: OrgValues) =>
-      org === "new"
-        ? api.createOrg({ name: values.name, ...policyBody(values) })
-        : api.updateOrg(org.id, { name: values.name, ...policyBody(values) }),
+    async (values: OrgValues) => {
+      const saved =
+        org === "new"
+          ? await api.createOrg({ name: values.name, ...policyBody(values) })
+          : await api.updateOrg(org.id, { name: values.name, ...policyBody(values) });
+      // Limits and the budget are the header zone's own row.
+      if (limitsChanged(org === "new" ? blankOrg() : orgValues(org, zone), values)) await saveZoneLimits(zone, { org_id: saved.id }, values);
+      return saved;
+    },
     org === "new" ? "Org created" : "Org saved",
   );
   const submit = async () => {
@@ -63,8 +70,13 @@ const blankTeam = (): TeamValues => ({ name: "", ...blankPolicy(true) });
 /** A new team in one org; the org admin may set its totals and model list. */
 function NewTeamDialog({ org, onClose }: { org: Org; onClose: () => void }) {
   const form = useForm<TeamValues>(blankTeam(), { name: required("Name") });
+  const zone = useZone().id;
   const create = useMut(
-    (values: TeamValues) => api.createTeam({ org_id: org.id, name: values.name, ...policyBody(values) }),
+    async (values: TeamValues) => {
+      const saved = await api.createTeam({ org_id: org.id, name: values.name, ...policyBody(values) });
+      if (limitsChanged(blankTeam(), values)) await saveZoneLimits(zone, { team_id: saved.id }, values);
+      return saved;
+    },
     "Team created",
   );
   const submit = async () => {
@@ -230,7 +242,8 @@ export function OrgDetail() {
   const navigate = useNavigate();
   const org = useQuery({ queryKey: ["org", orgId], queryFn: () => api.org(orgId) });
   const teams = useTeams();
-  const usage = useQuery({ queryKey: ["org-usage", orgId], queryFn: () => api.orgUsage(orgId) });
+  const zone = useZone().id;
+  const usage = useQuery({ queryKey: ["org-usage", orgId, zone], queryFn: () => api.orgUsage(orgId, zone) });
   const admins = useQuery({
     queryKey: ["org-admins", orgId],
     queryFn: () => api.orgAdmins(orgId),

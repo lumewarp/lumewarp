@@ -3,7 +3,7 @@
 Lumewarp has five roles. Each level inherits the administration of the level below it, and
 no role comes from the identity provider: installation roles are assigned in Lumewarp, and
 org and team relations come from the authorization backend
-([Sign-in and authorization](../operations/identity.md)).
+([Sign-in and authorization](../operations/identity.md)). Zones separate gateway configuration and traffic without duplicating roles or teams; see [Zones](./zones.md).
 
 Five roles; each level inherits the administration of the level below it.
 
@@ -11,8 +11,8 @@ Five roles; each level inherits the administration of the level below it.
 | --- | --- | --- |
 | `proxy_admin` | `installation_admins`, one row | Everything (upstreams, routing, gateways, config, users, orgs, installation roles). Only this account or break-glass can transfer the role, or deactivate, delete, change the email of or mint a PAT for it. |
 | `admin` | `installation_admins`, any number | The same installation-level management, except demoting or removing the `proxy_admin` or touching that account; assigns and removes other admins. |
-| org admin | `admin` on `org:<id>` (`org_admins`) | Creates and archives the org's teams, sets their models, limits, parallelism and budget, assigns team admins, manages members, service accounts and any key in them, reads the org's usage, request log and audit. The org policy itself is read-only. |
-| team admin | `admin` on `team:<id>` (`team_members.role=admin`) | Team name, member key limits, member defaults and per-member exceptions, service accounts, any key in the team, members, team usage, request log and audit. Cannot change the team's models, limits or budget. |
+| org admin | `admin` on `org:<id>` (`org_admins`) | Creates and archives the org's teams, sets their global model grants and per-zone team limits/budgets, assigns team admins, manages members, service accounts and any key in them, reads the org's usage, request log and audit. The org's own policy is read-only. |
+| team admin | `admin` on `team:<id>` (`team_members.role=admin`) | Team name, member key limits, per-zone member defaults and exceptions, service accounts, any key in the team, members, team usage, request log and audit. Cannot change the team's global model grants or org-level limits. |
 | member | `member` on `team:<id>` (`team_members.role=member`) | Reads the team's basic record and catalog names, creates and manages their own keys within their effective limits, sees their own usage and requests. |
 
 ## How a request is authorized
@@ -40,6 +40,15 @@ assigns one), and it can be transferred afterwards. Every installation admin can
 `proxy_admin` account itself is protected: only that account and break-glass may deactivate,
 delete, change its email or mint a PAT for it.
 
+Installation admins are managed on the **Users** page (Access, installation admins only): its
+Role column shows `proxy_admin` or `admin`. **Make admin** gives
+an active user the `admin` role; any installation admin may do it, and it is disabled for a user
+who has never signed in (`has_signed_in` on the user). **Remove admin** takes the role away from
+an `admin` (any installation admin, yourself included, in which case you lose installation
+access); the proxy_admin row has neither. **Transfer proxy_admin** appears on `admin` rows only
+for the current proxy_admin or a break-glass session, and asks for confirmation: the target
+becomes proxy_admin and the previous one becomes an `admin`.
+
 The endpoints are `GET /api/v1/installation-admins` (the rows with user email, display name and
 active state), `PUT /api/v1/installation-admins/{user_id}` with `{"role":"admin"}` (idempotent;
 `proxy_admin` is rejected as a normal assignment), `DELETE /api/v1/installation-admins/{user_id}`
@@ -47,7 +56,7 @@ active state), `PUT /api/v1/installation-admins/{user_id}` with `{"role":"admin"
 `POST /api/v1/installation-admins/transfer` with `{"user_id": ...}` (the previous proxy_admin
 becomes an `admin`). Assign and transfer require the target to have linked an IdP identity
 (signed in once); an account that has never signed in gets 409 `the user must sign in once
-before receiving an installation role`. Assign, remove and transfer are audited; the first-login
+before receiving a role`. Assign, remove and transfer are audited; the first-login
 bootstrap is audited as `installation_admin.bootstrap`.
 
 ## Org admins
@@ -67,26 +76,26 @@ states the role every operation needs.
 
 | Action | Installation admin | Org admin | Team admin | Member |
 | --- | --- | --- | --- | --- |
-| `ORG_MANAGE`, `INSTALLATION_ADMIN_MANAGE`, `USER_MANAGE`, `ROUTING_MANAGE`, `ROUTING_READ`, `GATEWAY_TOKEN_MANAGE`, `GATEWAY_READ`, `CONFIG_READ`, `CONFIG_ROLLBACK` | yes | | | |
+| `ORG_MANAGE`, `ZONE_MANAGE`, `INSTALLATION_ADMIN_MANAGE`, `USER_MANAGE`, `ROUTING_MANAGE`, `ROUTING_READ`, `GATEWAY_MANAGE`, `GATEWAY_READ`, `CONFIG_READ`, `CONFIG_ROLLBACK` | yes | | | |
 | `TEAM_CREATE`, `TEAM_DELETE`, `TEAM_QUOTA_SET`, `TEAM_ADMIN_ASSIGN` | yes | its org's teams | | |
 | `TEAM_SETTINGS_UPDATE`, `TEAM_MEMBERS_MANAGE`, `TEAM_ADMIN_READ`, `SERVICE_ACCOUNT_MANAGE`, `KEY_MANAGE_ANY` | yes | inherited | yes | |
 | `TEAM_READ`, `KEY_CREATE_OWN`, `KEY_MANAGE_OWN` | yes | inherited | yes | yes |
 | `CATALOG_READ`, `OWN_TOKENS` | yes | yes | yes | yes |
 
-`TEAM_QUOTA_SET` covers a team's model access, allowlist, rate limits, parallelism and budget;
+`ZONE_MANAGE` creates, edits and archives zones. `TEAM_QUOTA_SET` covers a team's global model access and allowlist; per-zone limits and budgets use the zone policy API with the applicable org/team authorization;
 `TEAM_ADMIN_ASSIGN` covers adding an admin, promoting or demoting an existing member (including
 the caller themself) and removing an admin. `TEAM_CREATE` takes the `org_id` from the body and
 `TEAM_DELETE` archives the team named in the URL; both are org-level, checked on the org of the
 target, so an org admin may use them in its own org and a team admin cannot use them at all. A
-team admin keeps `TEAM_SETTINGS_UPDATE` (the team name and the member key limits). A team update
-decides from what actually changes (`proposed != base`), so resending the current policy values
-is not a quota change. `ORG_MANAGE` is installation-level: create, rename, policy, archive and
+team admin keeps `TEAM_SETTINGS_UPDATE` (the team name and member key limits). Per-zone member
+defaults are written through `PUT /zones/{zone}/member-defaults`; per-zone org/team/member/SA
+limits and budgets use `PUT /zones/{zone}/limits`. `ORG_MANAGE` is installation-level: create, rename, policy, archive and
 org admin assignment.
 
 `KEY_CREATE_OWN` passes for an org admin (it has the team's read capability), and creating a
 user-owned key then checks key ownership: anyone else gets `422 not a member or admin of this
-team`. Inherited keys follow the team's member defaults and key limits, and an inherited admin
-has no member exception policy (add them as a member for one). `/users/me` lists in `teams` the
+team`. Inherited keys use the selected zone's team member defaults, zone key rules and team key
+limits; an inherited admin has no member exception policy (add them as a member for one). `/users/me` lists in `teams` the
 direct memberships plus every inherited team, with `inherited_from` (`installation` or `org`)
 and `direct`; `admin_orgs` (id and name) lists the orgs the caller administers (every live org
 for an installation admin), and break-glass has no user.

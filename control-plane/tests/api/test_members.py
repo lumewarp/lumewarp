@@ -15,7 +15,7 @@ from lumewarp_control_plane.models import (
     TeamRole,
     member_scope_id,
 )
-from tests.api.helpers import ADMIN_AUTH, auth, user_with_token
+from tests.api.helpers import ADMIN_AUTH, auth, put_zone_limits, user_with_token
 from tests.factories import (
     make_key,
     make_member,
@@ -31,18 +31,35 @@ async def test_member_upsert_patch_list_and_delete(client, committed) -> None:
     user = await make_user(committed, display_name="Member")
     await committed.commit()
     path = f"/api/v1/teams/{team.id}/members/{user.id}"
-    created = client.put(path, json={"role": "member", "rpm_limit": 10}, headers=ADMIN_AUTH)
+    created = client.put(path, json={"role": "member"}, headers=ADMIN_AUTH)
     assert created.status_code == 201, created.text
     assert created.json()["member_scope_id"] == str(member_scope_id(team.id, user.id))
     assert created.json()["email"] == user.email
     assert created.json()["display_name"] == "Member"
     assert created.json()["user_active"] is True
+    # Limits are per zone now and written through the zone-limits endpoint.
+    put_zone_limits(
+        client, "api-test", {"team_id": str(team.id), "user_id": str(user.id)}, rpm_limit=10
+    )
+
+    def member_row():
+        rows = client.get(f"/api/v1/teams/{team.id}/members?limit=500", headers=ADMIN_AUTH).json()[
+            "items"
+        ]
+        return next(row for row in rows if row["user_id"] == str(user.id))
+
+    assert member_row()["rpm_limit"] == 10
     updated = client.put(path, json={"role": "member"}, headers=ADMIN_AUTH)
     assert updated.status_code == 200
-    assert updated.json()["rpm_limit"] is None
-    patched = client.patch(path, json={"rpm_limit": 5}, headers=ADMIN_AUTH)
+    # Replacing the membership policy does not touch the zone's limits.
+    assert updated.json()["rpm_limit"] == 10
+    patched = client.patch(path, json={"role": "member"}, headers=ADMIN_AUTH)
     assert patched.status_code == 200
-    assert patched.json()["rpm_limit"] == 5
+    cleared = put_zone_limits(
+        client, "api-test", {"team_id": str(team.id), "user_id": str(user.id)}, rpm_limit=None
+    )
+    assert cleared["rpm_limit"] is None
+    assert member_row()["rpm_limit"] is None
     listed = client.get(f"/api/v1/teams/{team.id}/members?limit=500", headers=ADMIN_AUTH)
     assert [r["user_id"] for r in listed.json()["items"] if r["direct"]] == [str(user.id)]
     assert client.delete(path, headers=ADMIN_AUTH).status_code == 204
@@ -108,14 +125,29 @@ async def test_team_admin_cannot_change_an_admin_role(client, committed) -> None
         assert row.role is role
 
     # Limits on anyone, and plain member add/remove, stay TEAM_MEMBERS_MANAGE.
+    limits_path = "/api/v1/zones/api-test/limits"
     assert (
         client.put(
-            f"{base}/{other_admin.id}", json={"role": "admin", "rpm_limit": 7}, headers=headers
+            limits_path,
+            json={
+                "team_id": str(team.id),
+                "user_id": str(other_admin.id),
+                "rpm_limit": 7,
+            },
+            headers=headers,
         ).status_code
         == 200
     )
     assert (
-        client.patch(f"{base}/{other_admin.id}", json={"rpm_limit": 5}, headers=headers).status_code
+        client.put(
+            limits_path,
+            json={
+                "team_id": str(team.id),
+                "user_id": str(other_admin.id),
+                "tpm_limit": 5,
+            },
+            headers=headers,
+        ).status_code
         == 200
     )
     added = client.post(base, json={"email": outsider.email, "role": "member"}, headers=headers)
@@ -255,7 +287,6 @@ async def test_create_member_by_id_or_email(client, committed, selector, caller)
     payload = {
         selector: str(user.id) if selector == "user_id" else user.email.swapcase(),
         "role": "member",
-        "rpm_limit": 10,
     }
     outbox_before = await committed.scalar(select(func.count()).select_from(ConfigOutbox))
     created = client.post(path, json=payload, headers=headers)
@@ -267,8 +298,20 @@ async def test_create_member_by_id_or_email(client, committed, selector, caller)
         "New member",
         True,
     )
-    assert body["rpm_limit"] == 10
     assert body["member_scope_id"] == str(member_scope_id(team.id, user.id))
+    # One recompile for the membership, before the extra zone-limits write below.
+    assert (
+        await committed.scalar(select(func.count()).select_from(ConfigOutbox)) == outbox_before + 1
+    )
+    put_zone_limits(
+        client, "api-test", {"team_id": str(team.id), "user_id": str(user.id)}, rpm_limit=10
+    )
+    listed_response = client.get(path + "?limit=500", headers=headers)
+    assert listed_response.status_code == 200, listed_response.text
+    listed_with_limits = listed_response.json()["items"]
+    assert (
+        next(row for row in listed_with_limits if row["user_id"] == str(user.id))["rpm_limit"] == 10
+    )
     duplicate = client.post(path, json={**payload, "role": "admin"}, headers=headers)
     assert duplicate.status_code == 409, duplicate.text
     listed = client.get(path + "?limit=500", headers=headers).json()["items"]
@@ -281,8 +324,6 @@ async def test_create_member_by_id_or_email(client, committed, selector, caller)
         )
     ).all()
     assert [row.action for row in events] == ["member.add"]
-    outbox_after = await committed.scalar(select(func.count()).select_from(ConfigOutbox))
-    assert outbox_after == outbox_before + 1
     if caller == "admin":
         assert client.get("/api/v1/users", headers=headers).status_code == 403
 
@@ -432,12 +473,17 @@ async def test_member_creation_requires_team_admin(client, committed, caller) ->
 
 
 async def test_member_creation_enforces_policy_narrowing(client, committed) -> None:
-    team = await make_team(committed, rpm_limit=10)
+    team = await make_team(committed, model_access="list", allowed_models=["a"])
     user = await make_user(committed)
     await committed.commit()
     response = client.post(
         f"/api/v1/teams/{team.id}/members",
-        json={"email": user.email, "role": "member", "rpm_limit": 11},
+        json={
+            "email": user.email,
+            "role": "member",
+            "model_access": "list",
+            "allowed_models": ["b"],
+        },
         headers=ADMIN_AUTH,
     )
     assert response.status_code == 422, response.text

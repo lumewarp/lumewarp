@@ -20,9 +20,9 @@ message Snapshot {
   // Features the gateway must understand to apply this snapshot. A gateway
   // NACKs (UNSUPPORTED_FEATURE) any snapshot naming a capability it lacks.
   repeated string required_capabilities = 8;
-  // Identifies the control-plane installation; a gateway never boots from an
-  // on-disk snapshot whose scope differs from the one it is configured for.
-  string scope = 9;
+  // Identifies the zone this snapshot configures; a gateway never boots from an
+  // on-disk snapshot whose zone differs from the one it is configured for.
+  string zone = 9;
   // Other callable names. Models, aliases and routers share one name space.
   repeated Alias aliases = 10;
   // Upstream MCP servers. Capability "mcp".
@@ -266,6 +266,13 @@ message Router {
   // WASM strategies only: how long one `pick` may run before the gateway
   // cancels it. 0 = 60 s.
   uint32 plugin_timeout_ms = 14;
+  // Level sent as the request's reasoning_effort (`reasoning.effort` on
+  // /v1/responses) when the client sends none (absent or null), before the serving
+  // member's own transform runs; a client value always wins. It applies to members,
+  // split members and fallbacks, and an alias of this router carries it. Empty = none.
+  // The control plane only accepts a level every member, split member and fallback
+  // accepts. Capability "router_reasoning_default".
+  string reasoning_default_level = 15;
 }
 
 // Retries happen only before any response byte is sent to the client: on
@@ -499,7 +506,7 @@ message RateLimitScope {
 // Enforced per gateway unless the gateways share a Redis and namespace
 // (`--shared-limits-redis-url`), in which case they share one window and may
 // over-admit by about the number of active gateways plus up to five sync
-// intervals of traffic when a gateway first joins the scope. Zero = unlimited
+// intervals of traffic when a gateway first joins the zone. Zero = unlimited
 // for that dimension. tokens_per_minute is retrospective: it rejects later
 // requests once usage has been charged.
 message RateLimit {

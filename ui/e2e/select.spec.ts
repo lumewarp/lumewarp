@@ -1,6 +1,7 @@
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 
 import { confirmDialog, control, dialog, optionNames, pick } from "./helpers";
+import { createModel } from "./catalog-helpers";
 
 /*
  * Select, Combobox, Dialog and the confirm dialog, through the real control plane (e2e/serve.py).
@@ -51,10 +52,10 @@ async function signIn(page: Page, request: APIRequestContext, path: string) {
   await page.goto(path);
 }
 const upstream = (request: APIRequestContext, name: string) => post(request, "/upstreams", { name, kind: "vllm", base_url: "http://127.0.0.1:9/v1" });
-const model = (request: APIRequestContext, name: string, upstream_id: string) => post(request, "/models", { name, upstream_id, upstream_model: "m", model_type: "llm" });
+const model = (request: APIRequestContext, name: string, upstream_id: string) => createModel(request, admin, { name, upstream_id, upstream_model: "m", model_type: "llm" });
 
 /** Bodies of the writes a page sends: `sent("POST", "routers")` is live, it fills as the page sends. */
-function recordWrites(page: Page, method: "POST" | "PATCH", resource: string) {
+function recordWrites(page: Page, method: "POST" | "PATCH" | "PUT", resource: string) {
   const bodies: any[] = [];
   const re = new RegExp(`/api/v1/${resource}(/[^/?]+)?$`);
   page.on("request", (r) => {
@@ -71,7 +72,7 @@ async function newRouter(page: Page, request: APIRequestContext, name: string, s
   const d = page.locator("#main");
   await d.getByLabel("Name", { exact: true }).fill(name);
   await pick(d, "Strategy", strategy);
-  await d.getByLabel(`${name}/m`, { exact: true }).check();
+  await d.getByLabel(`${name}/m (LLM)`, { exact: true }).check();
   await d.getByLabel("Max waiting requests").fill("7"); // the one setting this strategy requires
   return { d, up, m };
 }
@@ -117,7 +118,7 @@ test("select contract: a stored value that is not an option is shown as such, ne
   const m = await model(request, "sel-stale/m", up.id);
   const stored = await post<any>(request, "/routers", { name: "sel-stale", strategy: "e2e_tuned", params: { max_waiting: 7, scope: "wide", level: 1 }, members: [{ model_id: m.id, weight: 1, params: {} }] });
   // The page knows a newer schema: "wide" is no longer one of the scopes.
-  await page.route(/\/api\/v1\/plugins\?kind=router-strategy$/, async (route) => {
+  await page.route(/\/api\/v1\/plugins\?kind=router-strategy(&zone=[^&]*)?$/, async (route) => {
     const response = await route.fetch();
     const body = await response.json();
     body.items.find((s: any) => s.name === "e2e_tuned").params_schema.properties.scope.enum = ["", "narrow"];
@@ -160,7 +161,7 @@ test("select contract: options that arrive late are chosen from by value", async
     await gate;
     await route.fallback();
   });
-  const posted = recordWrites(page, "POST", "models");
+  const posted = recordWrites(page, "PUT", "models/[^/?]+/deployments");
   await page.reload();
   await page.getByRole("button", { name: "New model" }).click();
   const d = page.locator("#main");
@@ -193,7 +194,7 @@ test("select contract: when the options are reordered after a choice, the chosen
     answered += 1;
     await route.fulfill({ response, json: body });
   });
-  const posted = recordWrites(page, "POST", "models");
+  const posted = recordWrites(page, "PUT", "models/[^/?]+/deployments");
   await page.reload();
   await page.getByRole("button", { name: "New model" }).click();
   const d = page.locator("#main");
@@ -416,7 +417,7 @@ test("combobox contract: the search matches labels and never the keys, an unmatc
   const d2 = page.locator("#main");
   await d2.getByLabel("Name", { exact: true }).fill("cb-contract");
   await pick(d2, "Strategy", "Weighted");
-  await d2.getByLabel("cb-contract/m", { exact: true }).check();
+  await d2.getByLabel("cb-contract/m (LLM)", { exact: true }).check();
   // A fallback needs a retry policy with room for a second attempt.
   await d2.getByLabel("Retry failed attempts").check();
   await d2.getByLabel("Max attempts").fill("2");
@@ -429,10 +430,10 @@ test("combobox contract: the search matches labels and never the keys, an unmatc
   await expect(page.getByText("No match")).toBeVisible();
   // Case does not matter, the match is on the label.
   await search.fill("UPPER");
-  await expect(page.getByRole("option")).toHaveText(["cb/Upper"]);
+  await expect(page.getByRole("option")).toHaveText([/^cb\/Upper \(LLM\)/]);
   // A label that looks like a key is still just a label, and it is what is picked.
   await search.fill("cb/i:1");
-  await expect(page.getByRole("option")).toHaveText(["cb/i:1"]);
+  await expect(page.getByRole("option")).toHaveText([/^cb\/i:1 \(LLM\)/]);
   await page.keyboard.press("Enter");
   await expect(d2.getByTestId("order-row")).toHaveText([/1\. cb\/i:1/]);
   await d2.getByRole("button", { name: "Create" }).click();

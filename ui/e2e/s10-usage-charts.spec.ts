@@ -3,7 +3,7 @@ import { expect, test, type APIRequestContext, type Page } from "@playwright/tes
 import { signIn, VIEWER } from "./selfService";
 
 /*
- * The usage chart: real rows from `GET /usage?group_by=day,model`, on Overview and on the Usage page, in tokens
+ * The usage chart: real rows from `GET /usage?group_by=day,model`, on the Usage page, in tokens
  * or cost. serve.py seeds a trend across UTC days (with an empty day), a model with no price, a partly priced
  * model, and nine models on one day so the tail has to fold into "Other".
  */
@@ -30,6 +30,18 @@ async function apiRows(request: APIRequestContext, from: string, to: string): Pr
   return ((await response.json()) as { items: ApiRow[] }).items;
 }
 
+/** The chart's shortened token count (`fmtCompact` in components/Bits.tsx). */
+const compact = (value: number) => {
+  const units: [number, string][] = [[1e12, "T"], [1e9, "B"], [1e6, "M"], [1e3, "k"]];
+  if (Math.abs(value) < 1e4) return value.toLocaleString();
+  for (let i = 0; i < units.length; i++) {
+    if (Math.abs(value) < units[i][0]) continue;
+    const short = Number((value / units[i][0]).toPrecision(3));
+    if (Math.abs(short) >= 1000 && i > 0) return `${Number((value / units[i - 1][0]).toPrecision(3))}${units[i - 1][1]}`;
+    return `${short}${units[i][1]}`;
+  }
+  return value.toLocaleString();
+};
 const sumBy = (rows: ApiRow[], key: keyof ApiRow) => rows.reduce((sum, row) => sum + Number(row[key] ?? 0), 0);
 
 /** Answer only the chart's own query (`group_by=day,model`) with crafted rows. */
@@ -168,7 +180,7 @@ test("usage: the chart draws the API's rows, and its table and the page's table 
   await hoverSlot(page, today);
   await expect(tooltip(page)).toBeVisible();
   for (const model of tokens.keys()) await expect(tooltip(page)).toContainText(model);
-  await expect(tooltip(page)).toContainText(`${total.toLocaleString()} tokens`);
+  await expect(tooltip(page)).toContainText(`${compact(total)} tokens`);
 
   // The bars are really drawn: segments, colours and heights that follow the axis; the empty day has none.
   await expectBarGeometry(page, today, tokens);
@@ -205,56 +217,11 @@ test("usage: the chart draws the API's rows, and its table and the page's table 
   }
 });
 
-test("overview: real usage for the last 14 UTC days, and no sample data anywhere", async ({ page, request }) => {
+test("empty states: a quiet window says so", async ({ page, request }) => {
   await signInAsAdmin(page, request);
-  await page.goto("/");
-  await expect(chart(page)).toBeVisible();
-  await expect(daySlots(page)).toHaveCount(14);
-  const days = await chart(page).getByTestId("usage-day").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-day")));
-  expect(days).toEqual(Array.from({ length: 14 }, (_, i) => daysAgo(13 - i)));
-  await expect(page.getByText(/sample/i)).toHaveCount(0);
-
-  // What the card shows is the API's answer for the same window.
-  const today = isoDay(new Date());
-  const rows = await apiRows(request, daysAgo(13), today);
-  expect(rows.length).toBeGreaterThan(0);
-  await hoverSlot(page, today);
-  await expect(tooltip(page)).toBeVisible();
-  await expect(tooltip(page)).toContainText(`${sumBy(rows.filter((row) => row.date === today), "total_tokens").toLocaleString()} tokens`);
-
-  // And it links to the page that explains it.
-  await chart(page).getByRole("link", { name: "Open Usage" }).click();
-  await expect(page).toHaveURL(/\/usage$/);
-  await expect(page.getByRole("heading", { name: "Usage", level: 1 })).toBeVisible();
-});
-
-test("overview: a failed usage query stays in its card and retries without taking the page down", async ({ page, request }) => {
-  await signInAsAdmin(page, request);
-  await page.route("**/api/v1/usage?*", (route) => route.fulfill({ status: 500, json: { error: { code: "internal", message: "usage is unavailable" } } }));
-  await page.goto("/");
-  await expect(chart(page).getByText("usage is unavailable")).toBeVisible();
-  // The rest of the page is unaffected: the counters are still there, and the page's own error slot stays empty.
-  await expect(page.getByText("Active keys", { exact: true })).toBeVisible();
-  await expect(page.getByText("Gateways connected", { exact: true })).toBeVisible();
-  await expect(page.getByTestId("state-error")).toHaveCount(0);
-
-  await page.unroute("**/api/v1/usage?*");
-  await chart(page).getByRole("button", { name: "Try again" }).click();
-  await expect(chart(page).getByTestId("usage-day")).toHaveCount(14);
-  await expect(chart(page).getByText("usage is unavailable")).toHaveCount(0);
-});
-
-test("empty states: a quiet window says so, on both pages", async ({ page, request }) => {
-  await signInAsAdmin(page, request);
-  await page.route("**/api/v1/usage?*", (route) => route.fulfill({ status: 200, json: { items: [], next_cursor: null } }));
-  await page.goto("/");
-  await expect(chart(page).getByTestId("usage-chart-empty")).toHaveText("No usage in the last 14 days.");
-  await page.unroute("**/api/v1/usage?*");
-
   await page.goto("/usage");
   await setRange(page, "2020-01-01", "2020-01-01");
   await expect(chart(page).getByTestId("usage-chart-empty")).toHaveText("No usage in this range.");
-  await expect(chart(page).getByText("No usage in the last 14 days.")).toHaveCount(0);
 });
 
 test("toggle: switches tokens to cost, survives a reload, and works when storage throws", async ({ page, request, browser }) => {
@@ -338,7 +305,7 @@ test("series: eight hues, and the tail folds into Other with its names in the to
   await expect(tooltip(page).getByTestId("usage-chart-tooltip-name")).toHaveCount(6);
   await expect(tooltip(page).getByTestId("usage-chart-tooltip-more")).toHaveText("3 more in the data table");
   await expect(tooltip(page)).toContainText("fold/m1");
-  await expect(tooltip(page)).toContainText(`${sumBy(await apiRows(request, day, day), "total_tokens").toLocaleString()} tokens`);
+  await expect(tooltip(page)).toContainText(`${compact(sumBy(await apiRows(request, day, day), "total_tokens"))} tokens`);
   // Everything the tooltip left out is in the data table.
   await page.getByTestId("usage-chart-table-toggle").click();
   for (const name of ["fold/m1", "fold/m7", "fold/m8", "Other"]) {
@@ -410,7 +377,7 @@ test("phone: the card scrolls, the page does not, and a tap opens the tooltip", 
   await context.addCookies((await request.storageState()).cookies);
   const phone = await context.newPage();
   try {
-    for (const path of ["/", "/usage"]) {
+    for (const path of ["/usage"]) {
       await phone.goto(path);
       await expect(phone.getByTestId("usage-chart")).toBeVisible();
       await expect(daySlots(phone).first()).toBeVisible();
@@ -677,27 +644,19 @@ test("subtitle: the date range never breaks across lines on a phone", async ({ p
   }
 });
 
-test("colours: a model drawn in two consecutive renders keeps its fill across pages, ranges and the toggle", async ({ page, request }) => {
+test("colours: a model drawn in two consecutive renders keeps its fill across ranges and the toggle", async ({ page, request }) => {
   await signInAsAdmin(page, request);
-  // Overview draws a and b; Usage draws b and c; widening Usage brings a back.
-  const answer = async (route: import("@playwright/test").Route, names: string[]) =>
-    route.fulfill({ status: 200, json: { items: names.map((name) => usageRow(isoDay(new Date()), name, 100, 1000)), next_cursor: null } });
+  // Usage draws b and c; widening brings a in without repainting the survivors.
   await page.route("**/api/v1/usage?*", (route) =>
-    new URL(route.request().url()).searchParams.get("group_by") === "day,model" ? answer(route, page.url().endsWith("/usage") ? ["b", "c"] : ["a", "b"]) : route.continue(),
+    new URL(route.request().url()).searchParams.get("group_by") === "day,model"
+      ? route.fulfill({ status: 200, json: { items: ["b", "c"].map((name) => usageRow(isoDay(new Date()), name, 100, 1000)), next_cursor: null } })
+      : route.continue(),
   );
   const legendCount = (count: number) => expect(chart(page).getByTestId("usage-chart-legend").locator("[data-series]")).toHaveCount(count);
-  await page.goto("/");
-  await legendCount(2);
-  const overview = await legendColours(page);
-  expect([...overview.keys()]).toEqual(["a", "b"]);
-
-  await chart(page).getByRole("link", { name: "Open Usage" }).click();
-  await expect(page).toHaveURL(/\/usage$/);
+  await page.goto("/usage");
   await legendCount(2);
   const usage = await legendColours(page);
   expect([...usage.keys()]).toEqual(["b", "c"]);
-  // b was drawn on both pages: same fill. c is new.
-  expect(usage.get("b")).toBe(overview.get("b"));
   expect(usage.get("c")).not.toBe(usage.get("b"));
 
   // Widen the set: a comes back as a returning model, and no survivor is repainted.
@@ -1041,7 +1000,9 @@ test("tooltip: measured, not estimated, so two-line names stay inside a 390 px p
     return { tip, plot, toggle, total };
   };
   // It fits the plot, the total stays visible, and nothing covers the table's toggle.
+  // Hover again on each poll: the leaderboards below load late and can move the page under a stale hover.
   await expect.poll(async () => {
+    await daySlots(page).last().hover();
     const { tip, plot } = await geometry();
     return Math.round(tip.y + tip.height) <= Math.round(plot.y + plot.height);
   }).toBe(true);
@@ -1052,7 +1013,7 @@ test("tooltip: measured, not estimated, so two-line names stay inside a 390 px p
   await expect(tooltip(page).getByTestId("usage-chart-tooltip-more")).toBeVisible();
   // The total still covers every row, hidden or not.
   const all = names.reduce((sum, _, index) => sum + 100_000_000 + index, 0);
-  await expect(tooltip(page)).toContainText(`${all.toLocaleString()} tokens`);
+  await expect(tooltip(page)).toContainText(`${compact(all)} tokens`);
 
   // Six short names fit, so measuring does not over-cut.
   await page.unroute("**/api/v1/usage?*");
@@ -1151,7 +1112,7 @@ test("tooltip: a refetch that keeps the row count measures the new text", async 
   // Short → long with the same six rows: the text is longer, so the tooltip must measure again and drop rows.
   long = true;
   await refresh();
-  await expect(tip).toContainText("600,000,000 tokens");
+  await expect(tip).toContainText("600M tokens");
   await expect.poll(async () => (await snap()).overflow).toBeLessThanOrEqual(0);
   const wide = await snap();
   expect(wide.hidden).toBeGreaterThan(0);

@@ -21,7 +21,7 @@ from lumewarp_control_plane.api.common import (
     SettingsDep,
     conflict,
     enqueue_recompile,
-    lock_scope,
+    lock_hierarchy,
     mutation,
     parse_uuid_cursor,
     require_signed_in,
@@ -153,8 +153,8 @@ async def delete_installation_admin(
     """
     await authz.require(Action.INSTALLATION_ADMIN_MANAGE)
     async with mutation(session):
-        # Lock order shared with every hierarchy write: scope, then installation.
-        await lock_scope(session, settings)
+        # Lock order shared with every hierarchy write: hierarchy, then installation.
+        await lock_hierarchy(session)
         await installation.lock_installation(session)
         await installation.recheck_principal(session, authz.principal)
         await installation.recheck_role(session, authz)

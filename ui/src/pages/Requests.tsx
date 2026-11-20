@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useSearch } from "@tanstack/react-router";
 import { CheckIcon, CopyIcon } from "lucide-react";
-import { useState, type MouseEvent } from "react";
+import { useEffect, useState, type MouseEvent } from "react";
 
 import { api, type RequestRow, type RequestsQuery, type Schemas } from "../api";
 import { Badge, fmtUsd, PageHeader } from "../components/Bits";
@@ -9,8 +9,10 @@ import { NumberField, SelectField, TextField } from "../components/Form";
 import { FilterBar } from "../components/FilterBar";
 import { DataTable } from "../components/Table";
 import { Button } from "../components/ui/button";
+import { CatalogFilter } from "../components/CatalogPicker";
 import { ComboboxField } from "../components/ui/combobox-field";
-import { useCan, useCatalog, useMe, useNames, useTeamDirectory, useTeams } from "../hooks";
+import { useCan, useMe, useNames, useTeamDirectory, useTeams, useZoneFilter } from "../hooks";
+import { ZoneBadge } from "../zone";
 import { dayStart, shiftDay } from "../lib/days";
 import type { RequestsSearch } from "../lib/requests";
 import { localDayOf } from "./keyText";
@@ -77,17 +79,19 @@ const initialFilters = (search: RequestsSearch): Filters => ({
 const trimmed = (value: string) => value.trim() || undefined;
 
 /** The API query: the day range is inclusive on screen and exclusive at its end, as on Usage. */
-function queryOf(filters: Filters, cursor: string | undefined): RequestsQuery {
+function queryOf(filters: Filters, cursor: string | undefined, routing: boolean, zone: string | undefined): RequestsQuery {
   return {
+    zone,
     kind: filters.kind,
     team_id: filters.teamId || undefined,
     key_id: filters.keyId || undefined,
     user_id: filters.owner.startsWith("user:") ? filters.owner.slice("user:".length) : undefined,
     service_account_id: filters.owner.startsWith("sa:") ? filters.owner.slice("sa:".length) : undefined,
     requested: trimmed(filters.requested),
-    model: trimmed(filters.model),
-    alias: trimmed(filters.alias),
-    router: trimmed(filters.router),
+    // Routing filters answer 403 for anyone but an installation admin: never sent.
+    model: routing ? trimmed(filters.model) : undefined,
+    alias: routing ? trimmed(filters.alias) : undefined,
+    router: routing ? trimmed(filters.router) : undefined,
     status: filters.status ?? undefined,
     outcome: filters.outcome || undefined,
     request_id: trimmed(filters.requestId),
@@ -106,11 +110,13 @@ export function Requests() {
   const [filters, setFilters] = useState<Filters>(() => initialFilters(search));
   const [trail, setTrail] = useState<(string | undefined)[]>([undefined]);
   const cursor = trail[trail.length - 1];
+  const zone = useZoneFilter();
+  // A cursor belongs to one zone filter: a new zone starts at the first page.
+  useEffect(() => setTrail([undefined]), [zone.value]);
   const [selected, setSelected] = useState<RequestRow | null>(null);
   const teams = useTeams();
   const perms = useCan();
   const me = useMe();
-  const catalog = useCatalog();
   const administered = (teams.data ?? []).filter((team) => perms.teamAdmin(team.id));
   const directoryEnabled = administered.length > 0;
   const directory = useTeamDirectory(administered, directoryEnabled);
@@ -119,8 +125,8 @@ export function Requests() {
   const accountName = useNames(directory.data?.serviceAccounts);
 
   const keys = useQuery({
-    queryKey: ["team-keys", filters.teamId],
-    queryFn: () => api.teamKeys(filters.teamId),
+    queryKey: ["team-keys", filters.teamId, zone.param ?? "all"],
+    queryFn: () => api.teamKeys(filters.teamId, zone.param),
     enabled: !!filters.teamId,
   });
   const ownersEnabled = !!filters.teamId && perms.teamAdmin(filters.teamId);
@@ -136,8 +142,8 @@ export function Requests() {
   });
 
   const query = useQuery({
-    queryKey: ["requests", filters, cursor],
-    queryFn: () => api.requests(queryOf(filters, cursor)),
+    queryKey: ["requests", filters, cursor, perms.canReadRouting, zone.param ?? "all"],
+    queryFn: () => api.requests(queryOf(filters, cursor, perms.canReadRouting, zone.param)),
   });
 
   const set = (patch: Partial<Filters>) =>
@@ -175,8 +181,6 @@ export function Requests() {
     ...(accounts.data ?? []).map((account) => ({ value: `sa:${account.id}`, label: `Service account: ${account.name}` })),
     ...(filters.owner && !ownersEnabled ? [{ value: filters.owner, label: "Selected owner" }] : []),
   ];
-  const names = (kind: "model" | "alias" | "router") => (catalog.data ?? []).filter((entry) => entry.kind === kind).map((entry) => entry.name);
-  const requestedNames = [...new Set((catalog.data ?? []).map((entry) => entry.name))];
 
   const ownerLabel = (row: RequestRow) => {
     if (row.owner_kind === "service_account") return accountName(row.owner_id);
@@ -189,8 +193,8 @@ export function Requests() {
   const extraActive = [
     filters.kind !== "llm",
     !!filters.owner,
-    !!filters.alias,
-    !!filters.router,
+    perms.canReadRouting && !!filters.alias,
+    perms.canReadRouting && !!filters.router,
     filters.status !== null,
     !!filters.outcome,
     !!filters.requestId,
@@ -203,7 +207,7 @@ export function Requests() {
       <PageHeader title="Requests" hint="No prompt or response content is stored; copy a request id to look it up in OTel." />
       <FilterBar
         testId="request-filters"
-        className="lg:grid-cols-[10rem_10rem_repeat(4,minmax(0,1fr))_auto]"
+        className={perms.canReadRouting ? "lg:grid-cols-[10rem_10rem_repeat(5,minmax(0,1fr))_auto]" : "lg:grid-cols-[10rem_10rem_repeat(4,minmax(0,1fr))_auto]"}
         more={{
           active: extraActive,
           onClear: clearExtra,
@@ -211,8 +215,12 @@ export function Requests() {
             <>
               <SelectField label="Kind" value={filters.kind} onChange={(value) => change({ kind: value as Schemas["TrafficKind"] })} options={KINDS} />
               {ownersEnabled && <ComboboxField label="Owner" value={filters.owner} onChange={(value) => change({ owner: value })} options={ownerOptions} />}
-              <ComboboxField free label="Alias" value={filters.alias} onChange={(value) => change({ alias: String(value) })} options={names("alias").map((name) => ({ value: name, label: name }))} placeholder="Any alias" />
-              <ComboboxField free label="Router" value={filters.router} onChange={(value) => change({ router: String(value) })} options={names("router").map((name) => ({ value: name, label: name }))} placeholder="Any router" />
+              {perms.canReadRouting && (
+                <>
+                  <CatalogFilter free kinds={["alias"]} label="Alias" value={filters.alias} onChange={(value) => change({ alias: value })} placeholder="Any alias" />
+                  <CatalogFilter free kinds={["router"]} label="Router" value={filters.router} onChange={(value) => change({ router: value })} placeholder="Any router" />
+                </>
+              )}
               <div className="grid grid-cols-2 gap-3">
                 <NumberField label="Status" value={filters.status} onChange={(value) => change({ status: value })} min={100} placeholder="Any" />
                 <SelectField label="Outcome" value={filters.outcome} onChange={(value) => change({ outcome: value as Filters["outcome"] })} options={OUTCOMES} />
@@ -230,6 +238,7 @@ export function Requests() {
           onChange={(value) => change({ teamId: value })}
           options={[{ value: "", label: "All teams" }, ...(teams.data ?? []).map((team) => ({ value: team.id, label: team.name }))]}
         />
+        <SelectField label="Zone" value={zone.value} onChange={zone.set} options={zone.options} />
         <ComboboxField
           label="Key"
           value={filters.keyId}
@@ -238,8 +247,8 @@ export function Requests() {
           disabled={!filters.teamId}
           placeholder={!filters.teamId ? "Choose a team first" : undefined}
         />
-        <ComboboxField free label="Requested" value={filters.requested} onChange={(value) => change({ requested: String(value) })} options={requestedNames.map((name) => ({ value: name, label: name }))} placeholder="Any name" />
-        <ComboboxField free label="Resolved" value={filters.model} onChange={(value) => change({ model: String(value) })} options={names("model").map((name) => ({ value: name, label: name }))} placeholder="Any model" />
+        <CatalogFilter free label="Requested" value={filters.requested} onChange={(value) => change({ requested: value })} placeholder="Any name" />
+        {perms.canReadRouting && <CatalogFilter free kinds={["model"]} label="Resolved" value={filters.model} onChange={(value) => change({ model: value })} placeholder="Any model" />}
       </FilterBar>
       <DataTable
         rows={query.data?.items}
@@ -297,7 +306,20 @@ export function Requests() {
               </Button>
             ),
           },
-          { key: "resolved", header: "Resolved", cell: (row) => <Resolved row={row} /> },
+          ...(zone.all
+            ? [
+                {
+                  key: "zone",
+                  header: "Zone",
+                  hideBelow: "sm" as const,
+                  cell: (row: RequestRow) => {
+                    const z = zone.zones.find((item) => item.name === row.zone);
+                    return z ? <ZoneBadge zone={z} /> : <span className="text-muted-foreground">{row.zone}</span>;
+                  },
+                },
+              ]
+            : []),
+          ...(perms.canReadRouting ? [{ key: "resolved", header: "Resolved", cell: (row: RequestRow) => <Resolved row={row} /> }] : []),
           {
             key: "key",
             header: "Key",

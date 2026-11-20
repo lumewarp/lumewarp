@@ -11,13 +11,17 @@ What each role may do is in [Roles](../admin/index.md).
 
 ## Credentials
 
-Three token types, stored only as SHA-256 hashes, and two kinds of cookie session:
+The installation uses PATs and virtual API keys as user-facing secrets, plus a fixed
+environment token for each gateway zone. PAT and API key hashes are stored in Postgres.
+For a gateway token, the control plane reads `LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN` at startup
+and keeps only its SHA-256 hash in memory; `<ID>` is the uppercase zone ID with `-`
+replaced by `_`, and the value must be at least 32 characters.
 
 | Credential | Prefix | Used by |
 | --- | --- | --- |
-| Personal access token (PAT) | `lwp-` | A user over the admin API/UI; created under Settings in the UI or `POST /api/v1/users/me/tokens`. |
-| Gateway token | `lwg-` | A gateway for the config stream and usage reporting; the first one comes from `bootstrap` (which also creates the scope), later ones from the gateways API/UI. |
-| Virtual API key | `lw-` | Clients calling the gateway; owned by a team member or a service account of a team; the gateway only receives its hash in the snapshot. |
+| Personal access token (PAT) | `lwp-` | A user over the admin API/UI; created under My keys in the UI or `POST /api/v1/users/me/tokens`. |
+| Gateway zone token | No prefix | Authenticates gateways for one zone's config stream and usage reports. Configure it with `LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN` and supply the same secret to the gateway through `--gateway-token-env`; any number of gateways may share it. |
+| Virtual API key | `lw-` | Clients calling one zone's gateway; owned by a team member or a service account of a team; the key is bound to one zone and the gateway only receives its hash in the snapshot. |
 | OIDC session | cookie | A user logged in through [SSO](#sso-login-oidc). |
 | Emergency session | cookie | The [break-glass](#emergency-access-break-glass) login: an installation admin that is not a user. |
 
@@ -26,15 +30,17 @@ credential is stored in plaintext: the OIDC nonce and PKCE verifier live only in
 encrypted login cookie, and an upstream stores only its `api_key_ref` name, a sealed key,
 or a WASM auth plugin's non-secret settings.
 
-Installation admins live in Postgres (`installation_admins`). The first verified login whose
-email matches `LUMEWARP_INITIAL_ADMIN_EMAIL` becomes the `proxy_admin`; break-glass can create
-the first one when the setting is empty, and is the recovery path afterwards. Any installation
-admin can then assign more admins. A user must have signed in through OIDC at least once before
-receiving an installation role: otherwise the identity-link protection would leave a privileged
-account unable to log in. Assign and transfer return 409 for an account with no linked identity;
-let the person sign in once first. An installation admin can issue a PAT for an active user with
-`POST /api/v1/users/{user_id}/tokens` using `{"name":"initial access"}` (optional
-`expires_at`). The secret is returned only on creation; issuance is audited with the
+Installation admins live in Postgres (`installation_admins`). The first login whose email
+matches `LUMEWARP_INITIAL_ADMIN_EMAIL` becomes the `proxy_admin`; the email must also pass the
+`email_verified` check below unless `LUMEWARP_OIDC_REQUIRE_EMAIL_VERIFIED=false`. Break-glass
+can create the first one when the setting is empty, and is the recovery path afterwards. Any
+installation admin can then assign more admins. A user must have signed in through OIDC at
+least once before receiving an installation role: otherwise the identity-link protection would
+leave a privileged account unable to log in. Assign and transfer return 409 for an account with
+no linked identity; let the person sign in once first. The Admin UI manages these rows on the
+Users page (its Role column and row actions). An installation admin can issue a PAT for an
+active user with `POST /api/v1/users/{user_id}/tokens` using `{"name":"initial access"}`
+(optional `expires_at`). The secret is returned only on creation; issuance is audited with the
 actor and target user, never the secret. Team admins cannot use this endpoint.
 
 ## SSO login (OIDC)
@@ -53,9 +59,10 @@ never come from the IdP.
 | `LUMEWARP_OIDC_ISSUER` | Issuer URL; unset disables SSO. |
 | `LUMEWARP_OIDC_CLIENT_ID`, `LUMEWARP_OIDC_CLIENT_SECRET` | Client credentials (secret optional for a public PKCE client). |
 | `LUMEWARP_OIDC_SCOPES` | Default `openid email profile`. |
-| `LUMEWARP_INITIAL_ADMIN_EMAIL` | The first verified login with this email becomes `proxy_admin` while no proxy_admin exists. Changing the setting afterwards never moves the role. |
+| `LUMEWARP_INITIAL_ADMIN_EMAIL` | The first login with this email becomes `proxy_admin` while no proxy_admin exists (it must also pass `LUMEWARP_OIDC_REQUIRE_EMAIL_VERIFIED`). Changing the setting afterwards never moves the role. |
 | `LUMEWARP_PUBLIC_URL` | External base URL; the redirect URI is `<public_url>/api/v1/session/oidc/callback`. |
 | `LUMEWARP_OIDC_JIT_USERS` | Create a user with no grants on first login (default true). |
+| `LUMEWARP_OIDC_REQUIRE_EMAIL_VERIFIED` | Require `email_verified: true` before an OIDC email links an account or creates a user (default true). See the rules below. |
 | `LUMEWARP_SESSION_TTL_SECONDS` | Absolute session lifetime (default 12 h). |
 | `LUMEWARP_SESSION_COOKIE_SECURE` | `Secure` cookie flag (default true; turn off only for plain-http dev). |
 
@@ -63,11 +70,16 @@ With the Helm chart, pass `LUMEWARP_SECRET_KEY` through `controlPlane.extraEnv` 
 `secretKeyRef`, as in the [Helm SSO
 example](./helm.md#sso-and-authorization-backend).
 
-- Users are identified by the token's `iss` + `sub`. On a first login with a verified
-  email, the identity links to an existing account with that email that
-  has no identity from this issuer yet; otherwise a new user is created (JIT, only with a
-  verified email). An account holding an installation role is never linked by email: a login
+- Users are identified by the token's `iss` + `sub`. On a first login whose email passes the
+  `email_verified` check (on by default), the identity links to an existing account with that
+  email that has no identity from this issuer yet; otherwise a new user is created (JIT, same
+  check). An account holding an installation role is never linked by email: a login
   with a new IdP identity for such an account is refused.
+- With `LUMEWARP_OIDC_REQUIRE_EMAIL_VERIFIED=false` the `email_verified` claim is not checked
+  at all: the email alone links an existing account, creates a JIT user and bootstraps the
+  initial admin, and startup logs a warning. **Anyone who controls an email address at the IdP
+  can take over the matching Lumewarp account**, so use it only with an IdP that does not let
+  users set unverified emails.
 - No IdP claim grants any Lumewarp role: groups and roles claims are ignored. Installation
   roles are read from Postgres on every request; org and team relations come from the
   authorization backend, which only ever answers direct relations (`RequestAuthz` applies
@@ -127,7 +139,7 @@ from right to left and stops at the first untrusted address. Configure only actu
 proxy networks, and have the edge proxy overwrite or append the real client address.
 Untrusted peers and malformed forwarding chains cannot select a forwarded identity.
 The CLI disables Uvicorn's own proxy-header rewriting so this policy sees the socket
-peer; alternate ASGI models must also disable upstream rewriting of `scope.client`.
+peer; alternate ASGI models must also disable middleware that rewrites the client address.
 
 `LUMEWARP_BREAK_GLASS_ALLOWED_CIDRS` optionally restricts the resolved client addresses
 allowed to attempt emergency login, using the same comma-separated CIDR syntax.

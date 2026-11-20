@@ -3,6 +3,7 @@ fresh Postgres database, driven by real gRPC clients acting as two gateways.
 """
 
 import asyncio
+import hashlib
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -18,13 +19,14 @@ from lumewarp_control_plane._proto.lumewarp.config.v1 import config_service_pb2_
 from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as pb
 from lumewarp_control_plane._proto.lumewarp.usage.v1 import usage_pb2, usage_pb2_grpc
 from lumewarp_control_plane.app import create_app
-from lumewarp_control_plane.models import ConfigVersion, Scope, ScopeType, UsageTotal
+from lumewarp_control_plane.models import ConfigVersion, ScopeType, UsageTotal
 from lumewarp_control_plane.settings import Settings
 from tests.compiler.helpers import apply_delta
 from tests.conftest import migrated_database
 from tests.integration.grpc_probe import probe
 
 SCOPE = "default"
+GATEWAY_TOKEN = "itest-gateway-token-0123456789abcdef"
 ADMIN: dict[str, str] = {}
 
 
@@ -40,6 +42,11 @@ class ControlPlane:
         assert r.status_code in (200, 201), (path, r.status_code, r.text)
         return r.json()
 
+    async def put(self, path: str, body: dict | None = None) -> dict:
+        r = await self.http.put(f"/api/v1{path}", json=body or {}, headers=ADMIN)
+        assert r.status_code in (200, 201), (path, r.status_code, r.text)
+        return r.json()
+
 
 @pytest.fixture
 async def cp() -> AsyncIterator[ControlPlane]:
@@ -51,13 +58,12 @@ async def cp() -> AsyncIterator[ControlPlane]:
             dev_mode=True,
             break_glass_password="itest-admin",
             session_cookie_secure=False,
-            scope=SCOPE,
+            zone=SCOPE,
             background_enabled=True,
+            gateway_zone_tokens={SCOPE: hashlib.sha256(GATEWAY_TOKEN.encode()).digest()},
         )
         fatal: list[str] = []
         app = create_app(settings, fatal_handler=fatal.append)
-        async with app.state.session_factory() as s, s.begin():
-            s.add(Scope(name=SCOPE))  # what `bootstrap` does
         async with app.router.lifespan_context(app):
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(transport=transport, base_url="http://cp") as http:
@@ -81,10 +87,14 @@ async def cp() -> AsyncIterator[ControlPlane]:
 class Gateway:
     """A minimal gateway: applies updates to its snapshot and ACKs them."""
 
-    def __init__(self, target: str, token: str, gateway_id: str) -> None:
+    def __init__(self, target: str, token: str, hostname: str) -> None:
         self.channel = grpc.aio.insecure_channel(target)
-        self.metadata = (("authorization", f"Bearer {token}"),)
-        self.gateway_id = gateway_id
+        self.metadata = (
+            ("authorization", f"Bearer {token}"),
+            ("x-lumewarp-zone", SCOPE),
+        )
+        self.hostname = hostname
+        self.gateway_id = ""
         self.snapshot = pb.Snapshot()
         # ConfigUpdate.target_digest of self.snapshot, echoed in Hello.have_digest.
         self.digest = b""
@@ -97,14 +107,17 @@ class Gateway:
         await self.call.write(
             cpb.GatewayMessage(
                 hello=cpb.Hello(
-                    gateway_id=self.gateway_id,
                     have_version=self.snapshot.version,
                     have_digest=self.digest,
-                    scope=self.snapshot.scope,
+                    zone=self.snapshot.zone or SCOPE,
+                    hostname=self.hostname,
                     gateway_version="itest",
                 )
             )
         )
+        welcome = await asyncio.wait_for(self.call.read(), 5.0)
+        assert welcome.WhichOneof("update") == "welcome"
+        self.gateway_id = welcome.welcome.gateway_id
 
     async def next_update(self, timeout: float = 5.0) -> cpb.ConfigUpdate:
         update = await asyncio.wait_for(self.call.read(), timeout)
@@ -152,18 +165,26 @@ async def test_end_to_end(cp: ControlPlane) -> None:
         "/models",
         {
             "name": "llama-a",
-            "upstream_id": up["id"],
-            "upstream_model": "llama",
             "model_type": "llm",
             "price_input_nano_usd_per_mtok": 1_000,
             "price_output_nano_usd_per_mtok": 2_000,
         },
     )
+    await cp.put(
+        f"/models/{dep['id']}/deployments/{SCOPE}",
+        {"upstream_id": up["id"], "upstream_model": "llama"},
+    )
     await cp.post("/routers", {"name": "llama", "members": [{"model_id": dep["id"]}]})
     org = await cp.post("/orgs", {"name": "ml"})
     team = await cp.post("/teams", {"name": "ml", "org_id": org["id"]})
-    account = await cp.post(
-        f"/teams/{team['id']}/service-accounts", {"name": "chat", "budget_nano_usd": 1_000}
+    account = await cp.post(f"/teams/{team['id']}/service-accounts", {"name": "chat"})
+    await cp.put(
+        f"/zones/{SCOPE}/limits",
+        {
+            "team_id": team["id"],
+            "service_account_id": account["id"],
+            "budget_nano_usd": 1_000,
+        },
     )
     k1 = (
         await cp.post(
@@ -175,12 +196,9 @@ async def test_end_to_end(cp: ControlPlane) -> None:
             f"/teams/{team['id']}/keys", {"name": "k2", "service_account_id": account["id"]}
         )
     )["key"]
-    token = (await cp.post("/gateway-tokens", {"name": "itest"}))["secret"]
-    tok_a = tok_b = token
-
     # Gateway A: first update is a full snapshot; it converges on both keys.
-    a = Gateway(cp.grpc_target, tok_a, "gw-a")
-    b = Gateway(cp.grpc_target, tok_b, "gw-b")
+    a = Gateway(cp.grpc_target, GATEWAY_TOKEN, "gw-a")
+    b = Gateway(cp.grpc_target, GATEWAY_TOKEN, "gw-b")
     try:
         await a.connect()
         first = await a.next_update()
@@ -230,7 +248,7 @@ async def test_end_to_end(cp: ControlPlane) -> None:
             outcome=usage_pb2.REQUEST_OUTCOME_COMPLETED,
         )
         usage = usage_pb2_grpc.UsageServiceStub(a.channel)
-        request = usage_pb2.ReportRequest(gateway_id="gw-a", events=[event])
+        request = usage_pb2.ReportRequest(gateway_id=a.gateway_id, events=[event])
         resp = await usage.Report(request, metadata=a.metadata)
         assert resp.accepted == 1
         # Replay is idempotent.
@@ -251,19 +269,23 @@ async def test_end_to_end(cp: ControlPlane) -> None:
 
         # Gateway status is visible over REST.
         r = await cp.http.get("/api/v1/gateways", headers=ADMIN)
-        assert {g["gateway_id"] for g in r.json()["items"] if g["connected"]} == {"gw-a", "gw-b"}
+        assert {g["gateway_id"] for g in r.json()["items"] if g["connected"]} == {
+            a.gateway_id,
+            b.gateway_id,
+        }
 
         # The standalone probe (used for manual checks) sees the same version.
-        probe_token = (await cp.post("/gateway-tokens", {"name": "probe"}))["secret"]
-        version, keys = await probe(cp.grpc_target, probe_token, "probe")
+        version, keys = await probe(cp.grpc_target, GATEWAY_TOKEN, SCOPE, "probe")
         assert (version, keys) == (a.snapshot.version, len(a.snapshot.api_keys))
 
         # The metrics listener (its own port, not the admin API) reflects all of the above.
         # The probe's stream is torn down asynchronously on the server: wait for it.
         async with asyncio.timeout(5):
-            while (samples := await _scrape(cp))[("lumewarp_cp_gateway_sessions", ())] != 2:
+            while (samples := await _scrape(cp))[
+                ("lumewarp_cp_gateway_sessions", (("zone", SCOPE),))
+            ] != 2:
                 await asyncio.sleep(0.02)
-        assert samples[("lumewarp_cp_config_version", ())] == a.snapshot.version
+        assert samples[("lumewarp_cp_config_version", (("zone", SCOPE),))] == a.snapshot.version
         assert samples[("lumewarp_cp_compile_duration_seconds_count", ())] >= 3
         assert samples[("lumewarp_cp_compile_failures_total", ())] == 0
         assert samples[("lumewarp_cp_gateway_acks_total", (("result", "ack"),))] >= 4

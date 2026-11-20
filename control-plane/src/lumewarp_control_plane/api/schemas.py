@@ -40,6 +40,7 @@ from lumewarp_control_plane.models import (
     InheritedFrom,
     InstallationRole,
     KeyLifecycle,
+    KeyMinCreatorRole,
     KeyOwnerKind,
     McpDefinitionKind,
     McpDefinitionState,
@@ -166,22 +167,19 @@ class PolicyFields(ApiModel):
     """Writable policy columns shared by teams, team members and service accounts.
 
     `model_access`/`allowed_models`, `mcp_access`/`mcp_servers` and
-    `a2a_access`/`a2a_agents` cannot be null; limits and budgets can be set to null to
-    clear them. On update, omitted fields keep their current value. MCP and A2A access
-    mirror model access: `inherit` keeps the parent's set, `all` grants everything the
-    parent allows, `list` grants exactly these rows (empty = deny all).
+    `a2a_access`/`a2a_agents` cannot be null. On update, omitted fields keep their current
+    value. MCP and A2A access mirror model access: `inherit` keeps the parent's set, `all`
+    grants everything the parent allows, `list` grants exactly these rows (empty = deny
+    all). Limits and budgets are per zone and written through `PUT /zones/{zone}/limits`.
     """
 
     model_access: ModelAccess | None = None
     allowed_models: list[str] | None = None
+    allowed_groups: list[Name] | None = None
     mcp_access: ModelAccess | None = None
     mcp_servers: list[McpGrantIn] | None = None
     a2a_access: ModelAccess | None = None
     a2a_agents: list[Annotated[str, AfterValidator(_target_name)]] | None = None
-    rpm_limit: int | None = Field(default=None, gt=0)
-    tpm_limit: int | None = Field(default=None, gt=0)
-    max_parallel: int | None = Field(default=None, gt=0)
-    budget_nano_usd: int | None = Field(default=None, ge=0)
 
     @field_validator("allowed_models")
     @classmethod
@@ -194,6 +192,11 @@ class PolicyFields(ApiModel):
             if name not in cleaned:
                 cleaned.append(name)
         return cleaned
+
+    @field_validator("allowed_groups")
+    @classmethod
+    def _clean_groups(cls, value: list[str] | None) -> list[str] | None:
+        return None if value is None else list(dict.fromkeys(value))
 
     @field_validator("mcp_servers")
     @classmethod
@@ -222,7 +225,7 @@ class PolicyFields(ApiModel):
         for name in ("model_access", "mcp_access", "a2a_access"):
             if name in self.model_fields_set and getattr(self, name) is None:
                 raise ValueError(f"{name} cannot be null")
-        for name in ("allowed_models", "mcp_servers", "a2a_agents"):
+        for name in ("allowed_models", "allowed_groups", "mcp_servers", "a2a_agents"):
             if name in self.model_fields_set and getattr(self, name) is None:
                 raise ValueError(f"{name} cannot be null; send [] to deny all")
         return self
@@ -230,15 +233,26 @@ class PolicyFields(ApiModel):
 
 class PolicyOut(ReadModel):
     model_access: ModelAccess
-    allowed_models: list[str]
+    allowed_models: list[str] = Field(description="The level's own directly granted names.")
+    allowed_groups: list[str] = Field(description="The level's own granted model groups.")
+    granted_models: list[str] = Field(
+        description="`allowed_models` plus the current members of `allowed_groups`: the"
+        " level's own set under `list`, before the parent narrows it."
+    )
     mcp_access: ModelAccess
     mcp_servers: list[McpGrantOut]
     a2a_access: ModelAccess
     a2a_agents: list[str]
-    rpm_limit: int | None
-    tpm_limit: int | None
-    max_parallel: int | None
-    budget_nano_usd: int | None
+    # The default zone's values, kept for convenience; the authoritative view is
+    # `limits_by_zone`.
+    rpm_limit: int | None = None
+    tpm_limit: int | None = None
+    max_parallel: int | None = None
+    budget_nano_usd: int | None = None
+    limits_by_zone: dict[str, ZoneLimitsOut] = Field(
+        default_factory=dict,
+        description="This level's own limits and budget in every zone that sets one.",
+    )
 
 
 class TeamKeyLimits(ApiModel):
@@ -266,6 +280,67 @@ class TeamMemberDefaults(ApiModel):
     member_max_parallel_default: int | None = Field(default=None, gt=0)
 
 
+class ZoneLimitsOut(ReadModel):
+    """One level's own limits and budget in one zone. Both absent limits = none."""
+
+    rpm_limit: int | None = None
+    tpm_limit: int | None = None
+    max_parallel: int | None = None
+    budget_nano_usd: int | None = None
+
+
+class ZoneMemberDefaultsOut(ReadModel):
+    """A team's per-zone default limits for its members."""
+
+    rpm_limit: int | None = None
+    tpm_limit: int | None = None
+    max_parallel: int | None = None
+
+
+class ZoneLimitSet(ApiModel):
+    """`PUT /zones/{zone}/limits`: the owner and its limits in that zone.
+
+    Exactly one owner shape: `org_id` alone, `team_id` alone, `team_id` + `user_id`, or
+    `team_id` + `service_account_id`. Every limit is optional; null (or omitting all four)
+    means no limit at this level in the zone.
+    """
+
+    org_id: uuid.UUID | None = None
+    team_id: uuid.UUID | None = None
+    user_id: uuid.UUID | None = None
+    service_account_id: uuid.UUID | None = None
+    rpm_limit: int | None = Field(default=None, gt=0)
+    tpm_limit: int | None = Field(default=None, gt=0)
+    max_parallel: int | None = Field(default=None, gt=0)
+    budget_nano_usd: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _one_owner(self) -> ZoneLimitSet:
+        if self.org_id is not None:
+            if self.team_id is not None or self.user_id is not None:
+                raise ValueError("org_id cannot be combined with a team or user")
+            if self.service_account_id is not None:
+                raise ValueError("org_id cannot be combined with a service account")
+            return self
+        if self.team_id is None:
+            raise ValueError("provide org_id, team_id, or team_id with user_id/service_account_id")
+        if self.user_id is not None and self.service_account_id is not None:
+            raise ValueError("user_id and service_account_id are mutually exclusive")
+        return self
+
+
+class ZoneMemberDefaultsSet(ApiModel):
+    """`PUT /zones/{zone}/member-defaults`: a team's default limits for its members.
+
+    Null means "no default"; omitting every value deletes the row.
+    """
+
+    team_id: uuid.UUID
+    rpm_limit: int | None = Field(default=None, gt=0)
+    tpm_limit: int | None = Field(default=None, gt=0)
+    max_parallel: int | None = Field(default=None, gt=0)
+
+
 class OrgCreate(PolicyFields):
     name: Name
 
@@ -274,11 +349,18 @@ class OrgUpdate(PolicyFields):
     name: Name | None = None
 
 
+_EFFECTIVE_MODELS = (
+    "The callable names this level allows after inheritance (groups expanded, intersected"
+    " down from the org); null = every name in the catalog."
+)
+
+
 class OrgOut(PolicyOut):
     id: uuid.UUID
     name: str
     created_at: datetime
     updated_at: datetime
+    effective_models: list[str] | None = Field(default=None, description=_EFFECTIVE_MODELS)
     # Present for an installation admin reading an archived org; the list endpoint only
     # returns live orgs.
     deleted_at: datetime | None = None
@@ -307,6 +389,7 @@ class OrgAdminOut(ReadModel):
 class OrgTeamUsageOut(ApiModel):
     """One team's usage inside an org, aggregated from `usage_events` at query time."""
 
+    zone: str | None = Field(default=None, description="The zone filter, null = all zones.")
     team_id: uuid.UUID
     team_name: str
     archived: bool
@@ -319,6 +402,7 @@ class OrgTeamUsageOut(ApiModel):
 
 
 class OrgUsageOut(ApiModel):
+    zone: str | None = Field(default=None, description="The zone filter, null = all zones.")
     org_id: uuid.UUID
     org_name: str
     teams: list[OrgTeamUsageOut]
@@ -330,12 +414,12 @@ class OrgUsageOut(ApiModel):
     unknown_cost_count: int
 
 
-class TeamCreate(PolicyFields, TeamKeyLimits, TeamMemberDefaults):
+class TeamCreate(PolicyFields, TeamKeyLimits):
     name: Name
     org_id: uuid.UUID
 
 
-class TeamUpdate(PolicyFields, TeamKeyLimits, TeamMemberDefaults):
+class TeamUpdate(PolicyFields, TeamKeyLimits):
     name: Name | None = None
 
 
@@ -356,6 +440,12 @@ class TeamBasicOut(ReadModel, TeamKeyLimits):
 
 class TeamOut(PolicyOut, TeamBasicOut, TeamMemberDefaults):
     """The whole team, including its policy: team admins and installation admins only."""
+
+    effective_models: list[str] | None = Field(default=None, description=_EFFECTIVE_MODELS)
+    member_defaults_by_zone: dict[str, ZoneMemberDefaultsOut] = Field(
+        default_factory=dict,
+        description="This team's member-default limits in every zone that sets one.",
+    )
 
 
 class MemberUpsert(PolicyFields):
@@ -425,9 +515,33 @@ class ServiceAccountOut(PolicyOut):
     updated_at: datetime
 
 
+# A key narrows its owner or inherits it; it never widens to `all`.
+KeyModelAccess = Literal[ModelAccess.INHERIT, ModelAccess.LIST]
+
+
+def _clean_model_list(cls, value: list[str] | None) -> list[str] | None:
+    if value is None:
+        return None
+    return list(dict.fromkeys(_model_name(item) for item in value))
+
+
+def _clean_group_list(cls, value: list[str] | None) -> list[str] | None:
+    return None if value is None else list(dict.fromkeys(value))
+
+
+def _key_models_not_null[T: BaseModel](body: T) -> T:
+    for name in ("model_access", "allowed_models", "allowed_groups"):
+        if name in body.model_fields_set and getattr(body, name) is None:
+            raise ValueError(f"{name} cannot be null")
+    return body
+
+
 class KeyCreate(ApiModel):
     name: Name
     expires_at: datetime | None = None
+    # The zone whose snapshots this key is compiled into and whose key rules apply.
+    # Omitted = the default zone; immutable after creation.
+    zone: ZoneId | None = None
     # Omit to create a key owned by the caller.
     service_account_id: uuid.UUID | None = None
     # The key level of the hierarchy: no value here means no extra limiter scope. The
@@ -435,6 +549,12 @@ class KeyCreate(ApiModel):
     rpm_limit: int | None = Field(default=None, gt=0)
     tpm_limit: int | None = Field(default=None, gt=0)
     max_parallel: int | None = Field(default=None, gt=0)
+    model_access: KeyModelAccess | None = None
+    allowed_models: list[str] | None = None
+    allowed_groups: list[Name] | None = None
+
+    _clean_models = field_validator("allowed_models")(_clean_model_list)
+    _clean_groups = field_validator("allowed_groups")(_clean_group_list)
 
     @field_validator("expires_at")
     @classmethod
@@ -442,6 +562,10 @@ class KeyCreate(ApiModel):
         if value is not None and value.tzinfo is None:
             raise ValueError("expires_at must include a timezone")
         return _future(value)
+
+    @model_validator(mode="after")
+    def _non_nullable(self) -> KeyCreate:
+        return _key_models_not_null(self)
 
 
 class KeyUpdate(ApiModel):
@@ -453,6 +577,12 @@ class KeyUpdate(ApiModel):
     rpm_limit: int | None = Field(default=None, gt=0)
     tpm_limit: int | None = Field(default=None, gt=0)
     max_parallel: int | None = Field(default=None, gt=0)
+    model_access: KeyModelAccess | None = None
+    allowed_models: list[str] | None = None
+    allowed_groups: list[Name] | None = None
+
+    _clean_models = field_validator("allowed_models")(_clean_model_list)
+    _clean_groups = field_validator("allowed_groups")(_clean_group_list)
 
     @field_validator("expires_at")
     @classmethod
@@ -460,6 +590,10 @@ class KeyUpdate(ApiModel):
         if value is not None and value.tzinfo is None:
             raise ValueError("expires_at must include a timezone")
         return value
+
+    @model_validator(mode="after")
+    def _non_nullable(self) -> KeyUpdate:
+        return _key_models_not_null(self)
 
 
 MAX_ROTATION_GRACE_SECONDS = 24 * 3600
@@ -504,6 +638,10 @@ class KeyRefOut(ReadModel):
 class KeyOut(ReadModel):
     id: uuid.UUID
     team_id: uuid.UUID
+    zone: str
+    # Rules of the key's zone (or its team) that this existing key no longer satisfies.
+    # Such a key keeps working until it expires or is rotated.
+    rule_violations: list[str] = Field(default_factory=list)
     rpm_limit: int | None
     tpm_limit: int | None
     max_parallel: int | None
@@ -522,6 +660,15 @@ class KeyOut(ReadModel):
     created_by_user_id: uuid.UUID | None
     created_at: datetime
     updated_at: datetime
+    model_access: ModelAccess = Field(
+        description="`inherit` (the owner's models) or `list` (narrowed to the grants below)."
+    )
+    allowed_models: list[str] = Field(description="The key's own directly granted names.")
+    allowed_groups: list[str] = Field(description="The key's own granted model groups.")
+    granted_models: list[str] = Field(
+        description="`allowed_models` plus the members of `allowed_groups`, before the"
+        " owner's set narrows them."
+    )
 
 
 class KeyCreated(ApiModel):
@@ -663,6 +810,13 @@ class UpstreamCreate(ApiModel):
     health_url: str | None = Field(default=None, max_length=2000)
 
     _check_health_url = field_validator("health_url")(_health_url)
+    zone: ZoneId | None = Field(
+        default=None,
+        description=(
+            "Config zone the upstream belongs to, set on create and never changed; null ="
+            " the default zone."
+        ),
+    )
     name: Name
     kind: UpstreamKind
     base_url: str = Field(min_length=1)
@@ -786,6 +940,7 @@ class PluginRefOut(ReadModel):
 class UpstreamOut(ReadModel):
     health_url: str | None
     id: uuid.UUID
+    zone: str
     name: str
     kind: UpstreamKind
     base_url: str
@@ -835,6 +990,7 @@ class UpstreamOut(ReadModel):
             )
         return {
             "id": data.id,
+            "zone": data.zone,
             "name": data.name,
             "kind": data.kind,
             "base_url": data.base_url,
@@ -970,11 +1126,13 @@ class _ModelSettings(ApiModel):
 
 
 class ModelCreate(_ModelSettings):
+    """A model definition: a callable name and its type-wide settings. It is served only
+    where it has a deployment (`PUT /models/{id}/deployments/{zone}`).
+    """
+
     model_type: ModelType
     price_nano_usd_per_audio_second: int | None = Field(default=None, ge=0)
     name: ModelName
-    upstream_id: uuid.UUID
-    upstream_model: str = Field(min_length=1, max_length=400)
     price_input_nano_usd_per_mtok: int | None = Field(default=None, ge=0)
     price_output_nano_usd_per_mtok: int | None = Field(default=None, ge=0)
 
@@ -1022,8 +1180,6 @@ class ModelUpdate(_ModelSettings):
     model_type: ModelType | None = None
     price_nano_usd_per_audio_second: int | None = Field(default=None, ge=0)
     name: ModelName | None = None
-    upstream_id: uuid.UUID | None = None
-    upstream_model: str | None = Field(default=None, min_length=1, max_length=400)
     price_input_nano_usd_per_mtok: int | None = Field(default=None, ge=0)
     price_output_nano_usd_per_mtok: int | None = Field(default=None, ge=0)
     keep_old_name_as_alias: bool = Field(
@@ -1032,30 +1188,66 @@ class ModelUpdate(_ModelSettings):
     )
 
 
+class ModelDeploymentOut(ReadModel):
+    """One zone that serves a model, through one upstream model."""
+
+    zone: str
+    upstream_id: uuid.UUID
+    upstream_name: str
+    upstream_model: str
+    chat_check: ChatCheckOut | None = Field(
+        default=None,
+        description=(
+            "Periodic type-specific probe sent through this deployment; null = not probed."
+        ),
+    )
+    health: HealthState = Field(
+        default="not_probed",
+        description=(
+            "Chat check as this zone's connected gateways report it: unhealthy if any says"
+            " so, unknown when none has reported it yet."
+        ),
+    )
+    probe: ProbeResultOut | None = Field(
+        default=None,
+        description="The last Test now of this deployment from the control plane, if any.",
+    )
+    created_at: datetime
+    updated_at: datetime
+
+
+class ModelDeploymentIn(ApiModel):
+    """The deployment to create or replace in one zone."""
+
+    upstream_id: uuid.UUID = Field(description="An upstream of the deployment's zone.")
+    upstream_model: str = Field(min_length=1, max_length=400)
+    chat_check: ChatCheckIn | None = Field(
+        default=None,
+        description=(
+            "Periodic type-specific probe sent by every gateway through this deployment;"
+            " while it fails the model gets no traffic there. null = not probed (Test now"
+            " still works). Probes may incur upstream charges."
+        ),
+    )
+
+
 class ModelOut(ReadModel):
     model_type: ModelType
     price_nano_usd_per_audio_second: int | None
     id: uuid.UUID
     name: str
-    upstream_id: uuid.UUID
-    upstream_model: str
     price_input_nano_usd_per_mtok: int | None
     price_output_nano_usd_per_mtok: int | None
     max_input_tokens: int | None
     max_output_tokens: int | None
     default_body: dict[str, Any] | None
     reasoning: ReasoningOut
-    chat_check: ChatCheckOut | None
-    health: HealthState = Field(
-        default="not_probed",
+    deployments: list[ModelDeploymentOut] = Field(
+        default_factory=list,
         description=(
-            "Chat check as connected gateways report it: unhealthy if any says so, unknown"
-            " when none has reported it yet."
+            "The zones that serve this model, one deployment each; empty = defined but not"
+            " served anywhere."
         ),
-    )
-    probe: ProbeResultOut | None = Field(
-        default=None,
-        description="The last Test now of the saved settings from the control plane, if any.",
     )
     created_at: datetime
     updated_at: datetime
@@ -1070,8 +1262,6 @@ class ModelOut(ReadModel):
             "name": data.name,
             "model_type": data.model_type,
             "price_nano_usd_per_audio_second": data.price_nano_usd_per_audio_second,
-            "upstream_id": data.upstream_id,
-            "upstream_model": data.upstream_model,
             "price_input_nano_usd_per_mtok": data.price_input_nano_usd_per_mtok,
             "price_output_nano_usd_per_mtok": data.price_output_nano_usd_per_mtok,
             "max_input_tokens": data.max_input_tokens,
@@ -1082,15 +1272,6 @@ class ModelOut(ReadModel):
                 fragments=data.reasoning_fragments,
                 default_level=data.reasoning_default_level,
             ),
-            "chat_check": None
-            if data.chat_check_interval_ms is None
-            else ChatCheckOut(
-                interval_ms=data.chat_check_interval_ms,
-                timeout_ms=data.chat_check_timeout_ms,
-                unhealthy_threshold=data.chat_check_unhealthy_threshold,
-                healthy_threshold=data.chat_check_healthy_threshold,
-            ),
-            "probe": _probe(data),
             "created_at": data.created_at,
             "updated_at": data.updated_at,
         }
@@ -1113,6 +1294,58 @@ class AliasOut(ReadModel):
     target: uuid.UUID = Field(validation_alias="target_name_id")
     target_kind: CatalogKind
     target_name: str
+    unavailable_in: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Zones where the alias is absent from the snapshot because its target has no"
+            " deployment there."
+        ),
+    )
+    created_at: datetime
+    updated_at: datetime
+
+
+class ModelGroupCreate(ApiModel):
+    name: Name
+    description: str = Field(default="", max_length=2000)
+    members: list[ModelName] = Field(default_factory=list)
+
+    @field_validator("members")
+    @classmethod
+    def _unique_members(cls, value: list[str]) -> list[str]:
+        return list(dict.fromkeys(value))
+
+
+class ModelGroupUpdate(ApiModel):
+    """PATCH: omitted fields are unchanged; `members` replaces the whole list."""
+
+    name: Name | None = None
+    description: str | None = Field(default=None, max_length=2000)
+    members: list[ModelName] | None = None
+
+    @field_validator("members")
+    @classmethod
+    def _unique_members(cls, value: list[str] | None) -> list[str] | None:
+        return None if value is None else list(dict.fromkeys(value))
+
+
+class ModelGroupMemberOut(ReadModel):
+    id: uuid.UUID = Field(description="The catalog name's id.")
+    name: str = Field(description="The current callable name.")
+    kind: CatalogKind = Field(description="`model`, `alias` or `router`.")
+    model_type: ModelType | None = Field(
+        default=None, description="The member's model type, when it resolves."
+    )
+
+
+class ModelGroupOut(ReadModel):
+    id: uuid.UUID
+    name: str
+    description: str
+    members: list[ModelGroupMemberOut] = Field(description="The members, sorted by name.")
+    grants: int = Field(
+        description="How many orgs, teams, members, service accounts and keys hold the group."
+    )
     created_at: datetime
     updated_at: datetime
 
@@ -1226,6 +1459,8 @@ Splits = Annotated[list[TrafficSplitIn], AfterValidator(_check_splits)]
 
 
 StrategyName = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{0,62}$")]
+# A reasoning level name: the gateway's `transform.rs` accepts the same pattern.
+ReasoningLevel = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$")]
 
 
 class RouterCreate(ApiModel):
@@ -1245,6 +1480,7 @@ class RouterCreate(ApiModel):
     sticky_header: StickyHeader | None = None
     # WASM strategy only: how long one `pick` may run; 0 = the gateway default (60 s).
     plugin_timeout_ms: int = Field(default=0, ge=0, le=INT32_MAX)
+    reasoning_default_level: ReasoningLevel | None = None
     force: bool = _force_field()
 
     @field_validator("sticky_header")
@@ -1268,6 +1504,7 @@ class RouterUpdate(ApiModel):
     sticky: StickyBy | None = None
     sticky_header: StickyHeader | None = None
     plugin_timeout_ms: int | None = Field(default=None, ge=0, le=INT32_MAX)
+    reasoning_default_level: ReasoningLevel | None = None
     force: bool = _force_field()
 
     @field_validator("sticky_header")
@@ -1291,6 +1528,19 @@ class RouterOut(ReadModel):
     plugin_timeout_ms: int = Field(
         description="One strategy call's timeout in ms; 0 = the gateway's 60 s default."
     )
+    reasoning_default_level: str | None = Field(
+        description="Level injected when a request sends no reasoning_effort; null = none."
+    )
+    accepted_reasoning_levels: list[str] | None = Field(
+        description=("Levels every member, split member and fallback accepts; null = any level.")
+    )
+    unavailable_in: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Zones where the router is absent from the snapshot because none of its members"
+            " (or, with a traffic split, a split has none) has a deployment there."
+        ),
+    )
     config_invalid: bool = Field(
         description="Stored settings fail the strategy's current schema, or nothing reports it."
     )
@@ -1300,7 +1550,7 @@ class RouterOut(ReadModel):
 
 
 class PluginGatewayOut(ReadModel):
-    gateway_id: str = Field(description="Hello.gateway_id of the gateway that reported it.")
+    gateway_id: str = Field(description="The assigned id of the gateway that reported it.")
     connected: bool
     digest: str | None = Field(description="Null when known only from its capabilities.")
     seen_at: datetime | None
@@ -1309,10 +1559,11 @@ class PluginGatewayOut(ReadModel):
 class PluginOut(ReadModel):
     """A gateway plugin of any kind (docs/plugins.md).
 
-    Everything but `kind`, `name` and `builtin` is data from a gateway: render it as plain
-    text. `uses_weight`, `needs` and `member_schema` are for router strategies only.
+    Everything but `zone`, `kind`, `name` and `builtin` is data from a gateway: render it as
+    plain text. `uses_weight`, `needs` and `member_schema` are for router strategies only.
     """
 
+    zone: str
     kind: PluginKind
     name: str
     title: str
@@ -1352,6 +1603,9 @@ class UserOut(ReadModel):
     email: str
     display_name: str
     is_active: bool
+    has_signed_in: bool = Field(
+        description="Signed in through the IdP at least once; needed before an admin role."
+    )
     created_at: datetime
     updated_at: datetime
 
@@ -1459,6 +1713,36 @@ class EffectiveModelOut(ApiModel):
     model_type: ModelType | None
 
 
+class MeKeyRulesOut(ApiModel):
+    """The key rules that apply to a key this member creates in one zone."""
+
+    key_min_creator_role: KeyMinCreatorRole
+    key_max_lifetime_seconds: int | None = Field(
+        description="The effective cap for a member key: min(zone, team); null = none."
+    )
+    key_expiry_required: bool
+    key_max_per_member: int | None = Field(
+        description="The effective per-member cap in this zone: min(zone, team); null = none."
+    )
+    service_account_keys_allowed: bool
+    user_keys_allowed: bool
+    playground_allowed: bool
+
+
+class MeZoneOut(ApiModel):
+    """The caller's effective policy in one zone for one team."""
+
+    zone: str
+    name: str
+    color: str
+    limits: MeLimitsOut
+    key_rules: MeKeyRulesOut
+    # Non-revoked user-owned keys the caller has in this team and zone.
+    key_count: int
+    budget: MeBudgetOut
+    playground_gateway_url: str | None = None
+
+
 class MeTeamOut(ApiModel):
     typed_models: list[EffectiveModelOut] = Field(default_factory=list)
     team_id: uuid.UUID
@@ -1481,9 +1765,12 @@ class MeTeamOut(ApiModel):
     all_mcp: bool
     agents: list[str]
     all_agents: bool
+    # The default zone's values, kept for convenience; `by_zone` is authoritative.
     limits: MeLimitsOut
     key_limits: MeKeyLimitsOut
     budget: MeBudgetOut
+    # Every live zone: effective limits, key rules, key count and remaining budget.
+    by_zone: dict[str, MeZoneOut] = Field(default_factory=dict)
 
 
 class MeOrgOut(ApiModel):
@@ -1568,6 +1855,9 @@ class UsageRowOut(ApiModel):
     monthly totals fast path (LLM requests only) reports both as 0.
     """
 
+    zone: str | None = Field(
+        default=None, description="The request zone; null when the row is not grouped by zone."
+    )
     endpoint: str | None = None
     model_type: ModelType | None = None
     audio_ms: int = 0
@@ -1603,6 +1893,65 @@ class UsageRowOut(ApiModel):
     unknown_cost_count: int
     error_count: int = 0
     total_duration_ms: int = 0
+
+
+class UsageLeaderboardRowOut(ApiModel):
+    """One ranked row of `GET /usage/leaderboard`.
+
+    `label` always names the row: the called name for `by=requested`, the key's name for a
+    readable key and the owner's name for a readable owner. A key or owner the caller may not
+    read is anonymised to `Key #<rank>` / `Member #<rank>` and its id and ref stay null, so an
+    unreadable identity never leaks. `is_me` marks the caller's own owner row.
+    """
+
+    rank: int = Field(description="1-based position, ordered by total tokens, then cost.")
+    zone: str = Field(description="The zone this row was ranked in.")
+    label: str = Field(
+        description=(
+            "What the row names: the called name, the key's name or the owner's name; an"
+            " unreadable key or owner is `Key #<rank>` or `Member #<rank>`."
+        )
+    )
+    requested: str | None = Field(
+        default=None, description="The called name; only for `by=requested`."
+    )
+    team_id: uuid.UUID | None = Field(
+        default=None,
+        description="The row's team for `by=key` and `by=owner`; null for `by=requested`.",
+    )
+    key: KeyRefOut | None = Field(
+        default=None,
+        description=(
+            "The key for `by=key` when the caller may read it (installation admin, team"
+            " admin, or its user owner); null otherwise and for every other board."
+        ),
+    )
+    owner_kind: KeyOwnerKind | None = Field(
+        default=None,
+        description=(
+            "`user` or `service_account` for `by=owner` when the caller may read it; null"
+            " otherwise and for every other board."
+        ),
+    )
+    owner_id: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "The owner's id for `by=owner` when the caller may read it (installation admin,"
+            " the team's admin, or the owner themself); null otherwise."
+        ),
+    )
+    is_me: bool = Field(
+        default=False,
+        description="True only for the caller's own row on `by=owner`.",
+    )
+    requests: int = Field(description="Requests in the group.")
+    prompt_tokens: int = Field(description="Summed input tokens.")
+    completion_tokens: int = Field(description="Summed output tokens.")
+    total_tokens: int = Field(description="Input plus output tokens; the ranking key.")
+    cost_nano_usd: int = Field(description="Summed cost in nano-USD; the tie-break.")
+    unknown_cost_count: int = Field(
+        description="Requests whose cost is unknown (no price on the served model)."
+    )
 
 
 class UsageEventOut(ReadModel):
@@ -1660,40 +2009,83 @@ class AuditOut(ReadModel):
     details: dict[str, Any]
 
 
+# --------------------------------------------------------------------------- zones
+
+
+# The fixed palette a zone may pick its colour from; the UI maps each to a CSS token.
+ZoneColor = Literal["gray", "blue", "green", "amber", "red", "violet"]
+
+
+def _zone_id(value: str) -> str:
+    """A zone id: a URL and CLI-safe slug, the gateway's on-disk snapshot key."""
+    if not re.fullmatch(r"[a-z][a-z0-9-]{0,62}", value):
+        raise ValueError("must match ^[a-z][a-z0-9-]{0,62}$")
+    return value
+
+
+ZoneId = Annotated[str, AfterValidator(_zone_id)]
+
+
+class ZoneKeyRules(ApiModel):
+    """The key rules a zone applies to keys created in it."""
+
+    key_min_creator_role: KeyMinCreatorRole = Field(default=KeyMinCreatorRole.MEMBER)
+    key_max_lifetime_seconds: int | None = Field(default=None, gt=0)
+    key_expiry_required: bool = False
+    key_max_per_member: int | None = Field(default=None, gt=0)
+    service_account_keys_allowed: bool = True
+    user_keys_allowed: bool = True
+    playground_allowed: bool = True
+
+
+class ZoneUpdate(ApiModel):
+    """Only the supplied fields change. `id` is immutable."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    color: ZoneColor | None = None
+    playground_gateway_url: str | None = None
+    key_min_creator_role: KeyMinCreatorRole | None = None
+    key_max_lifetime_seconds: int | None = Field(default=None, gt=0)
+    key_expiry_required: bool | None = None
+    key_max_per_member: int | None = Field(default=None, gt=0)
+    service_account_keys_allowed: bool | None = None
+    user_keys_allowed: bool | None = None
+    playground_allowed: bool | None = None
+
+
+class ZoneOut(ReadModel):
+    id: str
+    name: str
+    is_default: bool
+    color: str
+    archived_at: datetime | None
+    created_at: datetime
+    playground_gateway_url: str | None
+    key_min_creator_role: KeyMinCreatorRole
+    key_max_lifetime_seconds: int | None
+    key_expiry_required: bool
+    key_max_per_member: int | None
+    service_account_keys_allowed: bool
+    user_keys_allowed: bool
+    playground_allowed: bool
+    token_configured: bool = Field(
+        description=(
+            "The environment has a `LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN` for this zone, so a"
+            " gateway can connect."
+        )
+    )
+
+
 # --------------------------------------------------------------------------- gateways/config
 
 
-class GatewayTokenCreate(ApiModel):
-    name: str = Field(default="", max_length=200)
-
-
-class GatewayTokenRef(ReadModel):
-    """The token a gateway's latest Hello authenticated with: enough to name it in the UI."""
-
-    id: uuid.UUID
-    name: str
-    display_prefix: str
-
-
-class GatewayTokenOut(ReadModel):
-    id: uuid.UUID
-    name: str
-    display_prefix: str
-    created_at: datetime
-    last_used_at: datetime | None
-    revoked_at: datetime | None
-    connected_gateways: int = Field(description="Gateways connected with this token right now.")
-
-
-class GatewayTokenCreated(ApiModel):
-    token: GatewayTokenOut
-    secret: str
-
-
 class GatewayOut(ApiModel):
-    """One gateway process: its config stream, version and status."""
+    """One gateway stream: its id, version and status."""
 
-    gateway_id: str = Field(description="`Hello.gateway_id`: the process, stable for its lifetime.")
+    zone: str = Field(description="Config zone this gateway serves (`x-lumewarp-zone`).")
+    gateway_id: str = Field(
+        description="The id the control plane assigned in `Welcome`; one stream, one id."
+    )
     connected: bool = Field(description="Its config stream is open.")
     peer: str | None = Field(description="gRPC peer of the stream, as the control plane sees it.")
     gateway_version: str = Field(description="The gateway build it reported in Hello.")
@@ -1723,11 +2115,10 @@ class GatewayOut(ApiModel):
     shared_limits_namespace: str = Field(
         description="`Hello.shared_limits.namespace`; empty while sharing is off."
     )
-    token: GatewayTokenRef = Field(description="The token its latest Hello authenticated with.")
 
 
 class ConfigVersionOut(ApiModel):
-    scope: str
+    zone: str
     version: int
     digest: str
     size_bytes: int
@@ -1738,12 +2129,13 @@ class ConfigVersionOut(ApiModel):
     created_at: datetime
     compacted_at: datetime | None
     quarantined: bool = Field(
-        description="A gateway rejected this version, so it is withheld from the whole scope."
+        description="A gateway rejected this version, so it is withheld from the whole zone."
     )
 
 
 class RollbackCreate(ApiModel):
     version: int = Field(gt=0)
+    zone: ZoneId | None = None
     force: bool = _force_field()
 
 
@@ -1844,6 +2236,13 @@ class ModelTestIn(ApiModel):
     model_id: uuid.UUID | None = Field(
         default=None,
         description="A saved model; the result is kept on it when the form matches it.",
+    )
+    zone: ZoneId | None = Field(
+        default=None,
+        description=(
+            "With `model_id`: the deployment whose Test now result this is; null = do not"
+            " record it."
+        ),
     )
 
     @field_validator("default_body")
@@ -1986,6 +2385,9 @@ class PluginRefIn(ApiModel):
 
 class McpServerCreate(ApiModel):
     name: TargetName
+    zone: ZoneId | None = Field(
+        default=None, description="Config zone the server belongs to; null = the default zone."
+    )
     url: str = Field(min_length=1, max_length=2000)
     auth: TargetAuthIn = Field(default_factory=TargetAuthIn)
     # Per upstream request; 0 = the gateway default (30 s).
@@ -2011,6 +2413,7 @@ class McpServerUpdate(ApiModel):
 
 class McpServerOut(ReadModel):
     id: uuid.UUID
+    zone: str
     name: str
     url: str
     auth: PluginRefOut
@@ -2111,6 +2514,9 @@ class McpDiscoverOut(ApiModel):
 
 class A2aAgentCreate(ApiModel):
     name: TargetName
+    zone: ZoneId | None = Field(
+        default=None, description="Config zone the agent belongs to; null = the default zone."
+    )
     url: str = Field(min_length=1, max_length=2000)
     card_url: str | None = Field(default=None, max_length=2000)
     auth: TargetAuthIn = Field(default_factory=TargetAuthIn)
@@ -2146,6 +2552,7 @@ class A2aAgentUpdate(ApiModel):
 
 class A2aAgentOut(ReadModel):
     id: uuid.UUID
+    zone: str
     name: str
     url: str
     card_url: str = Field(description="Empty = the gateway derives it from `url`.")

@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { confirmDialog, expectKeyPill, pick, SHOTS, shot } from "./helpers";
+import { confirmDialog, expectKeyPill, pick, SHOTS, shot, signOut } from "./helpers";
 import {
   Admin,
   daysFromNow,
@@ -109,7 +109,7 @@ test("the create dialog refuses an expiry past the team's limit with the API's m
   await form.getByLabel("Name").fill("s8-too-long");
   await form.getByLabel("Expires").fill(isoDay(daysFromNow(30)));
   await form.getByRole("button", { name: "Create key" }).click();
-  await expect(form.getByText(/member keys may not outlive 604800 seconds/)).toBeVisible();
+  await expect(form.getByText(/may not outlive 604800 seconds/)).toBeVisible();
   await expect(form).toBeVisible();
   await form.getByRole("button", { name: "Cancel" }).click();
 });
@@ -326,7 +326,7 @@ test("a lowered lifetime is fixed with Edit, then rotate succeeds", async ({ pag
   await row.getByRole("button", { name: "Rotate" }).click();
   let dialog = page.getByRole("dialog", { name: /^Rotate/ });
   await dialog.getByRole("button", { name: "Rotate key" }).click();
-  await expect(dialog.getByTestId("rotate-error")).toContainText(/shorten expires_at first/i);
+  await expect(dialog.getByTestId("rotate-error")).toContainText(/may not outlive 604800 seconds/);
   await dialog.getByRole("button", { name: "Cancel" }).click();
 
   // Edit is the way out: shorten the expiry inside the new cap, then rotate.
@@ -384,7 +384,7 @@ test("a 409 from the per-member cap is shown as text", async ({ page, browser })
   const form = page.getByRole("dialog", { name: "New key in s8-cap" });
   await form.getByLabel("Name").fill("s8-cap-second");
   await form.getByRole("button", { name: "Create key" }).click();
-  await expect(form.getByRole("alert")).toContainText("member key limit reached (1 per member in this team)");
+  await expect(form.getByRole("alert")).toContainText("member key limit reached (1 per member in zone 'default')");
   await expect(form).toBeVisible();
   await form.getByRole("button", { name: "Cancel" }).click();
 });
@@ -481,7 +481,21 @@ test("a user on no team sees an empty state, not an empty table", async ({ page 
   await expect(page).toHaveURL(/\/my-keys$/);
   await expect(page.getByTestId("no-teams")).toContainText("Ask an administrator to add you to a team");
   await expect(page.getByRole("table")).toHaveCount(0);
-  await expect(page.getByRole("link", { name: "Overview", exact: true })).toHaveCount(0);
+  await expect(page.getByText("No tokens.")).toBeVisible();
+});
+
+test("personal access tokens are created and revoked from My keys", async ({ page }) => {
+  await signIn(page, OUTSIDER, "/my-keys");
+  await expect(page.getByRole("heading", { name: "Personal access tokens" })).toBeVisible();
+  await page.getByRole("button", { name: "New token" }).click();
+  await page.getByRole("dialog").getByLabel("Name").fill("s8-pat");
+  await page.getByRole("dialog").getByRole("button", { name: "Create token" }).click();
+  await expect(page.getByTestId("secret-value")).toBeVisible();
+  await page.getByRole("button", { name: /saved it/ }).click();
+  const row = page.locator("tr", { hasText: "s8-pat" });
+  await row.getByRole("button", { name: "Revoke" }).click();
+  await confirmDialog(page).getByRole("button", { name: "Revoke" }).click();
+  await expect(row.getByText("Revoked")).toBeVisible();
 });
 
 test("the emergency session has its own text, not the ask-an-admin state", async ({ page, request }) => {
@@ -501,7 +515,7 @@ test("a team admin's own keys rotate and revoke; the team page lists every key",
   await memberKey(browser, VIEWER, team.id, "s8-admin-other");
 
   await signIn(page, TEAM_ADMIN, "/");
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Usage", level: 1 })).toBeVisible();
   const nav = page.getByRole("navigation", { name: "Main" });
   await expect(nav.getByRole("link", { name: "Keys", exact: true })).toHaveCount(0);
   await page.goto("/my-keys");
@@ -645,7 +659,7 @@ test("a one-time secret survives losing the role, while the page becomes no-acce
   await signIn(page, SHOTS_TOKEN, `/teams/${team.id}`);
   await page.getByRole("tab", { name: "Keys" }).click();
   await page.getByRole("button", { name: "New key" }).click();
-  const form = page.getByRole("dialog", { name: "New API key" });
+  const form = page.getByRole("dialog", { name: "New key in" });
   await form.getByLabel("Name").fill("s8-role-key");
   await form.getByRole("button", { name: "Create key" }).click();
   const secret = page.getByRole("dialog", { name: "API key created" });
@@ -738,14 +752,14 @@ test("the real Sign out button drops a create still in flight", async ({ page })
   });
 
   await page.getByRole("button", { name: "New key" }).click();
-  const form = page.getByRole("dialog", { name: "New API key" });
+  const form = page.getByRole("dialog", { name: "New key in" });
   await form.getByLabel("Name").fill("s8-inflight-key");
   await form.getByRole("button", { name: "Create key" }).click();
   await fetched;
   await page.keyboard.press("Escape");
   await expect(form).toBeHidden();
 
-  await page.getByRole("button", { name: "Sign out" }).click();
+  await signOut(page);
   await expect(page).toHaveURL(/\/login/);
   const postResponse = page.waitForResponse(
     (response) => new URL(response.url()).pathname === `/api/v1/teams/${team.id}/keys` && response.request().method() === "POST",
@@ -771,7 +785,7 @@ test("a failed sign-out keeps the page and a later secret still shows", async ({
       body: JSON.stringify({ error: { code: "server_error", message: "logout failed" } }),
     }),
   );
-  await page.getByRole("button", { name: "Sign out" }).click();
+  await signOut(page);
   await expect(page.getByText("logout failed")).toBeVisible();
   await expect(page).toHaveURL(/\/my-keys$/);
   await expect(page.getByRole("heading", { name: "My keys" })).toBeVisible();
@@ -842,7 +856,7 @@ test("two secrets arriving in a row are both shown, the second after the first i
 
   // Hold only the team create; close its busy form while the mutation is in flight.
   await page.getByRole("button", { name: "New key" }).click();
-  let form = page.getByRole("dialog", { name: "New API key" });
+  let form = page.getByRole("dialog", { name: "New key in" });
   await form.getByLabel("Name").fill("s8-team-secret");
   await form.getByRole("button", { name: "Create key" }).click();
   await fetchedGate;
@@ -922,7 +936,7 @@ test("a failed guard check keeps the guarded page and an open create-key form", 
   await signIn(page, VIEWER, `/teams/${team.id}`);
   await page.getByRole("tab", { name: "Keys" }).click();
   await page.getByRole("button", { name: "New key" }).click();
-  const form = page.getByRole("dialog", { name: "New API key" });
+  const form = page.getByRole("dialog", { name: "New key in" });
   await form.getByLabel("Name").fill("s8-guard-draft");
 
   // Stale the team keys query the same way as the My keys test above, then fail its focus refetch;
@@ -1075,32 +1089,34 @@ test.describe("local expiry dates", () => {
   test.describe("negative UTC offset", () => {
     test.use({ timezoneId: "America/Los_Angeles" });
     test("create then edit keeps the local day west of UTC", async ({ page }) => {
+      // A reused database keeps the keys of earlier runs: the name is unique per run.
+      const keyName = `s8-tz-la-${Date.now()}`;
       const team = await admin.ensureTeam("s8-tz-la");
       await admin.putMember(team.id, VIEWER_EMAIL);
       await signIn(page, VIEWER);
       const section = page.getByTestId("team-s8-tz-la");
       await section.getByRole("button", { name: "New key" }).click();
       const create = page.getByRole("dialog", { name: "New key in s8-tz-la" });
-      await create.getByLabel("Name").fill("s8-tz-la-key");
+      await create.getByLabel("Name").fill(keyName);
       await create.getByLabel("Expires").fill("2027-01-15");
       await create.getByRole("button", { name: "Create key" }).click();
       const secret = page.getByRole("dialog", { name: "API key created" });
       await secret.getByRole("button", { name: /saved it/ }).click();
 
-      const row = (await myKeyRow(page, "s8-tz-la", "s8-tz-la-key"));
+      const row = (await myKeyRow(page, "s8-tz-la", keyName));
       await row.getByRole("button", { name: "Edit" }).click();
-      const edit = page.getByRole("dialog", { name: /^Edit “s8-tz-la-key”/ });
+      const edit = page.getByRole("dialog", { name: new RegExp(`^Edit “${keyName}”`) });
       await expect(edit.getByLabel("Expires")).toHaveValue("2027-01-15");
       await edit.getByRole("button", { name: "Save" }).click();
       await expect(edit).toBeHidden();
 
       await row.getByRole("button", { name: "Edit" }).click();
-      const again = page.getByRole("dialog", { name: /^Edit “s8-tz-la-key”/ });
+      const again = page.getByRole("dialog", { name: new RegExp(`^Edit “${keyName}”`) });
       await again.getByLabel("Expires").fill("2027-02-20");
       await again.getByRole("button", { name: "Save" }).click();
       await expect(again).toBeHidden();
       await row.getByRole("button", { name: "Edit" }).click();
-      const third = page.getByRole("dialog", { name: /^Edit “s8-tz-la-key”/ });
+      const third = page.getByRole("dialog", { name: new RegExp(`^Edit “${keyName}”`) });
       await expect(third.getByLabel("Expires")).toHaveValue("2027-02-20");
       await third.getByRole("button", { name: "Cancel" }).click();
     });

@@ -1,5 +1,9 @@
 """Process settings, read from `LUMEWARP_*` environment variables."""
 
+import hashlib
+import os
+import re
+from collections.abc import Mapping
 from functools import lru_cache
 from ipaddress import ip_network
 from typing import Annotated
@@ -10,6 +14,41 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 DEV_DATABASE_URL = "postgresql+asyncpg://lumewarp:lumewarp@127.0.0.1:55432/lumewarp"
 
 MIB = 1024 * 1024
+
+# `LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN`: one fixed gateway credential per zone. `<ID>` is the
+# zone id upper-cased with `-` -> `_` (a bijection: a zone id never contains `_`).
+GATEWAY_ZONE_TOKEN_ENV = re.compile(r"LUMEWARP_GATEWAY_ZONE_(.+)_TOKEN\Z")
+GATEWAY_ZONE_TOKEN_MIN_LENGTH = 32
+_ZONE_ID = re.compile(r"[a-z][a-z0-9-]{0,62}")
+
+
+def gateway_zone_tokens(environ: Mapping[str, str] | None = None) -> dict[str, bytes]:
+    """The gateway tokens of the environment, as zone id -> sha256 digest.
+
+    Called at startup. Every `LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN` declares a zone; an id that
+    is not a zone slug or a token shorter than 32 characters fails startup with the variable
+    name (never the value). Only digests are returned and kept in memory.
+    """
+    environ = os.environ if environ is None else environ
+    tokens: dict[str, bytes] = {}
+    declared_by: dict[str, str] = {}
+    for name, value in environ.items():
+        match = GATEWAY_ZONE_TOKEN_ENV.fullmatch(name)
+        if match is None:
+            continue
+        zone = match.group(1).lower().replace("_", "-")
+        if not _ZONE_ID.fullmatch(zone):
+            raise ValueError(f"{name}: zone id {zone!r} must match ^[a-z][a-z0-9-]{{0,62}}$")
+        if len(value) < GATEWAY_ZONE_TOKEN_MIN_LENGTH:
+            raise ValueError(
+                f"{name}: the gateway zone token must be at least "
+                f"{GATEWAY_ZONE_TOKEN_MIN_LENGTH} characters"
+            )
+        if zone in declared_by:
+            raise ValueError(f"{name} and {declared_by[zone]} both declare zone {zone!r}")
+        declared_by[zone] = name
+        tokens[zone] = hashlib.sha256(value.encode()).digest()
+    return tokens
 
 
 def split_bind(bind: str) -> tuple[str, int]:
@@ -37,8 +76,9 @@ class Settings(BaseSettings):
     grpc_tls_cert_file: str | None = None
     grpc_tls_key_file: str | None = None
 
-    # The email that becomes proxy_admin on its first verified login while no proxy_admin
-    # exists. Unset = only break-glass can create the first one.
+    # The email that becomes proxy_admin on its first login while no proxy_admin exists
+    # (`email_verified` is required unless LUMEWARP_OIDC_REQUIRE_EMAIL_VERIFIED=false).
+    # Unset = only break-glass can create the first one.
     initial_admin_email: str | None = None
     break_glass_password_hash: SecretStr | None = None
     break_glass_password: SecretStr | None = None
@@ -91,7 +131,8 @@ class Settings(BaseSettings):
     # same value to open them; changing it makes stored keys unreadable until re-entered.
     # Separate from `secret_key`, which never leaves the control plane.
     encryption_key: SecretStr | None = Field(default=None, min_length=32)
-    # Gateway client listener for the session-authenticated Playground proxy; unset disables it.
+    # Gateway client listener for the session-authenticated Playground proxy, used as the
+    # default zone's Playground URL; unset disables it there.
     playground_gateway_url: str | None = None
     oidc_issuer: str | None = None
     oidc_client_id: str | None = None
@@ -101,13 +142,21 @@ class Settings(BaseSettings):
     # URI (<public_url>/api/v1/session/oidc/callback). Unset = derived from the request.
     public_url: str | None = None
     # Create a user with no grants on first SSO login. Off = only pre-created users
-    # (matched by verified email on first login) may sign in.
+    # (matched by email on first login) may sign in.
     oidc_jit_users: bool = True
+    # Require `email_verified: true` before the email claim links an account or creates one.
+    # Off trusts the IdP's word: anyone who controls an unverified address there can take
+    # over the matching Lumewarp account. Startup logs one warning; see docs/operations/identity.md.
+    oidc_require_email_verified: bool = True
     session_ttl_seconds: int = Field(default=12 * 3600, ge=60)
     # `Secure` on the session cookie. Turn off only for plain-http dev on a non-localhost.
     session_cookie_secure: bool = True
-    # Config scope this control plane publishes (Snapshot.scope).
-    scope: str = "default"
+    # Default config zone this control plane publishes (Snapshot.zone) and creates at
+    # startup. Other zones are declared by their `LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN`.
+    zone: str = "default"
+    # One fixed gateway token per zone, read from the environment at startup; values are
+    # sha256 digests only. A zone is declared here by its token.
+    gateway_zone_tokens: dict[str, bytes] = Field(default_factory=gateway_zone_tokens)
 
     # Limits shared with the gateway, see docs/config-protocol.md.
     max_snapshot_bytes: int = 64 * MIB
@@ -133,6 +182,13 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             value = [item.strip() for item in value.split(",") if item.strip()]
         return [ip_network(item) for item in value]
+
+    @field_validator("zone")
+    @classmethod
+    def _check_zone(cls, v: str) -> str:
+        if not re.fullmatch(r"[a-z][a-z0-9-]{0,62}", v):
+            raise ValueError("must match ^[a-z][a-z0-9-]{0,62}$")
+        return v
 
     @field_validator("http_bind", "grpc_bind")
     @classmethod

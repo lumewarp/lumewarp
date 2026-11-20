@@ -26,10 +26,10 @@ from lumewarp_control_plane.models import (
     InstallationAdmin,
     InstallationRole,
     PersonalAccessToken,
-    Scope,
     User,
     UserIdentity,
     UserSession,
+    Zone,
 )
 from lumewarp_control_plane.security import (
     Principal,
@@ -74,7 +74,7 @@ async def roles_engine(roles_url: str) -> AsyncIterator[AsyncEngine]:
 @pytest.fixture(scope="module")
 async def roles_scope(roles_engine: AsyncEngine) -> None:
     async with AsyncSession(roles_engine) as session, session.begin():
-        session.add(Scope(name=SCOPE))
+        session.add(Zone(id=SCOPE, name=SCOPE))
 
 
 @pytest.fixture(scope="module")
@@ -85,7 +85,7 @@ def roles_settings(roles_url: str, roles_scope: None) -> Settings:
         break_glass_password=BREAK_GLASS_PASSWORD,
         dev_mode=True,
         session_cookie_secure=False,
-        scope=SCOPE,
+        zone=SCOPE,
     )
 
 
@@ -263,6 +263,45 @@ async def test_only_a_matching_verified_configured_email_gets_a_role(
         assert response.headers["location"] == "/login?error=access_denied"
         assert await proxy_rows(roles_engine) == []
         return
+    assert response.headers["location"] == "/"
+    me = roles_client.get("/api/v1/users/me").json()
+    assert (me["is_admin"], me["installation_role"]) == (False, None)
+    assert await proxy_rows(roles_engine) == []
+
+
+@pytest.mark.parametrize("verified", [False, None])
+async def test_a_configured_email_bootstraps_without_verified_when_not_required(
+    roles_app, roles_client, roles_idp, roles_engine: AsyncEngine, monkeypatch, verified
+) -> None:
+    email = f"unverified-initial-{suffix()}@example.com"
+    monkeypatch.setattr(roles_app.state.settings, "oidc_require_email_verified", False)
+    monkeypatch.setattr(roles_app.state.settings, "initial_admin_email", email.upper())
+    if verified is None:
+        del roles_idp.claims["email_verified"]
+    else:
+        roles_idp.claims["email_verified"] = verified
+    response = sign_in(roles_client, roles_idp, email=email)
+    assert response.headers["location"] == "/"
+    me = roles_client.get("/api/v1/users/me").json()
+    assert (me["is_admin"], me["installation_role"]) == (True, "proxy_admin")
+    assert await proxy_rows(roles_engine) == [uuid.UUID(me["user_id"])]
+    assert len(await audit_rows(roles_engine, "installation_admin.bootstrap")) == 1
+
+
+@pytest.mark.parametrize("verified", [False, None])
+async def test_an_unverified_login_still_needs_the_configured_email_to_bootstrap(
+    roles_app, roles_client, roles_idp, roles_engine: AsyncEngine, monkeypatch, verified
+) -> None:
+    email = f"candidate-{suffix()}@example.com"
+    monkeypatch.setattr(roles_app.state.settings, "oidc_require_email_verified", False)
+    monkeypatch.setattr(
+        roles_app.state.settings, "initial_admin_email", f"other-{suffix()}@example.com"
+    )
+    if verified is None:
+        del roles_idp.claims["email_verified"]
+    else:
+        roles_idp.claims["email_verified"] = verified
+    response = sign_in(roles_client, roles_idp, email=email)
     assert response.headers["location"] == "/"
     me = roles_client.get("/api/v1/users/me").json()
     assert (me["is_admin"], me["installation_role"]) == (False, None)

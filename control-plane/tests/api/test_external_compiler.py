@@ -6,8 +6,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from lumewarp_control_plane import app as app_module
 from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as pb
 from lumewarp_control_plane.authz import Authorizer, Decision, Relation
-from lumewarp_control_plane.compiler import compile_scope, publish_pending
-from lumewarp_control_plane.models import ConfigVersion, Scope, TeamMember
+from lumewarp_control_plane.compiler import compile_zone, publish_pending
+from lumewarp_control_plane.models import ConfigVersion, TeamMember, Zone
 from tests.api.helpers import ADMIN_AUTH, auth, suffix, user_with_token
 from tests.factories import make_team
 
@@ -16,10 +16,16 @@ async def test_external_member_key_create_compile_and_rollback(
     committed, api_engine, api_settings, monkeypatch
 ) -> None:
     settings = api_settings.model_copy(
-        update={"scope": f"external-{suffix()}", "authz_backend": "external"}
+        update={"zone": f"external-{suffix()}", "authz_backend": "external"}
     )
-    committed.add(Scope(name=settings.scope))
-    team = await make_team(committed, model_access="list", allowed_models=["a"], rpm_limit=60)
+    committed.add(Zone(id=settings.zone, name=settings.zone))
+    team = await make_team(
+        committed,
+        model_access="list",
+        allowed_models=["a"],
+        rpm_limit=60,
+        zone=settings.zone,
+    )
     user, token = await user_with_token(committed)
     await committed.commit()
 
@@ -38,15 +44,15 @@ async def test_external_member_key_create_compile_and_rollback(
         key_id = response.json()["key"]["id"]
         async with AsyncSession(api_engine) as session:
             assert await session.get(TeamMember, (team.id, user.id)) is None
-            compiled = await compile_scope(session, settings.scope, require_local_membership=False)
+            compiled = await compile_zone(session, settings.zone, require_local_membership=False)
         wire = next(k for k in compiled.snapshot.api_keys if k.key_id == key_id)
         assert wire.status == pb.KEY_STATUS_ACTIVE
         assert list(wire.policy.allowed_models) == ["a"]
         assert [r.id for r in wire.policy.rate_limit_scopes] == [f"team:{team.id}"]
-        assert await publish_pending(factory, settings.scope, require_local_membership=False) == 1
+        assert await publish_pending(factory, settings.zone, require_local_membership=False) == 1
         rollback = client.post("/api/v1/config/rollback", json={"version": 1}, headers=ADMIN_AUTH)
         assert rollback.status_code == 200, rollback.text
         async with AsyncSession(api_engine) as session:
-            version = await session.get(ConfigVersion, (settings.scope, rollback.json()["version"]))
+            version = await session.get(ConfigVersion, (settings.zone, rollback.json()["version"]))
         snap = pb.Snapshot.FromString(version.payload)
         assert next(k for k in snap.api_keys if k.key_id == key_id).status == pb.KEY_STATUS_ACTIVE

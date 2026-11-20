@@ -42,7 +42,8 @@ async def test_member_creates_and_manages_only_own_key(client, committed) -> Non
     )
     assert key["created_by_user_id"] == str(user.id)
     assert key["owner_active"] is True
-    assert not {"secret", "key_hash", "allowed_models"} & key.keys()
+    assert not {"secret", "key_hash"} & key.keys()
+    assert key["model_access"] == "inherit"
     assert (key["rpm_limit"], key["tpm_limit"], key["max_parallel"]) == (None, None, None)
     assert (
         client.post(

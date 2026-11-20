@@ -5,7 +5,7 @@ import uuid
 
 import httpx
 import pytest
-from stack import pg, wait_for
+from stack import ZONE, pg, wait_for
 
 
 def sse_ok(resp: httpx.Response) -> bool:
@@ -244,16 +244,18 @@ def test_org_rate_limit_decrease_blocks_at_the_lower_value(stack):
     values are unchanged; the minimum down the chain is what the gateway enforces.
     """
     seeded = stack.seed()
-    stack.ok("PATCH", f"/teams/{seeded.team_id}", json={"rpm_limit": 1000})
+    stack.ok(
+        "PUT", "/zones/e2e/limits", json={"team_id": seeded.team_id, "rpm_limit": 1000}
+    )
     (org_id,) = pg(stack.dsn, "SELECT org_id FROM teams WHERE id = $1", uuid.UUID(seeded.team_id))[
         0
     ].values()
-    stack.ok("PATCH", f"/orgs/{org_id}", json={"rpm_limit": 1000})
+    stack.ok("PUT", "/zones/e2e/limits", json={"org_id": str(org_id), "rpm_limit": 1000})
     gw = stack.start_gateway()
 
     # No request runs before the decrease: the org window starts empty, so exactly two
     # of the three requests below fit. (A request under the old limit would count.)
-    stack.ok("PATCH", f"/orgs/{org_id}", json={"rpm_limit": 2})
+    stack.ok("PUT", "/zones/e2e/limits", json={"org_id": str(org_id), "rpm_limit": 2})
     version = stack.current_version()
     wait_for(lambda: stack.current_version() > version, 10, "a new config version")
     target = stack.current_version()
@@ -275,11 +277,9 @@ def test_authz_denials(stack):
         "POST", f"/teams/{seeded.team_id}/service-accounts", member, json={"name": "nope"}
     )
     assert r.status_code == 403, (r.status_code, r.text)
-    fake = "00000000-0000-0000-0000-000000000000"
     for pat in (admin, member):
-        assert stack.api("POST", "/gateway-tokens", pat, json={"name": "evil"}).status_code == 403
-        r = stack.api("POST", f"/gateway-tokens/{fake}/revoke", pat)
-        assert r.status_code == 403, (r.status_code, r.text)
+        deleted = stack.api("DELETE", f"/gateways/{ZONE}/no-such-gateway", pat)
+        assert deleted.status_code == 403, (deleted.status_code, deleted.text)
         denied = stack.api("POST", "/teams", pat, json={"name": "evil", "org_id": stack.org_id})
         assert denied.status_code == 404, (denied.status_code, denied.text)
     assert (
@@ -287,14 +287,14 @@ def test_authz_denials(stack):
         == 201
     )
     assert stack.api("GET", "/users/me", admin).status_code == 200
-    assert stack.api("POST", "/gateway-tokens", "lwp-garbage").status_code == 401
+    assert (
+        stack.api("DELETE", f"/gateways/{ZONE}/no-such-gateway", "lwp-garbage").status_code
+        == 401
+    )
 
     # A key limited to other models cannot use "mock" through the gateway.
     up = stack.ok("GET", "/upstreams")["items"][0]
-    dep = stack.ok(
-        "POST",
-        "/models",
-        json={"name": "mock-b", "upstream_id": up["id"], "upstream_model": "mock", "model_type": "llm"},
+    dep = stack.create_model({"name": "mock-b", "upstream_id": up["id"], "upstream_model": "mock", "model_type": "llm"},
     )
     stack.ok("POST", "/routers", json={"name": "other-model", "members": [{"model_id": dep["id"]}]})
     other = stack.ok(
@@ -318,17 +318,18 @@ def test_authz_denials(stack):
     assert gw.chat(seeded.a.secret).status_code == 200
 
 
-def test_gateway_token_revoke_closes_stream(stack):
+def test_a_connected_gateway_cannot_be_deleted(stack):
     stack.seed()
     gw = stack.start_gateway()
     wait_for(lambda: (stack.gateway_status() or {}).get("connected"), 10, "connected")
-    token = stack.gateway_status()["token"]
-    stack.ok("POST", f"/gateway-tokens/{token['id']}/revoke")
+    gateway_id = stack.gateway_status()["gateway_id"]
+    refused = stack.api("DELETE", f"/gateways/{ZONE}/{gateway_id}")
+    assert refused.status_code == 409, (refused.status_code, refused.text)
+
+    gw.stop()
     wait_for(
-        lambda: gw.metric("lumewarp_config_stream_connected") == 0.0,
-        10,
-        "gateway stream disconnected after token revoke",
+        lambda: not (stack.gateway_status() or {}).get("connected"), 10, "disconnected"
     )
-    wait_for(lambda: not stack.gateway_status()["connected"], 10, "CP marks gateway disconnected")
-    # The gateway keeps serving its last snapshot.
-    assert gw.readyz() == 200
+    deleted = stack.api("DELETE", f"/gateways/{ZONE}/{gateway_id}")
+    assert deleted.status_code == 204, (deleted.status_code, deleted.text)
+    assert gateway_id not in {item["gateway_id"] for item in stack.gateway_items()}

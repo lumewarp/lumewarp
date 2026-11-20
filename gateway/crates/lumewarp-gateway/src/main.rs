@@ -107,12 +107,12 @@ struct Args {
         long,
         short,
         env = "LUMEWARP_CONFIG",
-        conflicts_with_all = ["control_plane", "gateway_token_env", "state_dir", "scope", "local_config"],
+        conflicts_with_all = ["control_plane", "gateway_token_env", "state_dir", "zone", "local_config"],
         required_unless_present = "control_plane"
     )]
     config: Option<PathBuf>,
     /// Control-plane gRPC URL (http:// or https://); enables control-plane mode.
-    #[arg(long, env = "LUMEWARP_CONTROL_PLANE", requires_all = ["gateway_token_env", "state_dir", "scope"])]
+    #[arg(long, env = "LUMEWARP_CONTROL_PLANE", requires_all = ["gateway_token_env", "state_dir", "zone"])]
     control_plane: Option<String>,
     /// Name of the environment variable holding the gateway token.
     #[arg(long)]
@@ -120,9 +120,9 @@ struct Args {
     /// Directory for the last good snapshot (created 0700).
     #[arg(long)]
     state_dir: Option<PathBuf>,
-    /// Control-plane scope this gateway serves.
-    #[arg(long)]
-    scope: Option<String>,
+    /// Control-plane zone this gateway serves.
+    #[arg(long, env = "LUMEWARP_ZONE")]
+    zone: Option<String>,
     /// YAML with only `server:` settings (listen, admin, timeouts).
     #[arg(long)]
     local_config: Option<PathBuf>,
@@ -138,7 +138,7 @@ struct Args {
         value_parser = clap::value_parser!(u64).range(shared_limits::SYNC_MS_MIN..=shared_limits::SYNC_MS_MAX)
     )]
     shared_limits_sync_ms: u64,
-    /// Redis key namespace for shared limits. Defaults to `--scope` in
+    /// Redis key namespace for shared limits. Defaults to `--zone` in
     /// control-plane mode; required with a URL in standalone mode.
     #[arg(long, env = "LUMEWARP_SHARED_LIMITS_NAMESPACE")]
     shared_limits_namespace: Option<String>,
@@ -231,7 +231,7 @@ async fn main() -> anyhow::Result<()> {
     // A malformed URL or a missing standalone namespace is a startup error; an
     // unreachable Redis is not (the task starts in fallback).
     let default_namespace = if args.control_plane.is_some() {
-        args.scope.as_deref()
+        args.zone.as_deref()
     } else {
         None
     };
@@ -255,8 +255,9 @@ async fn main() -> anyhow::Result<()> {
                 .ok()
                 .filter(|token| !token.is_empty())
                 .with_context(|| format!("gateway token variable {env_name} is not set"))?;
-            let scope = args.scope.clone().context("--scope")?;
+            let zone = args.zone.clone().context("--zone")?;
             let state_dir = args.state_dir.clone().context("--state-dir")?;
+            let identity = gateway_id::Identity::new();
             let settings = match &args.local_config {
                 Some(path) => {
                     let yaml = std::fs::read_to_string(path)
@@ -273,6 +274,8 @@ async fn main() -> anyhow::Result<()> {
                 usage::ReporterConfig {
                     endpoint: url.clone(),
                     token: token.clone(),
+                    zone: zone.clone(),
+                    identity: identity.clone(),
                     capacity: usage::ReporterConfig::DEFAULT_CAPACITY,
                     batch_max: usage::ReporterConfig::DEFAULT_BATCH_MAX,
                     flush_interval: usage::ReporterConfig::DEFAULT_FLUSH_INTERVAL,
@@ -289,13 +292,13 @@ async fn main() -> anyhow::Result<()> {
             // Serve a valid cached snapshot immediately; otherwise stay
             // not-ready (never an open routing table) until the first full arrives.
             let mut current = lumewarp_proto::config::v1::Snapshot {
-                scope: scope.clone(),
+                zone: zone.clone(),
                 ..Default::default()
             };
             let slot = Arc::new(ArcSwapOption::empty());
             let mut digest = Vec::new();
             let mut has_base = false;
-            match snapshot::load_with_digest(&state_dir, &scope) {
+            match snapshot::load_with_digest(&state_dir, &zone) {
                 Ok(Some((cached, cached_digest))) => {
                     match activated(config_stream::compile(&cached, &runtime)) {
                         Ok(routing_table) => {
@@ -319,8 +322,9 @@ async fn main() -> anyhow::Result<()> {
                 config_stream::StreamConfig {
                     url: url.clone(),
                     token,
-                    scope,
+                    zone,
                     state_dir,
+                    identity,
                     shared_limits_namespace: shared_limits
                         .as_ref()
                         .map(|config| config.namespace.clone()),
@@ -357,4 +361,57 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Standalone mode is the YAML only. `--config` conflicts with every
+    /// control-plane flag, so a standalone process can never be handed a URL,
+    /// token variable, state directory or zone; the standalone branch above
+    /// therefore has nothing with which to build a config-stream or usage gRPC
+    /// channel.
+    #[test]
+    fn standalone_cannot_reach_a_control_plane() {
+        let args = Args::try_parse_from(["lumewarp", "--config", "gateway.yaml"]).unwrap();
+        assert!(args.control_plane.is_none());
+        assert!(args.gateway_token_env.is_none());
+        assert!(args.state_dir.is_none());
+        assert!(args.zone.is_none());
+
+        let combined = Args::try_parse_from([
+            "lumewarp",
+            "--config",
+            "gateway.yaml",
+            "--control-plane",
+            "http://127.0.0.1:1",
+            "--gateway-token-env",
+            "LUMEWARP_TEST_TOKEN",
+            "--state-dir",
+            "/tmp/lumewarp-test-state",
+            "--zone",
+            "zone-a",
+        ]);
+        assert!(
+            combined.is_err(),
+            "standalone must not accept a control-plane URL"
+        );
+    }
+
+    /// The standalone boot path has neither a config-stream task nor a usage
+    /// reporter: the snapshot is active immediately and the runtime's sink is
+    /// the disabled one.
+    #[test]
+    fn standalone_builds_no_control_plane_clients() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gateway.yaml");
+        std::fs::write(&path, "{}").unwrap();
+        let (_, snapshot, runtime) = standalone(&path, false).unwrap();
+        assert!(
+            snapshot.load_full().is_some(),
+            "the YAML snapshot is active without a stream"
+        );
+        assert!(!runtime.usage.enabled(), "no usage reporter is built");
+    }
 }

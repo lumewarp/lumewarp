@@ -54,7 +54,9 @@ async function open(scope: Page | Locator, label: string) {
  */
 export async function pick(scope: Page | Locator, label: string, optionName: string) {
   const { trigger, popup } = await open(scope, label);
-  await popup.getByRole("option", { name: optionName, exact: true }).click();
+  // A catalog name is read out with its model type after it ("gpt-4 (LLM)"): the bare name matches too.
+  const named = new RegExp(`^${optionName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?: \\([^)]*\\))?$`);
+  await popup.getByRole("option", { name: named }).click();
   await expect(trigger).toHaveAttribute("aria-expanded", "false");
   // Gone from the DOM too: a closing popup still holds options another label could match.
   await expect(popup).toHaveCount(0);
@@ -148,4 +150,27 @@ export async function moreFilters(page: Page) {
   const button = page.getByRole("button", { name: /More filters/ });
   if ((await button.getAttribute("aria-expanded")) !== "true") await button.click();
   await expect(button).toHaveAttribute("aria-expanded", "true");
+}
+
+/** The account menu at the top right holds the theme and Sign out. */
+export async function accountMenu(page: Page) {
+  // A menu still running its close animation is visible but detaches under a click; let it go first.
+  await expect(page.locator('[role="menu"][data-state="closed"]')).toHaveCount(0);
+  const menu = page.getByRole("menu");
+  // A sheet that just closed hands focus back to its opener a moment later, which dismisses a menu
+  // opened in between; open it again until it stays.
+  await expect(async () => {
+    if (!(await menu.isVisible())) await page.getByTestId("principal").click();
+    await expect(menu).toBeVisible({ timeout: 1000 });
+  }).toPass();
+  return menu;
+}
+
+export async function signOut(page: Page) {
+  await (await accountMenu(page)).getByRole("menuitem", { name: "Sign out" }).click();
+}
+
+export async function chooseTheme(page: Page, label: "Auto" | "Light" | "Dark") {
+  await (await accountMenu(page)).getByRole("menuitemradio", { name: label }).click();
+  await expect(page.getByRole("menu")).toHaveCount(0);
 }

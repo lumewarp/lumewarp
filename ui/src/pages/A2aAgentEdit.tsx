@@ -9,7 +9,7 @@ import { NO_PLUGIN, PluginRefFields, targetNameProblem } from "../components/Plu
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { DescriptionDetails, DescriptionList, DescriptionTerm } from "../components/ui/description-list";
 import { Textarea } from "../components/ui/textarea";
-import { useA2aAgents, useMut, usePlugins } from "../hooks";
+import { useA2aAgents, useCatalogZone, useMut, usePlugins } from "../hooks";
 import { MAX_CARD_BYTES, cardView, clientPath, utf8Bytes } from "../lib/a2aCard";
 import { PageLoading } from "./Access";
 import { CardBadge } from "./A2aAgents";
@@ -170,6 +170,7 @@ export function A2aAgentEdit() {
   const { id } = useParams({ strict: false }) as { id?: string };
   const list = useA2aAgents();
   const existing = id ? list.data?.find((agent) => agent.id === id) : undefined;
+  const { zone, zoneLabel } = useCatalogZone(existing);
   if (id && list.isPending) return <PageLoading />;
   if (id && !existing) {
     return (
@@ -178,15 +179,15 @@ export function A2aAgentEdit() {
       </Alert>
     );
   }
-  return <A2aAgentForm key={existing?.id ?? "new"} existing={existing} />;
+  return <A2aAgentForm key={`${existing?.id ?? "new"}@${zone}`} existing={existing} zone={zone} zoneLabel={zoneLabel} />;
 }
 
-function A2aAgentForm({ existing }: { existing?: A2aAgent }) {
+function A2aAgentForm({ existing, zone, zoneLabel }: { existing?: A2aAgent; zone: string; zoneLabel: string }) {
   const navigate = useNavigate();
   const initial = existing ? fromAgent(existing) : blank;
   // The same two queries PluginRefFields reads, so the missing-gateway check costs no extra request.
-  const authPlugins = usePlugins("upstream-auth");
-  const middlewarePlugins = usePlugins("a2a-middleware");
+  const authPlugins = usePlugins("upstream-auth", true, undefined, zone);
+  const middlewarePlugins = usePlugins("a2a-middleware", true, undefined, zone);
   const missingFor = (values: Values) =>
     missingGateways(values, authPlugins.data ?? [], middlewarePlugins.data ?? []);
   const form = useForm<Values>(initial, {
@@ -221,7 +222,7 @@ function A2aAgentForm({ existing }: { existing?: A2aAgent }) {
   const missing = missingFor(v);
   const dirty = JSON.stringify(v) !== JSON.stringify(initial);
   const save = useMut(
-    (values: Values) => (existing ? api.updateA2aAgent(existing.id, patchBody(existing, values)) : api.createA2aAgent(createBody(values))),
+    (values: Values) => (existing ? api.updateA2aAgent(existing.id, patchBody(existing, values)) : api.createA2aAgent({ ...createBody(values), zone })),
     existing ? "Agent saved" : "Agent created",
   );
 
@@ -245,7 +246,8 @@ function A2aAgentForm({ existing }: { existing?: A2aAgent }) {
 
   return (
     <EditPage
-      title={existing ? existing.name : "New agent"}
+      title={existing ? existing.name : `New agent in ${zoneLabel}`}
+      description={existing ? `Zone ${zoneLabel}` : undefined}
       back="/a2a-agents"
       backLabel="A2A agents"
       dirty={dirty}
@@ -320,7 +322,7 @@ function A2aAgentForm({ existing }: { existing?: A2aAgent }) {
         title="Auth"
         hint="static_bearer carries one token; passthrough forwards the client's Authorization."
       >
-        <PluginRefFields kind="upstream-auth" value={authValue} onChange={changeAuth} />
+        <PluginRefFields kind="upstream-auth" zone={zone} value={authValue} onChange={changeAuth} />
         {v.auth.plugin === "static_bearer" && (
           <>
             <SelectField
@@ -360,7 +362,7 @@ function A2aAgentForm({ existing }: { existing?: A2aAgent }) {
       >
         {v.middleware_on && (
           <>
-            <PluginRefFields kind="a2a-middleware" value={middlewareValue} onChange={changeMiddleware} />
+            <PluginRefFields kind="a2a-middleware" zone={zone} value={middlewareValue} onChange={changeMiddleware} />
             {form.errors.middleware && (
               <p className="text-[13px] text-destructive" role="alert">
                 {form.errors.middleware}

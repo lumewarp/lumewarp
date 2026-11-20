@@ -23,6 +23,9 @@ from lumewarp_control_plane.models import (
     KeyLifecycle,
     Model,
     ModelAccess,
+    ModelDeployment,
+    ModelGroup,
+    ModelGroupMember,
     PolicyGrant,
     Router,
     RouterFallback,
@@ -31,6 +34,7 @@ from lumewarp_control_plane.models import (
     Team,
     Upstream,
     UpstreamKind,
+    ZoneLimit,
 )
 from tests import factories
 from tests.compiler.helpers import (
@@ -59,6 +63,7 @@ async def test_restore_recreates_deleted_ids_and_preserves_changed_policy(factor
         model_id = await session.scalar(select(Model.id).where(Model.name == "model"))
         session.add(RouterSplitMember(split_id=split.id, model_id=model_id, position=0))
         team, user = await add_hierarchy(session)
+        team_id = team.id
         key = await add_key(session, team, user)
         await session.flush()
         expected = await capture_catalog_state(session)
@@ -76,14 +81,21 @@ async def test_restore_recreates_deleted_ids_and_preserves_changed_policy(factor
         await session.execute(delete(RouterFallback))
         await session.execute(delete(CatalogName).where(CatalogName.id == backup_id))
         await session.execute(delete(CatalogName).where(CatalogName.name == "backup-model"))
-        upstream = Upstream(name="new-upstream", kind=UpstreamKind.OPENAI, base_url="http://new/v1")
+        upstream = Upstream(
+            name="new-upstream",
+            zone=SCOPE,
+            kind=UpstreamKind.OPENAI,
+            base_url="http://new/v1",
+        )
         session.add(upstream)
         await session.flush()
         await session.execute(
-            update(Model).where(Model.id == model_id).values(upstream_id=upstream.id)
+            update(ModelDeployment)
+            .where(ModelDeployment.name_id == model_id)
+            .values(upstream_id=upstream.id)
         )
-        # Current policy is not restored from the routing sidecar.
-        await session.execute(update(Team).values(rpm_limit=23))
+        # Current per-zone limits are not restored from the routing sidecar.
+        session.add(ZoneLimit(zone=SCOPE, team_id=team_id, rpm_limit=23))
         await session.execute(
             update(ApiKey)
             .where(ApiKey.id == key_id)
@@ -93,7 +105,14 @@ async def test_restore_recreates_deleted_ids_and_preserves_changed_policy(factor
         version = await rollback_routing(session, SCOPE, 1, require_local_membership=True)
         assert await capture_catalog_state(session) == expected
         assert await session.get(Router, backup_id) is not None
-        assert await session.scalar(select(Team.rpm_limit)) == 23
+        assert (
+            await session.scalar(
+                select(ZoneLimit.rpm_limit).where(
+                    ZoneLimit.zone == SCOPE, ZoneLimit.team_id == team_id
+                )
+            )
+            == 23
+        )
     restored = await load_version(factory, version)
     assert restored.models == before.models
     assert restored.routers == before.routers
@@ -258,3 +277,39 @@ async def test_rollback_removing_a_name_audits_its_grants(factory):
         assert (await session.get(Team, team_id)).allowed_models == []
         row = await session.scalar(select(AuditLog).where(AuditLog.action == "grant.delete"))
         assert row.team_id == team_id and row.details["name"] == "late"
+
+
+async def test_rollback_removing_a_name_audits_its_group_membership(factory):
+    """Groups are not rolled back, but a name the rollback deletes leaves its groups, and
+    each removed membership is audited with the rollback as the actor.
+    """
+    await seed_scope(factory)
+    async with factory() as session, session.begin():
+        await factories.make_upstream(session, "u")
+        kept = await factories.make_model(session, "kept")
+    assert await _publish(factory) == 1
+    async with factory() as session, session.begin():
+        late = await factories.make_model(session, "late")
+        group = ModelGroup(name="g")
+        session.add(group)
+        await session.flush()
+        session.add_all(
+            ModelGroupMember(group_id=group.id, name_id=name_id) for name_id in (kept.id, late.id)
+        )
+        group_id = group.id
+    assert await _publish(factory) == 2
+    async with factory() as session, session.begin():
+        await rollback_routing(session, SCOPE, 1, require_local_membership=True)
+    async with factory() as session:
+        members = set(
+            await session.scalars(
+                select(ModelGroupMember.name_id).where(ModelGroupMember.group_id == group_id)
+            )
+        )
+        assert members == {kept.id}
+        row = await session.scalar(
+            select(AuditLog).where(AuditLog.action == "model_group.member_remove")
+        )
+        assert row.resource_id == str(group_id)
+        assert row.details == {"name": "g", "member": "late", "member_id": str(late.id)}
+        assert (row.actor_type, row.actor_id) == ("system", "rollback")

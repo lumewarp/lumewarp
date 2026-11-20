@@ -10,7 +10,7 @@ a gateway keeps serving while the control plane is down.
 
 | | Use it for | Page |
 | --- | --- | --- |
-| Helm | Kubernetes: the control plane, a gateway (several pods may share one token), migrations as a hook, optional ServiceMonitors. | [Deploy with Helm](./helm.md) |
+| Helm | Kubernetes: the control plane, a gateway (several pods may share one zone token), migrations as a hook, optional ServiceMonitors. | [Deploy with Helm](./helm.md) |
 | Helm, full stack | The same plus a single-pod PostgreSQL and optional OpenFGA (`lumewarp-stack`), for evaluation and small installs. | [Full stack](./helm.md#full-stack-lumewarp-stack) |
 | Plain manifests | Kubernetes without Helm: PostgreSQL, OpenFGA, the control plane and a gateway, both migrations as Jobs; one YAML file per release, or one file per component in the repository. | [Deploy with plain manifests](./kubernetes.md) |
 | Docker Compose | One host: Postgres, the control plane and a gateway from the published images. | [Deploy with Docker](./docker.md) |
@@ -32,10 +32,11 @@ Each release publishes:
 | Image | Runs | User | Writable path |
 | --- | --- | --- | --- |
 | `lumewarp-gateway` | `lumewarp` (distroless). Arguments are the gateway's [flags](./gateway.md#flags). | 65532 | `/var/lib/lumewarp`, for the cached snapshot |
-| `lumewarp-control-plane` | `python -m lumewarp_control_plane serve` (Python 3.12, with the Admin UI built in). The command is a [CLI command](./control-plane.md#cli): `migrate`, `bootstrap`, `hash-password`, ... | 10001 | none |
+| `lumewarp-control-plane` | `python -m lumewarp_control_plane serve` (Python 3.12, with the Admin UI built in). The command is a [CLI command](./control-plane.md#cli): `migrate`, `hash-password`, ... | 10001 | none |
 
-While Lumewarp is 0.x a release has no upgrade path: drop the control-plane database before
-installing a new one ([Upgrades](./upgrades.md)).
+The database baseline has been rebuilt for zones. Recreate an existing development database
+from the previous schema before running the current migrations; it is not upgraded in place
+([Upgrades](./upgrades.md)).
 
 ### Building images
 
@@ -64,11 +65,14 @@ control plane's HTTP listener speak plain HTTP (the gRPC listener can use TLS,
 
 ## What every deployment needs
 
+A zone separates gateway configuration and traffic, not teams or identity. See [Zones](../admin/zones.md).
+
 | Setting | Where | Why |
 | --- | --- | --- |
 | `LUMEWARP_DATABASE_URL` | Control plane | PostgreSQL 16+, as a SQLAlchemy async URL. |
-| `migrate`, then `bootstrap --name <label>` | Control plane CLI, once | Creates the schema, the config scope and the first gateway token (`lwg-…`, shown once; `--name` is optional). |
-| Gateway token | Gateway | `--gateway-token-env` names the variable holding the token. The token authenticates the scope, so any number of gateways may share it; each process generates its own id. |
+| `migrate` | Control plane CLI, once | Creates the schema. `serve` creates the default zone and every zone declared by a gateway-token environment variable. Recreate an existing development database from before the rebuilt zone baseline. |
+| `LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN` | Control plane | One fixed token per zone. `<ID>` is the uppercase zone ID with `-` replaced by `_`; the token must be at least 32 characters. It is read at startup, and only its SHA-256 hash is kept in memory. |
+| Same zone token | Gateway | Supply the same secret through the environment variable named by `--gateway-token-env`; the gateway also sends the zone on both RPCs. Any number of gateway processes may share it. |
 | A persistent `--state-dir` | Gateway | The last good snapshot, so a restart while the control plane is down still serves. |
 | `LUMEWARP_BREAK_GLASS_PASSWORD_HASH` | Control plane | Emergency login, and the way to sign in before SSO is set up. An argon2id hash from `hash-password`. |
 | `LUMEWARP_ENCRYPTION_KEY` | Control plane **and every gateway**, same value | Seals upstream API keys entered in the Admin UI. |

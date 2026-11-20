@@ -31,9 +31,11 @@ class ConfigServiceStub:
     whose base_version == Hello.have_version when it still retains that base.
     At most one update per stream is un-ACKed at a time. ACK means the version
     is validated, durably persisted and active. See docs/config-protocol.md.
-    The gateway authenticates with `authorization: Bearer <gateway token>`
-    metadata; the token authenticates its scope, and any number of gateways may
-    use one token.
+    The gateway authenticates with `authorization: Bearer <zone token>` and
+    `x-lumewarp-zone: <zone id>` metadata. The control plane holds one fixed
+    token per zone (LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN); any number of gateways
+    may use it. The control plane assigns the gateway id in Welcome, the first
+    message of every stream.
     """
 
     def __init__(self, channel):
@@ -55,9 +57,11 @@ class ConfigServiceServicer:
     whose base_version == Hello.have_version when it still retains that base.
     At most one update per stream is un-ACKed at a time. ACK means the version
     is validated, durably persisted and active. See docs/config-protocol.md.
-    The gateway authenticates with `authorization: Bearer <gateway token>`
-    metadata; the token authenticates its scope, and any number of gateways may
-    use one token.
+    The gateway authenticates with `authorization: Bearer <zone token>` and
+    `x-lumewarp-zone: <zone id>` metadata. The control plane holds one fixed
+    token per zone (LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN); any number of gateways
+    may use it. The control plane assigns the gateway id in Welcome, the first
+    message of every stream.
     """
 
     def Stream(self, request_iterator, context):
@@ -91,9 +95,11 @@ class ConfigService:
     whose base_version == Hello.have_version when it still retains that base.
     At most one update per stream is un-ACKed at a time. ACK means the version
     is validated, durably persisted and active. See docs/config-protocol.md.
-    The gateway authenticates with `authorization: Bearer <gateway token>`
-    metadata; the token authenticates its scope, and any number of gateways may
-    use one token.
+    The gateway authenticates with `authorization: Bearer <zone token>` and
+    `x-lumewarp-zone: <zone id>` metadata. The control plane holds one fixed
+    token per zone (LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN); any number of gateways
+    may use it. The control plane assigns the gateway id in Welcome, the first
+    message of every stream.
     """
 
     @staticmethod

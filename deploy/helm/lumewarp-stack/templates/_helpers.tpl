@@ -60,3 +60,7 @@ The password: the existing Secret's value, or a new random one. `helm template` 
 {{- end }}
 {{- define "stack.controlPlaneName" -}}{{ printf "%s-control-plane" (include "stack.lumewarpFullname" .) | trunc 63 | trimSuffix "-" }}{{- end }}
 {{- define "stack.gatewayName" -}}{{ printf "%s-gateway" (include "stack.lumewarpFullname" .) | trunc 63 | trimSuffix "-" }}{{- end }}
+{{/* The Secret the subchart creates for the zone tokens (or the existing one it was given). */}}
+{{- define "stack.gatewayTokensSecretName" -}}
+{{- default (printf "%s-gateway-tokens" (include "stack.lumewarpFullname" .)) .Values.global.gatewayTokens.secretName -}}
+{{- end }}

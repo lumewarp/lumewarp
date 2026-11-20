@@ -10,12 +10,7 @@ from sqlalchemy import delete, select
 
 from lumewarp_control_plane import sealing
 from lumewarp_control_plane.compiler.plugins import BUILTIN_PLUGINS, CAPABILITY_PREFIX
-from lumewarp_control_plane.models import (
-    A2aAgent,
-    AuditLog,
-    GatewaySession,
-    GatewayToken,
-)
+from lumewarp_control_plane.models import A2aAgent, AuditLog, GatewaySession
 from tests.api.helpers import ADMIN_AUTH, report_plugins, suffix
 
 H = ADMIN_AUTH
@@ -60,7 +55,6 @@ async def gateway(committed, api_scope: str):
 
     yield report
     await committed.rollback()
-    await committed.execute(delete(GatewayToken).where(GatewayToken.name.like(f"{PREFIX}%")))
     await committed.execute(
         delete(GatewaySession).where(GatewaySession.gateway_id.like(f"{PREFIX}%"))
     )

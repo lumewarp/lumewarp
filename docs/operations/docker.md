@@ -7,7 +7,7 @@ the published images. For Kubernetes use [Helm](./helm.md); for what each part n
 
 | File | |
 | --- | --- |
-| `compose.yaml` | The services: `postgres`, a one-shot `migrate`, `control-plane`, and `gateway` (in the `gateway` profile, so it starts once it has a token). |
+| `compose.yaml` | The services: `postgres`, a one-shot `migrate`, `control-plane`, and `gateway`. |
 | `gateway.yaml` | The gateway's local settings: its two listeners. |
 | `env.example` | Every setting the file reads; copy it to `.env`. |
 
@@ -33,6 +33,8 @@ cp env.example .env
 In `.env`, set at least:
 
 - `POSTGRES_PASSWORD`.
+- `LUMEWARP_GATEWAY_ZONE_DEFAULT_TOKEN`: at least 32 characters. This fixed token declares
+  the default zone to the control plane and is also supplied to the gateway.
 - `LUMEWARP_ENCRYPTION_KEY`: at least 32 random characters (`openssl rand -base64 48`). The
   gateway gets the same value.
 - `LUMEWARP_BREAK_GLASS_PASSWORD_HASH`: the emergency login, used to sign in the first time.
@@ -58,32 +60,31 @@ curl -s http://127.0.0.1:8091/readyz
 
 `migrate` runs first and exits; the control plane starts when it succeeded, and `/readyz`
 answers `"status":"ready"` once the database, migrations and background tasks are up.
-`migrate` runs again on every `up`, which is harmless at the same version.
+`migrate` runs again on every `up`, which is harmless at the same version. The control
+plane creates the default zone at startup and reads its gateway token from
+`LUMEWARP_GATEWAY_ZONE_DEFAULT_TOKEN`.
 
-## 3. Create the gateway token and start the gateway
+## 3. Connect the gateway
+
+The gateway uses the same secret as the control plane's
+`LUMEWARP_GATEWAY_ZONE_DEFAULT_TOKEN`. The Compose configuration passes it to both
+processes. The environment contract is the same for other zones:
+`LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN`, with the zone ID upper-cased and `-` replaced by `_`.
+For gateway flags and per-zone setup, see [Gateway settings](./gateway.md) and
+[Zones](../admin/zones.md#declare-and-configure-a-zone).
 
 ```sh
-docker compose run --rm control-plane bootstrap --name gateway
-```
-
-The `lwg-…` token is printed once. Put it in `.env` as `LUMEWARP_GATEWAY_TOKEN`; the gateway
-generates its own id at startup, then:
-
-```sh
-docker compose --profile gateway up -d
+docker compose up -d
 curl -s http://127.0.0.1:9464/readyz     # "ready" once the first config version is applied
 ```
 
-Changing `.env` recreates the control plane too, so the gateway may log one `config stream
-ended` while it reconnects; that is expected. Pass `--profile gateway` to every later
-`docker compose` command, or set `COMPOSE_PROFILES=gateway` in `.env`, so the gateway is
-included.
+Changing the token requires updating the control-plane and gateway environments to the same
+value, then recreating both containers. There is no rotation grace; the gateway keeps serving
+its last good snapshot while it reconnects.
 
-## 4. First sign-in
+## 4. Create the routing config
 
-Open <http://127.0.0.1:8091/>, enter the password you hashed as the **Break-glass
-password**, and
-create an upstream, a model, an org, a team and a key (the
+In the Admin UI, create an upstream, a model, an org, a team and a key (the
 [control-plane quick start](../guide/quickstart-control-plane.md) walks through it). Each
 change publishes a config version that the gateway applies within seconds; then:
 
@@ -104,13 +105,13 @@ from [Sign-in and authorization](./identity.md) to `.env`, with
 
 | Task | How |
 | --- | --- |
-| Logs | `docker compose --profile gateway logs -f gateway control-plane` |
-| Another gateway token | `docker compose run --rm control-plane bootstrap --name <label>`, or **Gateways → New gateway token** in the Admin UI |
+| Logs | `docker compose logs -f gateway control-plane` |
+| Another zone | Set `LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN` on the control plane and pass the same secret to its gateway; see [Zones](../admin/zones.md#declare-and-configure-a-zone). |
 | MCP and A2A | Set `LUMEWARP_GATEWAY_ID_KEY` (`openssl rand -base64 32`) and `LUMEWARP_GATEWAY_PUBLIC_URL` in `.env` |
 | WASM plugins | Mount a directory into the gateway and set `LUMEWARP_ROUTER_PLUGIN_DIR`, `LUMEWARP_AUTH_PLUGIN_DIR` and `LUMEWARP_A2A_MIDDLEWARE_DIR` ([Gateway plugins](../plugins.md#loading)); plugin secrets are `LUMEWARP_PLUGIN_SECRET_*` variables |
 | Metrics | Scrape `127.0.0.1:9464/metrics` and `127.0.0.1:9465/metrics` ([Metrics, alerts and tracing](./observability.md)) |
 | Backups | The `postgres` volume holds everything; the gateway's `gateway-state` volume is a cache it rebuilds from the control plane |
-| A new release | Lumewarp 0.x keeps no upgrade path: `docker compose --profile gateway down -v` (this **deletes the database**), set `LUMEWARP_VERSION`, and start again from step 2 |
+| A new release | Back up the `postgres` volume, set `LUMEWARP_VERSION`, and `docker compose up -d`: `migrate` upgrades the database in place before the control plane starts. There is no downgrade; to go back, restore the backup ([Upgrades](./upgrades.md)) |
 
 The gateway keeps serving its last config while the control plane is stopped, and a
 restarted gateway boots from the snapshot in its volume.

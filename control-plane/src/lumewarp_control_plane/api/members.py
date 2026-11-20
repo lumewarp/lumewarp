@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane import audit
 from lumewarp_control_plane.api.common import (
+    DefaultZoneDep,
     LimitDep,
     MetricsDep,
     SessionDep,
@@ -19,7 +20,7 @@ from lumewarp_control_plane.api.common import (
     enqueue_recompile,
     ensure_grants_managed,
     get_team_or_404,
-    lock_scope,
+    lock_hierarchy,
     mutation,
     parse_uuid_cursor,
     suspend_ineligible_user_keys,
@@ -37,6 +38,11 @@ from lumewarp_control_plane.api.schemas import (
     MemberUpdate,
     MemberUpsert,
     Page,
+)
+from lumewarp_control_plane.api.zone_limits import (
+    apply_default_zone_limits,
+    limits_by_zone,
+    limits_of,
 )
 from lumewarp_control_plane.authz import Action, Authz
 from lumewarp_control_plane.errors import ApiError, not_found
@@ -57,9 +63,15 @@ from lumewarp_control_plane.quota import Policy, policy_of
 router = APIRouter(tags=["members"])
 
 
-def _out(member: TeamMember, user: User, policy: MemberPolicy | None) -> MemberOut:
+def _out(
+    member: TeamMember,
+    user: User,
+    policy: MemberPolicy | None,
+    limits: dict[str, object] | None = None,
+    zone: str | None = None,
+) -> MemberOut:
     """A member without a policy row reads as INHERIT with no limits or budget."""
-    return MemberOut(
+    out = MemberOut(
         team_id=member.team_id,
         user_id=member.user_id,
         email=user.email,
@@ -71,15 +83,24 @@ def _out(member: TeamMember, user: User, policy: MemberPolicy | None) -> MemberO
         updated_at=member.updated_at,
         model_access=(policy.model_access if policy is not None else ModelAccess.INHERIT),
         allowed_models=(list(policy.allowed_models) if policy is not None else []),
+        allowed_groups=(list(policy.allowed_groups) if policy is not None else []),
+        granted_models=(list(policy.granted_models) if policy is not None else []),
         mcp_access=(policy.mcp_access if policy is not None else ModelAccess.INHERIT),
         mcp_servers=(list(policy.mcp_servers) if policy is not None else []),
         a2a_access=(policy.a2a_access if policy is not None else ModelAccess.INHERIT),
         a2a_agents=(list(policy.a2a_agents) if policy is not None else []),
-        rpm_limit=policy.rpm_limit if policy is not None else None,
-        tpm_limit=policy.tpm_limit if policy is not None else None,
-        max_parallel=policy.max_parallel if policy is not None else None,
-        budget_nano_usd=policy.budget_nano_usd if policy is not None else None,
     )
+    apply_default_zone_limits(out, limits or {}, default_zone=zone)
+    return out
+
+
+async def _limits_for(
+    session: AsyncSession, team_id: uuid.UUID, user_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, dict[str, object]]:
+    if not user_ids:
+        return {}
+    found = await limits_by_zone(session, "member", {(team_id, user_id) for user_id in user_ids})
+    return {user_id: found.get(("member", team_id, user_id), {}) for user_id in user_ids}
 
 
 def _inherited_out(
@@ -87,6 +108,8 @@ def _inherited_out(
     user: User,
     inherited: tuple[InheritedFrom, datetime],
     policy: MemberPolicy | None,
+    limits: dict[str, object] | None = None,
+    zone: str | None = None,
 ) -> MemberOut:
     """An admin of the team by inheritance, with no membership row of its own."""
     source, at = inherited
@@ -96,6 +119,8 @@ def _inherited_out(
         ),
         user,
         policy,
+        limits,
+        zone,
     )
     out.inherited_from = source
     out.direct = False
@@ -141,6 +166,7 @@ async def list_members(
     team_id: uuid.UUID,
     authz: Authz,
     session: SessionDep,
+    zone: DefaultZoneDep,
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[MemberOut]:
@@ -195,17 +221,20 @@ async def list_members(
         )
     ):
         granted[user_id] = (InheritedFrom.INSTALLATION, at)
+    by_zone = await _limits_for(session, team.id, page_ids)
     items = []
     for user_id in page_ids:
         user = users[user_id]
         inherited = granted.get(user_id)
         member = members.get(user_id)
         if member is not None:
-            out = _out(member, user, policies.get(user_id))
+            out = _out(member, user, policies.get(user_id), by_zone.get(user_id), zone)
             out.inherited_from = inherited[0] if inherited else None
         else:
             assert inherited is not None
-            out = _inherited_out(team.id, user, inherited, policies.get(user_id))
+            out = _inherited_out(
+                team.id, user, inherited, policies.get(user_id), by_zone.get(user_id), zone
+            )
         items.append(out)
     return Page[MemberOut](items=items, next_cursor=next_cursor)
 
@@ -280,7 +309,7 @@ async def _save_member(
     create_only: bool = False,
 ) -> MemberOut:
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         team = await get_team_or_404(session, authz, team_id)
         await authz.require(Action.TEAM_MEMBERS_MANAGE, team.id)
         ensure_grants_managed(request)
@@ -302,9 +331,11 @@ async def _save_member(
         # defaults instead of keeping the stored row. The stored row is the validation
         # base, so a value the PUT resends unchanged is not rechecked after a parent
         # decrease (a real change, or a clear, is still checked).
-        base = policy_of(policy_row) if policy_row is not None else None
+        zone = settings.zone
+        limits = await limits_of(session, zone, {"team_id": team.id, "user_id": user_id})
+        base = policy_of(policy_row, limits) if policy_row is not None else None
         proposed = policy_from_fields(body, default_mode=ModelAccess.INHERIT)
-        await validate_owner_policy(session, team, proposed, base)
+        await validate_owner_policy(session, zone, team, proposed, base)
         created = row is None
         if create_only and not created:
             raise conflict("user is already a member of this team")
@@ -341,7 +372,13 @@ async def _save_member(
         await enqueue_recompile(session, settings, "api.member.put")
     if created:
         response.status_code = status.HTTP_201_CREATED
-    return _out(row, user, policy_row)
+    return _out(
+        row,
+        user,
+        policy_row,
+        (await _limits_for(session, team.id, [user_id])).get(user_id),
+        settings.zone,
+    )
 
 
 @router.patch(
@@ -361,7 +398,7 @@ async def update_member(
     `managed_externally` when the authorization backend owns memberships.
     """
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         team = await get_team_or_404(session, authz, team_id)
         row = await _member_or_404(session, team.id, user_id)
         user = await session.get(User, user_id)
@@ -374,7 +411,9 @@ async def update_member(
         policy_row = await _policy_or_none(session, team.id, user_id, lock=True)
         base = policy_of(policy_row) if policy_row is not None else Policy(ModelAccess.INHERIT, ())
         proposed = policy_from_fields(body, default_mode=ModelAccess.INHERIT, base=base)
-        await validate_owner_policy(session, team, proposed, None if policy_row is None else base)
+        await validate_owner_policy(
+            session, settings.zone, team, proposed, None if policy_row is None else base
+        )
         changed = proposed != base
         if changed:
             if policy_row is None:
@@ -404,7 +443,7 @@ async def update_member(
             },
         )
         await enqueue_recompile(session, settings, "api.member.update")
-    return _out(row, user, policy_row)
+    return _out(row, user, policy_row, zone=settings.zone)
 
 
 @router.delete(
@@ -427,7 +466,7 @@ async def delete_member(
     installation role still lets them own keys here.
     """
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         team: Team = await get_team_or_404(session, authz, team_id)
         row = await _member_or_404(session, team.id, user_id)
         await authz.require(Action.TEAM_MEMBERS_MANAGE, team.id)

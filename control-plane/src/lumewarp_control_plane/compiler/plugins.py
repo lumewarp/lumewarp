@@ -40,7 +40,6 @@ from lumewarp_control_plane.models import (
     ActorType,
     GatewayPlugin,
     GatewaySession,
-    GatewayToken,
     McpServer,
     PluginKind,
     Router,
@@ -640,9 +639,8 @@ def normalize_hello(hello: Any) -> NormalizedHello:
 
 async def replace_gateway_plugins(
     session: AsyncSession,
-    scope: str,
+    zone: str,
     gateway_id: str,
-    token_id: uuid.UUID,
     reported: list[ReportedPlugin],
     now: datetime,
 ) -> None:
@@ -651,7 +649,7 @@ async def replace_gateway_plugins(
     owns it.
     """
     stale = delete(GatewayPlugin).where(
-        GatewayPlugin.scope == scope,
+        GatewayPlugin.zone == zone,
         GatewayPlugin.gateway_id == gateway_id,
     )
     if reported:
@@ -666,13 +664,12 @@ async def replace_gateway_plugins(
     stmt = pg_insert(GatewayPlugin).values(
         [
             {
-                "scope": scope,
+                "zone": zone,
                 "gateway_id": gateway_id,
                 "kind": item.kind,
                 "name": item.name,
                 "digest": item.digest,
                 "descriptor": item.descriptor,
-                "token_id": token_id,
                 "seen_at": now,
             }
             for item in reported
@@ -681,7 +678,7 @@ async def replace_gateway_plugins(
     await session.execute(
         stmt.on_conflict_do_update(
             index_elements=[
-                GatewayPlugin.scope,
+                GatewayPlugin.zone,
                 GatewayPlugin.gateway_id,
                 GatewayPlugin.kind,
                 GatewayPlugin.name,
@@ -689,7 +686,6 @@ async def replace_gateway_plugins(
             set_={
                 "digest": stmt.excluded.digest,
                 "descriptor": stmt.excluded.descriptor,
-                "token_id": stmt.excluded.token_id,
                 "seen_at": stmt.excluded.seen_at,
             },
         )
@@ -712,7 +708,7 @@ class GatewaySupport:
 
 @dataclass
 class PluginRegistry:
-    """The plugins of a scope that count at one moment. Read-only snapshot of the tables."""
+    """The plugins of a zone that count at one moment. Read-only snapshot of the tables."""
 
     # Connected gateway ids, for `missing`.
     connected: list[str] = field(default_factory=list)
@@ -780,16 +776,14 @@ class PluginRegistry:
 
 
 async def load_plugins(
-    session: AsyncSession, scope: str, *, now: datetime | None = None
+    session: AsyncSession, zone: str, *, now: datetime | None = None
 ) -> PluginRegistry:
-    """A gateway counts while the token of its latest Hello is unrevoked and it is connected
-    or was seen within 30 days (rows older than 24 h are deleted, so an offline gateway
-    usually disappears sooner); a report counts while its own token is unrevoked. One
-    statement, so this sees one snapshot: never a Hello's capabilities with another Hello's
-    reports. It takes no lock, so any caller's lock order is safe.
+    """A gateway counts while it is connected or was seen within 30 days (rows older than
+    24 h are deleted, so an offline gateway usually disappears sooner); its reports count
+    with it. One statement, so this sees one snapshot: never a Hello's capabilities with
+    another Hello's reports. It takes no lock, so any caller's lock order is safe.
     """
     cutoff = (now or datetime.now(UTC)) - GATEWAY_RETENTION
-    unrevoked = select(GatewayToken.id).where(GatewayToken.revoked_at.is_(None))
     rows = await session.execute(
         select(
             GatewaySession.gateway_id,
@@ -805,14 +799,12 @@ async def load_plugins(
         .outerjoin(
             GatewayPlugin,
             and_(
-                GatewayPlugin.scope == GatewaySession.scope,
+                GatewayPlugin.zone == GatewaySession.zone,
                 GatewayPlugin.gateway_id == GatewaySession.gateway_id,
-                GatewayPlugin.token_id.in_(unrevoked),
             ),
         )
         .where(
-            GatewaySession.scope == scope,
-            GatewaySession.token_id.in_(unrevoked),
+            GatewaySession.zone == zone,
             or_(GatewaySession.connected, GatewaySession.last_seen_at >= cutoff),
         )
     )
@@ -919,13 +911,13 @@ async def validate_plugin_params(
     *,
     force: bool,
     members: list[tuple[str, dict[str, Any]]] | None = None,
-    scope: str | None = None,
+    zone: str | None = None,
 ) -> list[str]:
     """`check_plugin` on a freshly loaded registry: the one call every write makes for any
     kind of plugin. Raises PluginRejected (the API answers 422 with `exc.field`), and returns
     the connected gateways a forced save is saving past, for the caller to audit.
     """
-    registry = await load_plugins(session, scope or get_settings().scope)
+    registry = await load_plugins(session, zone or get_settings().zone)
     return check_plugin(registry, kind, name, params, members=members, force=force)
 
 
@@ -992,7 +984,7 @@ class _SplitMembers:
 
 async def check_stored_routers(
     session: AsyncSession,
-    scope: str,
+    zone: str,
     *,
     force: bool,
     principal: Principal | None,
@@ -1001,7 +993,7 @@ async def check_stored_routers(
     """`check_plugin` on every router in the source tables, for a rollback that has just
     restored them in this transaction: a rejection aborts it all.
     """
-    registry = await load_plugins(session, scope, now=now)
+    registry = await load_plugins(session, zone, now=now)
     members: dict[uuid.UUID, list[RouterMember]] = {}
     for member in await session.scalars(select(RouterMember).order_by(RouterMember.position)):
         members.setdefault(member.router_id, []).append(member)
@@ -1043,7 +1035,7 @@ async def check_stored_routers(
 
 async def check_stored_targets(
     session: AsyncSession,
-    scope: str,
+    zone: str,
     *,
     force: bool,
     principal: Principal | None,
@@ -1052,7 +1044,7 @@ async def check_stored_targets(
     """`check_plugin` on every live MCP server and A2A agent, for a rollback that has just
     restored them in this transaction: a rejection aborts it all, exactly like a router.
     """
-    registry = await load_plugins(session, scope, now=now)
+    registry = await load_plugins(session, zone, now=now)
     servers = await session.scalars(
         select(McpServer)
         .where(McpServer.deleted_at.is_(None))

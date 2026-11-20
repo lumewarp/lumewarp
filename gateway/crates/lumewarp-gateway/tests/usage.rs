@@ -51,7 +51,7 @@ use tokio::{
 };
 use usage_cp::FakeCp;
 
-const SCOPE: &str = "usage-test";
+const ZONE: &str = "usage-test";
 const TOKEN_ENV: &str = "LUMEWARP_USAGE_TEST_TOKEN";
 const KEY: &str = "lw-usage-key";
 const LIMITED_KEY: &str = "lw-limited-key";
@@ -338,7 +338,7 @@ fn snapshot(upstream: SocketAddr) -> Snapshot {
         created_at_unix_ms: 1,
         aliases: vec![],
         required_capabilities: vec!["strategy:weighted".into()],
-        scope: SCOPE.into(),
+        zone: ZONE.into(),
     }
 }
 
@@ -373,7 +373,7 @@ impl Gateway {
             .args(["--gateway-token-env", TOKEN_ENV])
             .arg("--state-dir")
             .arg(dir.join("state"))
-            .args(["--scope", SCOPE])
+            .args(["--zone", ZONE])
             .arg("--local-config")
             .arg(&local)
             .env(TOKEN_ENV, "gw-secret")
@@ -520,7 +520,20 @@ async fn retried_request_reports_only_final_model_usage() {
     bytes(response).await;
     upstream.received().await;
     upstream.received().await;
-    let event = cp.event().await;
+    let event = {
+        let report = cp.report().await;
+        assert_eq!(
+            report.zone.as_deref(),
+            Some(ZONE),
+            "x-lumewarp-zone metadata"
+        );
+        assert_eq!(
+            report.gateway_id,
+            usage_cp::WELCOME_GATEWAY_ID,
+            "usage carries the id assigned in Welcome"
+        );
+        report.event
+    };
     assert_eq!(event.requested, "public");
     assert_eq!((event.prompt_tokens, event.completion_tokens), (5, 3));
     assert!(["d", "second"].contains(&event.model.as_str()));

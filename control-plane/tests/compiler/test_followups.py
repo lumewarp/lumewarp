@@ -8,7 +8,12 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import DBAPIError
 
 from lumewarp_control_plane.compiler import publish as publisher
-from lumewarp_control_plane.models import ConfigOutbox, ConfigVersion, Model, OutboxStatus
+from lumewarp_control_plane.models import (
+    ConfigOutbox,
+    ConfigVersion,
+    ModelDeployment,
+    OutboxStatus,
+)
 from lumewarp_control_plane.settings import Settings
 from lumewarp_control_plane.usage import _rollover_once
 from tests.compiler.helpers import SCOPE, add_router, seed_scope, touch
@@ -29,7 +34,7 @@ async def test_restart_and_noop_recompile_keep_version(factory) -> None:
 
     # Startup's rollover scheduler enqueues work even in the same month. Publication
     # time and revision differ but the gateway-visible content has not changed.
-    await _rollover_once(Settings(scope=SCOPE), factory)
+    await _rollover_once(Settings(zone=SCOPE), factory)
     assert (
         await publisher.publish_pending(
             factory,
@@ -49,7 +54,7 @@ async def test_restart_and_noop_recompile_keep_version(factory) -> None:
         assert all(r.status == OutboxStatus.DONE and r.published_version == 1 for r in rows)
 
     async with factory() as s, s.begin():
-        await s.execute(update(Model).values(upstream_model="changed"))
+        await s.execute(update(ModelDeployment).values(upstream_model="changed"))
     await touch(factory)
     assert await publisher.publish_pending(factory, SCOPE, require_local_membership=True) == 2
 
@@ -66,7 +71,7 @@ async def test_config_insert_serialization_conflict_retries_fresh_snapshot(
             text("""
             CREATE FUNCTION conflict_on_config_insert() RETURNS trigger LANGUAGE plpgsql AS $$
             BEGIN
-                PERFORM 1 FROM scopes WHERE name = NEW.scope FOR UPDATE;
+                PERFORM 1 FROM zones WHERE id = NEW.zone FOR UPDATE;
                 RETURN NEW;
             END $$
         """)

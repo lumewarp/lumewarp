@@ -4,7 +4,7 @@ import json
 
 from sqlalchemy import select
 
-from lumewarp_control_plane.compiler import compile_scope
+from lumewarp_control_plane.compiler import compile_zone
 from lumewarp_control_plane.compiler.delta import diff
 from lumewarp_control_plane.models import (
     CatalogName,
@@ -18,7 +18,7 @@ from tests.compiler.helpers import OCT, SCOPE, add_key, seed_scope
 
 async def _compile(factory):
     async with factory() as session:
-        return await compile_scope(session, SCOPE, now=OCT, require_local_membership=True)
+        return await compile_zone(session, SCOPE, now=OCT, require_local_membership=True)
 
 
 def _members(router) -> list[tuple[str, int]]:

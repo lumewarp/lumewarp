@@ -977,6 +977,12 @@ pub struct ReporterConfig {
     pub endpoint: String,
     /// Gateway token, sent as `authorization: Bearer <token>`; never logged.
     pub token: String,
+    /// Zone sent as `x-lumewarp-zone`; the control plane decides it from this
+    /// and the token.
+    pub zone: String,
+    /// Shared with the config stream: the id assigned in `Welcome`, empty
+    /// before the first one.
+    pub identity: crate::gateway_id::Identity,
     /// Queue capacity in events (default 100_000); full → drop + count.
     pub capacity: usize,
     /// Events per `Report` call (default 500).
@@ -1058,8 +1064,10 @@ async fn stopped(stop: &mut Option<oneshot::Receiver<TokioInstant>>) -> TokioIns
 struct Reporter {
     client: Option<UsageServiceClient<Channel>>,
     authorization: Option<MetadataValue<Ascii>>,
-    /// This process's generated id, sent in every `ReportRequest`.
-    gateway_id: String,
+    /// Sent as `x-lumewarp-zone`; `None` when the zone is not a valid header.
+    zone: Option<MetadataValue<Ascii>>,
+    /// The control-plane-assigned id of the current config stream.
+    identity: crate::gateway_id::Identity,
     batch_max: usize,
     flush_interval: Duration,
     metrics: Arc<Metrics>,
@@ -1096,10 +1104,18 @@ impl Reporter {
                 None
             }
         };
+        let zone = match MetadataValue::try_from(cfg.zone.as_str()) {
+            Ok(value) => Some(value),
+            Err(_) => {
+                tracing::error!("zone is not a valid header value; usage events will be dropped");
+                None
+            }
+        };
         Self {
             client,
             authorization,
-            gateway_id: crate::gateway_id::gateway_id().to_owned(),
+            zone,
+            identity: cfg.identity.clone(),
             batch_max: cfg.batch_max.max(1),
             flush_interval: cfg.flush_interval,
             metrics,
@@ -1239,17 +1255,22 @@ impl Reporter {
         events: Vec<UsageEvent>,
         deadline: Option<TokioInstant>,
     ) -> Result<(), ReportError> {
-        let (Some(client), Some(authorization)) = (&mut self.client, &self.authorization) else {
+        let (Some(client), Some(authorization), Some(zone)) =
+            (&mut self.client, &self.authorization, &self.zone)
+        else {
             return Err(ReportError::Retry);
         };
         let n = events.len();
         let mut request = tonic::Request::new(ReportRequest {
-            gateway_id: self.gateway_id.clone(),
+            gateway_id: self.identity.assigned_or_empty(),
             events,
         });
         request
             .metadata_mut()
             .insert("authorization", authorization.clone());
+        request
+            .metadata_mut()
+            .insert("x-lumewarp-zone", zone.clone());
         let until = deadline
             .unwrap_or_else(|| TokioInstant::now() + REPORT_TIMEOUT)
             .min(TokioInstant::now() + REPORT_TIMEOUT);
@@ -1355,6 +1376,7 @@ pub(crate) mod fake_cp {
 
     pub struct Report {
         pub authorization: Option<String>,
+        pub zone: Option<String>,
         pub request: ReportRequest,
     }
 
@@ -1408,10 +1430,16 @@ pub(crate) mod fake_cp {
                     .get("authorization")
                     .and_then(|v| v.to_str().ok())
                     .map(str::to_owned);
+                let zone = request
+                    .metadata()
+                    .get("x-lumewarp-zone")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned);
                 let request = request.into_inner();
                 let accepted = request.events.len() as u32;
                 let _ = state.reports.send(Report {
                     authorization,
+                    zone,
                     request,
                 });
                 Ok(Response::new(ReportResponse { accepted }))
@@ -2403,10 +2431,13 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
         capacity: usize,
         batch_max: usize,
         flush: Duration,
+        identity: crate::gateway_id::Identity,
     ) -> ReporterConfig {
         ReporterConfig {
             endpoint,
             token: "gw-token".into(),
+            zone: "zone-a".into(),
+            identity,
             capacity,
             batch_max,
             flush_interval: flush,
@@ -2418,11 +2449,18 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
     }
 
     #[tokio::test]
-    async fn batches_by_size_and_interval_with_bearer() {
+    async fn batches_by_size_and_interval_with_bearer_and_zone() {
         let mut cp = FakeUsage::start(None).await;
         let metrics = Arc::new(Metrics::new());
+        let identity = crate::gateway_id::Identity::new();
         let (sink, handle) = spawn_reporter(
-            config(cp.url(), 100, 3, Duration::from_millis(200)),
+            config(
+                cp.url(),
+                100,
+                3,
+                Duration::from_millis(200),
+                identity.clone(),
+            ),
             metrics.clone(),
         );
         for i in 0..4 {
@@ -2430,26 +2468,35 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
         }
         let first = cp.next().await;
         assert_eq!(first.authorization.as_deref(), Some("Bearer gw-token"));
+        assert_eq!(first.zone.as_deref(), Some("zone-a"));
         assert_eq!(
-            first.request.gateway_id,
-            crate::gateway_id::gateway_id(),
-            "usage is attributed to this process's generated id"
+            first.request.gateway_id, "",
+            "no Welcome yet: usage is attributed to no gateway"
         );
         assert_eq!(first.request.events.len(), 3);
         let started = Instant::now();
         let second = cp.next().await;
         assert_eq!(second.request.events.len(), 1, "flushed by the interval");
         assert!(started.elapsed() < Duration::from_secs(2));
+
+        // The id is read when the batch is sent, not when the event was made.
+        identity.assign("gw-test-0123abcd");
+        sink.try_record(event("r4"));
+        let third = cp.next().await;
+        assert_eq!(third.request.events.len(), 1);
+        assert_eq!(third.request.gateway_id, "gw-test-0123abcd");
+
         let ids: Vec<_> = first
             .request
             .events
             .iter()
             .chain(&second.request.events)
+            .chain(&third.request.events)
             .map(|e| e.request_id.clone())
             .collect();
-        assert_eq!(ids, ["r0", "r1", "r2", "r3"]);
+        assert_eq!(ids, ["r0", "r1", "r2", "r3", "r4"]);
         handle.shutdown(Duration::from_secs(1)).await;
-        assert!(metric(&metrics, "lumewarp_usage_events_reported_total 4"));
+        assert!(metric(&metrics, "lumewarp_usage_events_reported_total 5"));
     }
 
     #[tokio::test]
@@ -2464,6 +2511,7 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
                 100,
                 500,
                 Duration::from_millis(50),
+                crate::gateway_id::Identity::new(),
             ),
             metrics.clone(),
         );
@@ -2498,7 +2546,13 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
         cp.fail_next(2);
         let metrics = Arc::new(Metrics::new());
         let (sink, handle) = spawn_reporter(
-            config(cp.url(), 100, 500, Duration::from_millis(10)),
+            config(
+                cp.url(),
+                100,
+                500,
+                Duration::from_millis(10),
+                crate::gateway_id::Identity::new(),
+            ),
             metrics.clone(),
         );
         sink.try_record(event("retried"));
@@ -2523,7 +2577,13 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
     async fn overflow_drops_while_the_control_plane_is_down() {
         let metrics = Arc::new(Metrics::new());
         let (sink, handle) = spawn_reporter(
-            config("http://127.0.0.1:1".into(), 4, 2, Duration::from_millis(10)),
+            config(
+                "http://127.0.0.1:1".into(),
+                4,
+                2,
+                Duration::from_millis(10),
+                crate::gateway_id::Identity::new(),
+            ),
             metrics.clone(),
         );
         // The batcher holds at most one batch (2) in retry; the queue holds 4.
@@ -2561,7 +2621,13 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
         cp.hang_next(u32::MAX);
         let metrics = Arc::new(Metrics::new());
         let (sink, handle) = spawn_reporter(
-            config(cp.url(), 100, 1, Duration::from_millis(10)),
+            config(
+                cp.url(),
+                100,
+                1,
+                Duration::from_millis(10),
+                crate::gateway_id::Identity::new(),
+            ),
             metrics.clone(),
         );
         sink.try_record(event("in-flight"));
@@ -2588,7 +2654,13 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
         let mut cp = FakeUsage::start(None).await;
         let metrics = Arc::new(Metrics::new());
         let (sink, handle) = spawn_reporter(
-            config(cp.url(), 100, 500, Duration::from_secs(60)),
+            config(
+                cp.url(),
+                100,
+                500,
+                Duration::from_secs(60),
+                crate::gateway_id::Identity::new(),
+            ),
             metrics.clone(),
         );
         for i in 0..3 {
@@ -2600,7 +2672,13 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
         assert!(metric(&metrics, "lumewarp_usage_events_reported_total 3"));
         // A dropped handle (no shutdown) keeps the reporter running.
         let (sink, handle) = spawn_reporter(
-            config(cp.url(), 100, 500, Duration::from_millis(10)),
+            config(
+                cp.url(),
+                100,
+                500,
+                Duration::from_millis(10),
+                crate::gateway_id::Identity::new(),
+            ),
             metrics.clone(),
         );
         drop(handle);

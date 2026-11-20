@@ -2,13 +2,20 @@
 # Values for the lumewarp chart go under `lumewarp:`; its full reference is the lumewarp
 # chart's values.yaml and docs/operations/helm.md.
 
-# Shared with the lumewarp chart: image tag, pull secrets, labels, scope and the encryption key.
+# Shared with the lumewarp chart: image tag, pull secrets, labels, zone and the encryption key.
 # Empty imageTag = the chart appVersion.
 global:
   imageTag: ""
   imagePullSecrets: []
   commonLabels: {}
-  scope: default
+  zone: default
+  # Gateway credentials: one fixed token per zone, read by the control plane at startup.
+  # Empty secretName = the lumewarp chart creates <fullname>-gateway-tokens with a random
+  # 48-character token per zone; set it to use an existing Secret with the
+  # LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN keys instead. global.zone is always included.
+  gatewayTokens:
+    secretName: ""
+    zones: []
   # Existing Secret with LUMEWARP_ENCRYPTION_KEY (32+ characters); required once an upstream stores an API key.
   encryptionKey:
     secretName: ""

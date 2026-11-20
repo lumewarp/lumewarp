@@ -1,18 +1,21 @@
 # Requests
 
-**Requests** is the request log: one row per gateway request, newest first. Usage
-aggregates the same events; the audit log records administrative changes only.
+**Requests** is the request log: one row per gateway request, newest first. Each event is
+attributed to the key's zone. Usage aggregates the same events; the audit log records
+administrative changes only. The header zone selects the view; choose **All zones** to see
+every zone.
 
 ![The Requests page](/screenshots/requests.png)
 
 The page shows one row per request: **Date**, **Status** (the HTTP status, green for 2xx,
 amber for 4xx and red for 5xx, with the outcome when the request did not complete),
-**Requested** (the name the client called), **Resolved** (the model that served it),
-**Key** (a pill with the key name; hover or focus it for the org, team, owner (or service
-account), `lw-` prefix and id),
+**Requested** (the name the client called), **Resolved** (the model that served it; only an
+installation admin sees it), **Key** (a pill with the key name; hover or focus it for the
+org, team, owner (or service account), zone, `lw-` prefix and id),
 **Tokens** (total, with input + output in brackets) and **Cost**. The filter bar holds the
-range, team, key, requested and resolved names; the other filters are under **More
-filters**. The copy button next to the date copies the request id.
+range, zone, team, key and requested name; the other filters, including the resolved names, are
+under **More filters** and only an installation admin sees the routing ones. The copy button
+next to the date copies the request id.
 
 ## Request details
 
@@ -32,6 +35,12 @@ Click a row to open its details beside the log.
 - **Response** is the HTTP status, the outcome (`completed`, `client_cancelled`,
   `upstream_error`, `rejected` or `unspecified`) and the duration.
 
+Only an installation admin sees the routing part of the timeline (alias, router, fallback,
+model, upstream and attempts). Every other caller sees the received name, the response,
+usage and sender; the routing fields are null in the API and hidden in the page. This also
+covers a team or org admin: they see the team's requests, but by the name clients called,
+not what a router or alias resolved to.
+
 A step the request never reached is left out, so a request rejected before routing shows
 only **Received** and **Response**. **Usage** shows the tokens, audio duration, cost and whether the upstream
 reported usage; **Sender** shows the key pill, team, owner, who sent it from the Playground,
@@ -48,11 +57,12 @@ request, copy its `request_id` and look it up in
 | Parameter | |
 | --- | --- |
 | `kind` | `llm` (default), `mcp` or `a2a`. MCP and A2A rows must be asked for explicitly; they have no model, tokens or cost. |
+| `zone` | One zone; omitted by the API means all zones. The Admin UI defaults to the header zone. |
 | `from`, `to` | Range; `from` is inclusive and `to` is exclusive. The default is the last 24 hours. |
 | `team_id`, `key_id` | Requests of one team or key. |
 | `user_id`, `service_account_id` | Requests whose key is owned by this user or service account; each requires `team_id`. |
 | `requested` | Only requests that called this exact name, including one that never existed. |
-| `model`, `alias`, `router` | Only requests served by or routed through this name; follows the same current-name/orphan-spelling rule as `/usage`. |
+| `model`, `alias`, `router` | Only requests served by or routed through this name; installation admin only, otherwise `403 routing_detail_forbidden`. Follows the same current-name/orphan-spelling rule as `/usage`. |
 | `status`, `outcome` | HTTP status (`100`–`599`) or outcome. |
 | `request_id` | One request by the gateway's id. |
 | `limit`, `cursor` | Page size and the opaque cursor from the previous page's `next_cursor`. |
@@ -60,15 +70,26 @@ request, copy its `request_id` and look it up in
 Rows are ordered by the usage event's timestamp (`ts`) and `request_id`, newest first,
 and paginated with a keyset cursor, so a page stays stable while new requests arrive.
 
-Each row carries `key_id` and `key`, the shared key reference (`id`, `name`,
+Each row carries its `zone`, `key_id` and `key`, the shared key reference (`id`, `name`,
 `display_prefix`, `team_id`, `team_name`, `org_id`, `org_name`, `owner_kind`, `user_id`,
 `service_account_id`, `service_account_name`, `lifecycle`). `key` is null when the key row
 no longer exists; `key_id` remains and the UI shows **Deleted key**.
 
+The routing chain is installation-admin-only. For every other caller the row's `model`,
+`model_id`, `alias`, `alias_id`, `router`, `router_id`, `upstream`, `upstream_model`,
+`fallback` and `attempts` are null; `requested` stays the name the client called. The
+`model`, `alias` and `router` filters answer `403` with the error code
+`routing_detail_forbidden` for them, so they cannot probe how a name resolves.
+
+A renamed model, alias or router appears under the called spelling it had at the time; the
+request log never rewrites historical rows to the current catalog name.
+
 The permission scope is `/usage`'s: a plain member sees requests made with their own
 user-owned keys, a team admin every key in the teams they administer (including by org or
-installation inheritance), and an installation admin everything. An out-of-scope
-`team_id` or `key_id` answers as it does on `/usage` (404 or 403).
+installation inheritance), and an installation admin everything. Unlike `/usage` totals,
+requests stay per-request: a plain member does not see a colleague's requests even without
+an owner or key filter. An out-of-scope `team_id` or `key_id` answers as it does on `/usage`
+(404 or 403).
 
 The log exists only with a control plane: it is built from the usage events the gateways
 report. Like Usage, it is best effort: an event lost by a gateway crash or a full queue is

@@ -36,13 +36,14 @@ from loadlib import (
     load_window,
     retry_unmeasurable,
     rotation_errors,
+    set_limits,
     settle_usage,
     stream_resets,
     summarize,
     wait_acked,
     write_report,
 )
-from stack import SCOPE, pg, wait_for
+from stack import ZONE, pg, wait_for
 
 STEADY_SECS = env_int("LOAD_STEADY_SECS", 150)
 CHURN_SECS = env_int("LOAD_CHURN_SECS", 110)
@@ -217,14 +218,14 @@ def test_churn_under_load(stack):
         time.sleep(4)
 
         # --- lower an owner rate limit: 429 + Retry-After only for its keys, never 5xx.
-        rl_owner = fleet.owners[rl_index]["policy_path"]
+        rl_owner = fleet.owners[rl_index]["limit_owner"]
         t_rl_api = time.monotonic()
-        stack.ok("PATCH", rl_owner, json={"rpm_limit": 60})
+        set_limits(stack, rl_owner, rpm_limit=60)
         wait_acked(stack)
         t_rl = time.monotonic()
         time.sleep(8)
         t_rl_off_api = time.monotonic()
-        stack.ok("PATCH", rl_owner, json={"rpm_limit": None})
+        set_limits(stack, rl_owner, rpm_limit=None)
         wait_acked(stack)
         t_rl_off = time.monotonic()
         assert probe.until(rl_keys[0], ok200, 3) is not None, "rate limit cleared but still 429"
@@ -233,10 +234,10 @@ def test_churn_under_load(stack):
         burst_start_version = stack.current_version()
         t0 = time.monotonic()
         for i in range(BURST):
-            stack.ok(
-                "PATCH",
-                next(o["policy_path"] for o in fleet.owners if o["id"] == burst_key["owner_id"]),
-                json={"rpm_limit": 100_000 + i},
+            set_limits(
+                stack,
+                next(o["limit_owner"] for o in fleet.owners if o["id"] == burst_key["owner_id"]),
+                rpm_limit=100_000 + i,
             )
             time.sleep(BURST_GAP)
         api_secs = time.monotonic() - t0
@@ -271,9 +272,9 @@ def test_churn_under_load(stack):
     generation_response_counts = generation_statuses(records, rotated_key["id"])
     versions = pg(
         stack.dsn,
-        "SELECT version, source_revision, created_at FROM config_versions WHERE scope = $1"
+        "SELECT version, source_revision, created_at FROM config_versions WHERE zone = $1"
         " ORDER BY version",
-        SCOPE,
+        ZONE,
     )
     status = stack.gateway_status()
 
@@ -405,7 +406,7 @@ def test_churn_under_load(stack):
     assert revisions == sorted(set(revisions)), "source_revision not strictly increasing"
     assert status["acked_version"] == versions[-1]["version"], status
     assert status["last_nack_code"] is None, status
-    assert not pg(stack.dsn, "SELECT 1 FROM gateway_quarantines WHERE scope = $1", SCOPE)
+    assert not pg(stack.dsn, "SELECT 1 FROM gateway_quarantines WHERE zone = $1", ZONE)
     assert_accounting(report)
     assert report["usage_dropped"] == 0
     assert report["config_stream_resets"] == 0, "config stream dropped under steady CP"
@@ -583,7 +584,7 @@ def test_rate_limit_under_load(stack):
     run = LoadRun(stack, gw, "rate-limit", fleet.keys, env_int("LOAD_RATE_LIMIT_SECS", 20))
     try:
         for owner in limited:
-            stack.ok("PATCH", owner["policy_path"], json={"rpm_limit": 1})
+            set_limits(stack, owner["limit_owner"], rpm_limit=1)
         wait_acked(stack)
         # Different keys share the owner's limiter, for both member and SA scopes.
         for i in range(2):
@@ -593,7 +594,7 @@ def test_rate_limit_under_load(stack):
         run.start()
         records = run.wait()
         for owner in limited:
-            stack.ok("PATCH", owner["policy_path"], json={"rpm_limit": None})
+            set_limits(stack, owner["limit_owner"], rpm_limit=None)
         wait_acked(stack)
         for i in range(2):
             assert probe.chat(fleet.owner_keys(i)[1]) == (200, None)

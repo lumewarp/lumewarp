@@ -4,24 +4,40 @@
 
 ![Editing an upstream](/screenshots/upstream-edit.png)
 
-The catalog is installation-wide. A client calls a *name*, and a name is one of three kinds,
+Catalog names and definitions are installation-wide. A client calls a *name*, and a name is one of three kinds,
 unique across all three (`catalog_names`):
 
 | Endpoint | What |
 | --- | --- |
-| `/api/v1/upstreams` | OpenAI-compatible endpoints. |
-| `/api/v1/models` | A name for one model of one upstream (`upstream_id`, `upstream_model`), with its price. One try per call. |
+| `/api/v1/upstreams` | OpenAI-compatible endpoints, each belonging to a zone; names are unique within a zone. |
+| `/api/v1/models` | Global model definitions with prices and settings. Zone-specific upstream mappings live in model deployments; one try per call. |
 | `/api/v1/aliases` | Another name for a model or a router (`target`, its id). One level only; not for another alias. Authorized on its own. |
 | `/api/v1/routers` | A name that spreads requests over models: `strategy`, `params`, `members [{model_id, weight, params}]`. Members and fallbacks are models only. |
-| `/api/v1/plugins?kind=` | Read-only, all three plugin kinds: each descriptor with its schemas and the gateways that report it. |
+| `/api/v1/plugins?kind=` | Read-only, all three plugin kinds: each descriptor with its schemas and the gateways that report it in the selected zone. |
 | `/api/v1/strategies` | **Removed** (no alias): the plugins endpoint replaced it. |
 | `/api/v1/catalog` | Read-only: every name and its kind, for permission pickers. |
 
 `/catalog` is readable by any authenticated principal; the other reads (`/upstreams`, `/models`,
 `/aliases`, `/routers`, `/plugins`) need `ROUTING_READ`, which is installation-level. Writes
-need `ROUTING_MANAGE`. Every write is audited and enqueues a recompile. A name that a router, alias or fallback references cannot be
-deleted (409, listing who references it); deleting a name deletes the grants on it, with an
-audit row. See [the architecture notes](../architecture.md#模型目錄已實作) for the reasoning.
+need `ROUTING_MANAGE`. Every write is audited. A zone-bound write recompiles that zone;
+changes to global names and definitions are compiled in every live zone. A name that a
+router, alias or fallback references cannot be deleted (409, listing who references it);
+deleting a name deletes the grants on it, with an audit row. See [the architecture
+notes](../architecture.md#模型目錄已實作) for the reasoning.
+
+## Model deployments
+
+A model definition does not itself choose an upstream. Create a deployment for each zone
+that should serve the model, using `PUT /api/v1/models/{model_id}/deployments/{zone}` with
+that zone's `upstream_id`, `upstream_model` and optional periodic `chat_check`. The upstream
+must belong to the same zone. A model with no deployment in a zone is not served there.
+
+Model lists and the edit page show deployments by zone; the edit page configures the current
+zone's deployment and lists other zones' deployments separately. The catalog remains global:
+renaming a model changes the shared name, but changing its deployment or probe affects only
+that zone. Router members, split members and fallbacks that lack a deployment are dropped
+from that zone's compiled snapshot with a warning that they are not available there. A
+router with no remaining members and an alias whose target is unavailable are also omitted.
 
 ## Credentials
 
@@ -39,7 +55,7 @@ stored in the snapshot and the audit trail: never put a secret there; the plugin
 secrets from the gateway's `LUMEWARP_PLUGIN_SECRET_*`. Saving with a connected gateway that
 does not report the plugin is 422 unless the write has `force`; a forced save is audited as
 `upstream.force_save`, and that gateway NACKs every version that uses the plugin. The
-plugin needs capability `auth:<plugin>` on the gateways that should apply the version. It
+plugin needs capability `auth:<plugin>` on connected gateways in the upstream's zone that should apply the version. It
 runs for every attempt (retries and fallbacks included), health checks, vLLM metric
 scrapes and saved Test now; `cache-ms` keeps a cached result out of the sandbox. An attempt
 whose plugin fails moves on to the router's retry and fallbacks; with none left the client
@@ -64,6 +80,35 @@ direction is implied. A router's fallback is not re-checked. The API still reads
 `allowed_models` as names, which must exist; a member's or service account's list must be a
 subset of its team's.
 
+A grant is a name or a [model group](#model-groups): `allowed_groups` sits next to
+`allowed_models` on an org, team, member, service account or key. A policy's effective
+models are the intersection down the chain of its own names plus the current members of its
+groups, so a group member the level above does not allow is simply left out. `PolicyOut`
+and `KeyOut` return `granted_models` (names plus group members, before the parent narrows)
+next to the two lists; orgs and teams also return `effective_models` (`null` means
+unrestricted), which is what the pickers below them offer.
+
+## Model groups
+
+A model group is a named set of models, aliases and routers granted as one unit: an
+installation admin creates it on **Model groups** (Routing group in the sidebar) or with
+`POST /model-groups` (`name`, `description`, `members` as catalog names). A group is never
+callable and cannot contain another group, but it shares one namespace with models, aliases
+and routers: a group name already used by one is refused with 409, and a catalog name
+already used by a group with 422. Everyone signed in may read groups
+(`GET /model-groups`, `GET /model-groups/{id}`) for the pickers; writes need an installation
+admin.
+
+A grant of a group stands for its members at the time, so `PATCH /model-groups/{id}` with a
+new `members` list changes every holder at the next compile. Holders are not re-validated:
+a member the holder's parent does not allow drops out of that holder's effective models, as
+when a parent narrows. The list shows each group's member count and grants. Deleting a group
+removes every grant of it (each one audited as `grant.delete`, and `model_group.delete`
+records the count), so its holders lose the members at the next compile. Groups are not part
+of a rollback's catalog state. A rename with `keep_old_name_as_alias` puts the alias in every
+group of the renamed entry, so holders who reached it through a group can still call the old
+name.
+
 ## Model types
 
 `POST /models` requires `model_type`: `llm`, `embedding`,
@@ -72,17 +117,33 @@ subset of its team's.
 when empty). Every router member, split member and fallback must share one type.
 Changing a referenced model's type returns 409 `model_type_in_use`.
 
+## Router reasoning default
+
+A router's `reasoning_default_level` is added to a request that sends no
+`reasoning_effort` (absent or null; `reasoning.effort` on `/v1/responses`), before the
+serving member's own rule runs; a client value still wins, and an alias of the router
+inherits the level.
+The level must be one every member, traffic-split member and fallback accepts: a
+`passthrough` or `strip` model accepts any level, and a `mapped` model exactly the levels
+it maps. `RouterOut.accepted_reasoning_levels` reports that intersection (`null` = any
+level). A router edit that changes its members, splits or fallbacks, or a model edit that
+changes its reasoning, is refused with 422 naming the router when it would remove the
+router's default level from the intersection. The Playground offers the intersection for
+a router and its aliases, and the standard OpenAI levels (`minimal`, `low`, `medium`,
+`high`) when the router accepts any level.
+
 ## Test now
 
 Without an auth plugin, **Test now** probes the form as it stands from the control plane:
 `POST /upstreams/test` and `POST /models/test` work before you save, and a key typed into
-the form is used once and not stored.
+the form is used once and not stored. A model test selects a zone deployment; its saved
+probe result belongs to that deployment.
 
 With an auth plugin, the control plane cannot run the plugin, so save first (the form
-disables Test now until then). `POST /upstreams/{id}/test` and `POST /models/{id}/test`
-send a probe over the config stream to a connected gateway that advertises
-`upstream_probe` and the upstream's plugin; the gateway runs it against the snapshot it
-currently serves. The response reports `credential: "plugin"`; a model probe returns no
+disables Test now until then). `POST /upstreams/{id}/test` and
+`POST /models/{model_id}/deployments/{zone}/test` send a probe over the config stream to a
+connected gateway in that zone that advertises `upstream_probe` and the upstream's plugin;
+the gateway runs it against the snapshot it currently serves. The response reports `credential: "plugin"`; a model probe returns no
 reply body.
 
 - No such gateway: 409 `no_gateway_for_plugin`.
@@ -91,7 +152,7 @@ reply body.
 
 The gateway probes its current snapshot, so right after a save it may answer `not_found`,
 `not_found_model` or `config` until it applies the new version; retry. Such an answer is shown but not stored as the
-upstream's or model's Test now result. The gateway bounds the whole probe, plugin call
+upstream's or deployment's Test now result. The gateway bounds the whole probe, plugin call
 included, to 15 s. Only gateways connected to the control-plane
 process serving the request are candidates, so with more than one replica a request can
 answer 409 even while another replica holds a capable gateway. `GET

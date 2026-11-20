@@ -33,6 +33,13 @@ def not_found(message: str = "not found") -> ApiError:
     return ApiError(404, "not_found", message)
 
 
+def routing_detail_forbidden(
+    message: str = "routing detail is available to installation admins only",
+) -> ApiError:
+    """A non-installation-admin asked for served models, upstreams or alias/router provenance."""
+    return ApiError(403, "routing_detail_forbidden", message)
+
+
 def error_body(code: str, message: str) -> dict[str, dict[str, str]]:
     return {"error": {"code": code, "message": message}}
 

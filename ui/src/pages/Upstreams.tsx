@@ -9,6 +9,7 @@ import { ConfirmDialog } from "../components/Confirm";
 import { CreateButton, IconAction, RowActions } from "../components/RowActions";
 import { DataTable } from "../components/Table";
 import { useCan, useMut } from "../hooks";
+import { useZone } from "../zone";
 import { useToast } from "../components/Toast";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../components/ui/tooltip";
 
@@ -60,21 +61,25 @@ export function Upstreams() {
   const perms = useCan();
   const navigate = useNavigate();
   // Health comes from gateway reports; refresh it while the page is open.
-  const list = useQuery({ queryKey: ["upstreams"], queryFn: () => api.upstreams(), refetchInterval: 15000 });
+  const { id: zone, zone: zoneRow } = useZone();
+  const zoneLabel = zoneRow?.name || zone;
+  const all = useQuery({ queryKey: ["upstreams"], queryFn: () => api.upstreams(), refetchInterval: 15000 });
+  // Every zone is fetched so an edit page finds any record; the list shows the header zone.
+  const list = { ...all, data: all.data?.filter((u) => u.zone === zone) };
   const [deleting, setDeleting] = useState<Upstream | null>(null);
   const remove = useMut((id: string) => api.deleteUpstream(id), "Upstream deleted");
   const edit = (u: Upstream) => void navigate({ to: "/upstreams/$upstreamId", params: { upstreamId: u.id } });
 
   return (
     <>
-      <PageHeader title="Upstreams" actions={<CreateButton can={perms.isInstallationAdmin} onClick={() => void navigate({ to: "/upstreams/new" })}>New upstream</CreateButton>} />
+      <PageHeader title="Upstreams" hint="Upstreams belong to one zone; the list shows the zone in the header." actions={<CreateButton can={perms.isInstallationAdmin} onClick={() => void navigate({ to: "/upstreams/new" })}>New upstream</CreateButton>} />
       <DataTable
         rows={list.data}
         loading={list.isPending}
         error={list.error}
         onRetry={() => void list.refetch()}
         rowKey={(r) => r.id}
-        empty="No upstreams yet."
+        empty={`No upstreams in ${zoneLabel} yet.`}
         columns={[
           {
             key: "name",

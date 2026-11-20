@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 import pytest
 
 from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as pb
-from lumewarp_control_plane.compiler import compile_scope
+from lumewarp_control_plane.compiler import compile_zone
 from lumewarp_control_plane.compiler.validate import (
     MAX_RATE_LIMIT_SCOPES,
     SnapshotInvalid,
@@ -17,6 +17,7 @@ from lumewarp_control_plane.models import (
     ModelAccess,
     ScopeType,
     UsageTotal,
+    ZoneLimit,
     member_scope_id,
 )
 from tests import factories
@@ -28,7 +29,7 @@ ALL, INHERIT, LIST = ModelAccess.ALL, ModelAccess.INHERIT, ModelAccess.LIST
 async def compile_(factory, **kw):
     async with factory() as s:
         kw.setdefault("require_local_membership", True)
-        return await compile_scope(s, SCOPE, now=kw.pop("now", OCT), **kw)
+        return await compile_zone(s, SCOPE, now=kw.pop("now", OCT), **kw)
 
 
 def key_of(compiled, key) -> pb.ApiKey:
@@ -152,6 +153,14 @@ async def test_member_policy_applies_without_a_membership_row(factory) -> None:
                 team_id=team.id,
                 user_id=user.id,
                 model_access=LIST,
+            )
+        )
+        await s.flush()
+        s.add(
+            ZoneLimit(
+                zone=factories.DEFAULT_ZONE,
+                team_id=team.id,
+                user_id=user.id,
                 rpm_limit=5,
             )
         )
@@ -208,6 +217,7 @@ async def _spend(factory, level, entity_id, cost: int, window: datetime = OCT) -
     async with factory() as s, s.begin():
         s.add(
             UsageTotal(
+                zone=factories.DEFAULT_ZONE,
                 scope_type=level,
                 scope_id=entity_id,
                 window_start=datetime(window.year, window.month, 1, tzinfo=UTC),

@@ -46,6 +46,7 @@ const CARD = {
 
 const agentRow = (over: Record<string, unknown>) => ({
   id: "00000000-0000-4000-8000-000000000777",
+  zone: "default",
   name: "a2a-mocked",
   url: "https://agent.test/a2a",
   card_url: "",

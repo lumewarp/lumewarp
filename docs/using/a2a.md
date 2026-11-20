@@ -1,6 +1,7 @@
 # A2A
 
-The gateway proxies the A2A agents an administrator registered, using A2A 1.0 over
+The gateway proxies the A2A agents an administrator registered in the key's zone; a key
+cannot reach an agent configured only in another zone. The gateway uses A2A 1.0 over
 JSON-RPC and SSE.
 
 ## Endpoints

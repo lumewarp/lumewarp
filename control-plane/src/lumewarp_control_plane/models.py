@@ -8,8 +8,9 @@ Conventions:
   (32 bytes) plus a short non-secret display prefix. See security.py for why sha256. The OIDC
   login nonce and PKCE verifier live only in the AES-GCM sealed login cookie
   (auth/oidc.py).
-- The installation serves one config scope (`scopes` row); source tables (teams, routing,
-  users, ...) are installation-wide and compile into that scope's snapshots.
+- The installation serves one or more zones (`zones` rows); source tables (teams, users,
+  grants, ...) are installation-wide, while upstreams, keys, gateways and snapshots belong
+  to a zone and compile into that zone's snapshots.
 - Hierarchy: org -> teams -> members (users) and service accounts -> keys. Every key
   belongs to one team and is owned by a member of it or by one of its service accounts.
   Org administration is inherited by the org's teams in `authz.RequestAuthz`; the backend
@@ -114,7 +115,7 @@ class ModelAccess(enum.StrEnum):
     LIST: exactly the `policy_grants` of this level, intersected with the parent; an empty
     list is deny-all.
     Resolve INHERIT first; a key whose effective set is still universal gets
-    allow_all_models (see compiler.compile_scope).
+    allow_all_models (see compiler.compile_zone).
     """
 
     INHERIT = "inherit"
@@ -158,6 +159,17 @@ class InstallationRole(enum.StrEnum):
 class KeyOwnerKind(enum.StrEnum):
     USER = "user"
     SERVICE_ACCOUNT = "service_account"
+
+
+class KeyMinCreatorRole(enum.StrEnum):
+    """The lowest team role that may create a key in a zone (a zone's key rule).
+
+    Installation admins and org admins count as team admins; a member is the lowest.
+    """
+
+    MEMBER = "member"
+    TEAM_ADMIN = "team_admin"
+    ORG_ADMIN = "org_admin"
 
 
 class ScopeType(enum.StrEnum):
@@ -308,15 +320,18 @@ class PolicyMixin:
     state narrowing its parent (only changed values are rechecked).
 
     - Model access: see `ModelAccess`. The list lives in `policy_grants` (by name id, so a
-      rename keeps it); `allowed_models` is its read-only expansion to current names.
+      rename keeps it) and `policy_group_grants` (model groups); `allowed_models` and
+      `allowed_groups` are their read-only expansions to current names, and
+      `granted_models` is both together with the groups' members (what the resolver uses).
+      Keys carry the same three columns and a `model_access` of their own.
     - MCP and A2A access mirror model access at the same four levels, with the same mode
       enum and defaults: `mcp_server_grants` (one row per server, optionally narrowed to a
       tool list) and `a2a_agent_grants` (one row per agent).
-    - Rate limits: NULL = no limit at this level. Each set level becomes one shared
-      `RateLimitScope` ("org:<id>", "team:<id>", "member:<scope id>", "sa:<id>",
-      "key:<id>").
-    - Budget: monthly (UTC calendar) hard limit in nano-USD, NULL = none. Spend lives in
-      `usage_totals` (the org level derives it from its teams), never on the entity row.
+    - Rate limits and budgets are per zone and live in `zone_limits` (org, team, member or
+      service account) and `zone_member_defaults` (a team's member defaults), not on this
+      row: the same grant set applies in every zone, but an org may allow 10 rpm in prod
+      and 100 in dev. A set level becomes one shared `RateLimitScope`; a budget is the
+      monthly (UTC calendar) hard limit in nano-USD. Spend lives in `usage_totals`.
     """
 
     @declared_attr
@@ -356,38 +371,178 @@ class PolicyMixin:
             server_default=_access_default(cls).value,
         )
 
-    rpm_limit: Mapped[int | None] = mapped_column(Integer)
-    tpm_limit: Mapped[int | None] = mapped_column(BigInteger)
-    max_parallel: Mapped[int | None] = mapped_column(Integer)
-    budget_nano_usd: Mapped[int | None] = mapped_column(BigInteger)
-
-    @staticmethod
-    def policy_constraints() -> tuple[CheckConstraint, ...]:
-        return (
-            CheckConstraint("rpm_limit IS NULL OR rpm_limit > 0", name="rpm_positive"),
-            CheckConstraint("tpm_limit IS NULL OR tpm_limit > 0", name="tpm_positive"),
-            CheckConstraint("max_parallel IS NULL OR max_parallel > 0", name="parallel_positive"),
-            CheckConstraint(
-                "budget_nano_usd IS NULL OR budget_nano_usd >= 0", name="budget_nonneg"
-            ),
-        )
+    # Limits and budgets are per zone (`zone_limits`, `zone_member_defaults`); the grants
+    # above are global because they name catalog entries by id.
 
 
 # --------------------------------------------------------------------------- installation
 
 
-class Scope(Base):
-    """A config scope (one per installation).
+class Zone(Base):
+    """One config zone (prod, dev, ...). The default zone's id is `LUMEWARP_ZONE`.
 
     `source_revision` is bumped by `outbox.enqueue_recompile` in every mutating transaction;
     the row lock it takes also serializes writers. Compiles record the revision they saw.
+    `id` is immutable: every zone column references it; `name` is the display name. The key
+    rules are stored and returned here; the key API enforces them.
     """
 
-    __tablename__ = "scopes"
+    __tablename__ = "zones"
+    __table_args__ = (
+        CheckConstraint("id ~ '^[a-z][a-z0-9-]{0,62}$'", name="id_slug"),
+        CheckConstraint(
+            "key_max_lifetime_seconds IS NULL OR key_max_lifetime_seconds > 0",
+            name="key_lifetime_positive",
+        ),
+        CheckConstraint(
+            "key_max_per_member IS NULL OR key_max_per_member > 0", name="key_max_positive"
+        ),
+    )
 
-    name: Mapped[str] = mapped_column(String(128), primary_key=True)
+    # The slug gateways, keys and every zone column use; immutable.
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # What people see; renameable.
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    # A palette name, validated by the API (models has no dependency on the API's list).
+    color: Mapped[str] = mapped_column(String(16), nullable=False, server_default="gray")
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     source_revision: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
+    # The gateway URL the Playground forwards to for keys of this zone.
+    playground_gateway_url: Mapped[str | None] = mapped_column(Text)
+    key_min_creator_role: Mapped[KeyMinCreatorRole] = mapped_column(
+        _enum(KeyMinCreatorRole, "key_min_creator_role"),
+        nullable=False,
+        default=KeyMinCreatorRole.MEMBER,
+        server_default=KeyMinCreatorRole.MEMBER.value,
+    )
+    # NULL = no zone-wide cap; the team's own cap still applies.
+    key_max_lifetime_seconds: Mapped[int | None] = mapped_column(Integer)
+    key_expiry_required: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+    key_max_per_member: Mapped[int | None] = mapped_column(Integer)
+    service_account_keys_allowed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="true"
+    )
+    user_keys_allowed: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    playground_allowed: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
     created_at: Mapped[datetime] = _now()
+
+
+# The four owner shapes of a zone limit: org only, team only, team + member, team +
+# service account. Keys keep their limits on `api_keys` (one zone each).
+_ZONE_LIMIT_OWNER_SHAPE = (
+    "(org_id IS NOT NULL AND team_id IS NULL AND user_id IS NULL AND service_account_id IS NULL)"
+    " OR (org_id IS NULL AND team_id IS NOT NULL"
+    " AND NOT (user_id IS NOT NULL AND service_account_id IS NOT NULL))"
+)
+
+
+def _zone_limit_owner_args() -> tuple:
+    """Composite owner FKs, the four owner shapes and one unique index per shape."""
+    return (
+        ForeignKeyConstraint(
+            ["team_id", "user_id"],
+            ["member_policies.team_id", "member_policies.user_id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["service_account_id", "team_id"],
+            ["service_accounts.id", "service_accounts.team_id"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(_ZONE_LIMIT_OWNER_SHAPE, name="owner_shape"),
+        CheckConstraint("rpm_limit IS NULL OR rpm_limit > 0", name="rpm_positive"),
+        CheckConstraint("tpm_limit IS NULL OR tpm_limit > 0", name="tpm_positive"),
+        CheckConstraint("max_parallel IS NULL OR max_parallel > 0", name="parallel_positive"),
+        CheckConstraint("budget_nano_usd IS NULL OR budget_nano_usd >= 0", name="budget_nonneg"),
+        Index(
+            "uq_zone_limits_org",
+            "zone",
+            "org_id",
+            unique=True,
+            postgresql_where=text("org_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_zone_limits_team",
+            "zone",
+            "team_id",
+            unique=True,
+            postgresql_where=text(
+                "user_id IS NULL AND service_account_id IS NULL AND org_id IS NULL"
+            ),
+        ),
+        Index(
+            "uq_zone_limits_member",
+            "zone",
+            "team_id",
+            "user_id",
+            unique=True,
+            postgresql_where=text("user_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_zone_limits_service_account",
+            "zone",
+            "service_account_id",
+            unique=True,
+            postgresql_where=text("service_account_id IS NOT NULL"),
+        ),
+        Index(None, "org_id"),
+        Index(None, "team_id"),
+        Index(None, "service_account_id"),
+    )
+
+
+class ZoneLimit(TimestampMixin, Base):
+    """Rate limits and a monthly budget for one owner in one zone.
+
+    One row per owner shape (`org`, `team`, `member`, `service_account`) and zone. A NULL
+    column is "no limit here"; each set level becomes one shared limiter scope. Budgets are
+    the UTC calendar month's hard limit in nano-USD; spend lives in `usage_totals` tagged
+    with the same zone. The owner-shape CHECK mirrors `policy_grants`.
+    """
+
+    __tablename__ = "zone_limits"
+    __table_args__ = (*_zone_limit_owner_args(),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.id", ondelete="CASCADE"), nullable=False)
+    org_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("orgs.id", ondelete="CASCADE"))
+    team_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"))
+    user_id: Mapped[uuid.UUID | None] = mapped_column()
+    service_account_id: Mapped[uuid.UUID | None] = mapped_column()
+    rpm_limit: Mapped[int | None] = mapped_column(Integer)
+    tpm_limit: Mapped[int | None] = mapped_column(BigInteger)
+    max_parallel: Mapped[int | None] = mapped_column(Integer)
+    budget_nano_usd: Mapped[int | None] = mapped_column(BigInteger)
+
+
+class ZoneMemberDefaults(Base):
+    """A team's per-zone default limits for its members.
+
+    The member level takes an exception's own value when set, else these defaults, and the
+    result is clamped by the team's zone limit. Source-only: they compile into each
+    member's effective policy rather than into a separate limiter level.
+    """
+
+    __tablename__ = "zone_member_defaults"
+    __table_args__ = (
+        PrimaryKeyConstraint("zone", "team_id"),
+        CheckConstraint("rpm_limit IS NULL OR rpm_limit > 0", name="rpm_positive"),
+        CheckConstraint("tpm_limit IS NULL OR tpm_limit > 0", name="tpm_positive"),
+        CheckConstraint("max_parallel IS NULL OR max_parallel > 0", name="parallel_positive"),
+    )
+
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.id", ondelete="CASCADE"), nullable=False)
+    team_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("teams.id", ondelete="CASCADE"), nullable=False
+    )
+    rpm_limit: Mapped[int | None] = mapped_column(Integer)
+    tpm_limit: Mapped[int | None] = mapped_column(BigInteger)
+    max_parallel: Mapped[int | None] = mapped_column(Integer)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
 
 class User(TimestampMixin, Base):
@@ -534,7 +689,6 @@ class Org(PolicyMixin, TimestampMixin, Base):
 
     __tablename__ = "orgs"
     __table_args__ = (
-        *PolicyMixin.policy_constraints(),
         CheckConstraint(
             "model_access <> 'inherit' AND mcp_access <> 'inherit' AND a2a_access <> 'inherit'",
             name="no_inherit",
@@ -574,7 +728,6 @@ class OrgAdmin(Base):
 class Team(PolicyMixin, TimestampMixin, Base):
     __tablename__ = "teams"
     __table_args__ = (
-        *PolicyMixin.policy_constraints(),
         CheckConstraint(
             "model_access <> 'inherit' AND mcp_access <> 'inherit' AND a2a_access <> 'inherit'",
             name="no_inherit",
@@ -586,18 +739,6 @@ class Team(PolicyMixin, TimestampMixin, Base):
         CheckConstraint(
             "max_member_key_lifetime_seconds IS NULL OR max_member_key_lifetime_seconds > 0",
             name="max_member_key_lifetime_positive",
-        ),
-        CheckConstraint(
-            "member_rpm_default IS NULL OR member_rpm_default > 0",
-            name="member_rpm_default_positive",
-        ),
-        CheckConstraint(
-            "member_tpm_default IS NULL OR member_tpm_default > 0",
-            name="member_tpm_default_positive",
-        ),
-        CheckConstraint(
-            "member_max_parallel_default IS NULL OR member_max_parallel_default > 0",
-            name="member_max_parallel_default_positive",
         ),
         # A name is freed by archiving: unique only among live teams (moving a team
         # between orgs is still not supported).
@@ -623,12 +764,8 @@ class Team(PolicyMixin, TimestampMixin, Base):
     # into snapshots): the API enforces them on create/rotate. Revoking a key frees a slot.
     max_keys_per_member: Mapped[int | None] = mapped_column(Integer)
     max_member_key_lifetime_seconds: Mapped[int | None] = mapped_column(Integer)
-    # The member level's default limits: a member exception overrides them, and the
-    # effective value is clamped by the team's own limit. Source-only, like the key
-    # limits above; no model or budget default (those need an explicit policy row).
-    member_rpm_default: Mapped[int | None] = mapped_column(Integer)
-    member_tpm_default: Mapped[int | None] = mapped_column(BigInteger)
-    member_max_parallel_default: Mapped[int | None] = mapped_column(Integer)
+    # The member level's per-zone default limits live in `zone_member_defaults`; they are
+    # source-only, like the key limits above.
 
 
 class MemberPolicy(PolicyMixin, TimestampMixin, Base):
@@ -642,7 +779,6 @@ class MemberPolicy(PolicyMixin, TimestampMixin, Base):
 
     __tablename__ = "member_policies"
     __table_args__ = (
-        *PolicyMixin.policy_constraints(),
         PrimaryKeyConstraint("team_id", "user_id"),
         Index(None, "user_id"),
     )
@@ -680,7 +816,6 @@ class ServiceAccount(PolicyMixin, TimestampMixin, Base):
 
     __tablename__ = "service_accounts"
     __table_args__ = (
-        *PolicyMixin.policy_constraints(),
         UniqueConstraint("team_id", "name"),
         # Target for the composite FK that pins a key to its owner's team.
         UniqueConstraint("id", "team_id"),
@@ -744,6 +879,7 @@ class ApiKey(TimestampMixin, Base):
         Index(None, "team_id"),
         Index(None, "user_id"),
         Index(None, "service_account_id"),
+        Index(None, "zone"),
         Index(
             "uq_api_keys_previous_key_hash",
             "previous_key_hash",
@@ -753,12 +889,16 @@ class ApiKey(TimestampMixin, Base):
         CheckConstraint("rpm_limit IS NULL OR rpm_limit > 0", name="rpm_positive"),
         CheckConstraint("tpm_limit IS NULL OR tpm_limit > 0", name="tpm_positive"),
         CheckConstraint("max_parallel IS NULL OR max_parallel > 0", name="parallel_positive"),
+        # A key narrows its owner or inherits it; it can never widen to every model.
+        CheckConstraint("model_access <> 'all'", name="no_all_models"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
     team_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("teams.id", ondelete="RESTRICT"), nullable=False
     )
+    # The zone whose snapshots this key is compiled into. Immutable: rotation keeps it.
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.id", ondelete="RESTRICT"), nullable=False)
     owner_kind: Mapped[KeyOwnerKind] = mapped_column(
         _enum(KeyOwnerKind, "key_owner_kind"), nullable=False
     )
@@ -791,6 +931,15 @@ class ApiKey(TimestampMixin, Base):
     rpm_limit: Mapped[int | None] = mapped_column(Integer)
     tpm_limit: Mapped[int | None] = mapped_column(BigInteger)
     max_parallel: Mapped[int | None] = mapped_column(Integer)
+    # The key level of the model list: INHERIT takes the owner's effective set unchanged,
+    # LIST narrows it to the key's own `policy_grants` and `policy_group_grants` rows
+    # (`key_id`). ALL is refused by a CHECK: a key never widens its owner.
+    model_access: Mapped[ModelAccess] = mapped_column(
+        _enum(ModelAccess, "model_access"),
+        nullable=False,
+        default=ModelAccess.INHERIT,
+        server_default=ModelAccess.INHERIT.value,
+    )
 
     @property
     def owner_id(self) -> uuid.UUID:
@@ -858,10 +1007,17 @@ class Upstream(TimestampMixin, Base):
             " AND (circuit_open_ms IS NULL OR circuit_open_ms > 0)",
             name="circuit_breaker_positive",
         ),
+        # A name is unique inside its zone: the same name may exist in two zones.
+        UniqueConstraint("zone", "name"),
+        # Target of the composite FK that pins a deployment to an upstream of its zone.
+        UniqueConstraint("id", "zone"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
-    name: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
+    # The config zone this upstream belongs to; set on create and never changed (a
+    # deployment in another zone could otherwise be left pointing at it).
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.id", ondelete="RESTRICT"), nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
     kind: Mapped[UpstreamKind] = mapped_column(_enum(UpstreamKind, "upstream_kind"), nullable=False)
     base_url: Mapped[str] = mapped_column(Text, nullable=False)
     # Name of the env var on the gateway holding the bearer token; never the value.
@@ -928,9 +1084,13 @@ def target_name_constraints() -> tuple[CheckConstraint, ...]:
 
 
 def _live_name_index(table: str) -> Index:
-    """Unique among live rows: archiving (`deleted_at`) frees the name for reuse."""
+    """Unique per zone among live rows: archiving (`deleted_at`) frees the name for reuse."""
     return Index(
-        f"uq_{table}_name", "name", unique=True, postgresql_where=text("deleted_at IS NULL")
+        f"uq_{table}_name",
+        "zone",
+        "name",
+        unique=True,
+        postgresql_where=text("deleted_at IS NULL"),
     )
 
 
@@ -965,6 +1125,8 @@ class McpServer(TimestampMixin, Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
+    # The config zone this server belongs to; set on create and never changed.
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.id", ondelete="RESTRICT"), nullable=False)
     name: Mapped[str] = mapped_column(String(63), nullable=False)
     # The Streamable HTTP endpoint; absolute http(s) URL without userinfo (validated in
     # compiler/validate.py, mirrored by the gateway).
@@ -989,7 +1151,7 @@ class McpServer(TimestampMixin, Base):
     )
     # Per upstream request; 0 = the gateway default.
     timeout_ms: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
-    # The scope's config revision (`scopes.source_revision`) of the last write to this row.
+    # The zone's config revision (`zones.source_revision`) of the last write to this row.
     # Provenance for a CatalogReport: the gateway reports the config version it served, and
     # that version is trusted only when it was compiled from a revision at least this new
     # (otherwise the report may describe a different upstream, L3). Observed definition and
@@ -1076,6 +1238,8 @@ class A2aAgent(TimestampMixin, Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
+    # The config zone this agent belongs to; set on create and never changed.
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.id", ondelete="RESTRICT"), nullable=False)
     name: Mapped[str] = mapped_column(String(63), nullable=False)
     # The agent's JSON-RPC endpoint; absolute http(s) URL without userinfo.
     url: Mapped[str] = mapped_column(Text, nullable=False)
@@ -1105,7 +1269,7 @@ class A2aAgent(TimestampMixin, Base):
         Integer, nullable=False, default=0, server_default="0"
     )
     timeout_ms: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
-    # The scope's config revision of the last write to this row; a fetched card never moves
+    # The zone's config revision of the last write to this row; a fetched card never moves
     # it (see McpServer.config_revision).
     config_revision: Mapped[int] = mapped_column(
         BigInteger, nullable=False, default=0, server_default="0"
@@ -1177,7 +1341,7 @@ class McpServerGrant(Base):
     `all_tools` grants every approved tool; otherwise `tools` names the allowed ones
     (prompts follow the server). A level with `mcp_access=LIST` contributes exactly its
     rows; the compiler intersects them along org -> team -> owner, and a key inherits its
-    owner's set unchanged (there is no key-level list, as for models).
+    owner's set unchanged (unlike models, there is no key-level list).
     """
 
     __tablename__ = "mcp_server_grants"
@@ -1261,9 +1425,13 @@ def _name_fk() -> ForeignKeyConstraint:
 
 
 class Model(TimestampMixin, Base):
-    """One typed public name -> one upstream model. All prices NULL = unknown, not free.
-    Token pairs are complete except for embedding (input only); transcription can add
-    audio pricing. Calling directly is a single attempt; weights live on router members.
+    """One typed public name, deployed zero or more times (`model_deployments`).
+
+    All prices NULL = unknown, not free. Token pairs are complete except for embedding
+    (input only); transcription can add audio pricing. Calling directly is a single
+    attempt; weights live on router members. A model is one definition across zones: a
+    zone serves it only when it has a deployment there, so a model may be defined and not
+    served anywhere yet.
     """
 
     __tablename__ = "models"
@@ -1309,6 +1477,50 @@ class Model(TimestampMixin, Base):
             " AND (reasoning_mode <> 'strip' OR reasoning_default_level IS NULL)",
             name="reasoning_shape",
         ),
+    )
+
+    name_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="model", server_default="model"
+    )
+    model_type: Mapped[ModelType] = mapped_column(_enum(ModelType, "model_type"), nullable=False)
+    price_nano_usd_per_audio_second: Mapped[int | None] = mapped_column(BigInteger)
+    price_input_nano_usd_per_mtok: Mapped[int | None] = mapped_column(BigInteger)
+    price_output_nano_usd_per_mtok: Mapped[int | None] = mapped_column(BigInteger)
+    # Context window, informational (the gateway does not tokenize). NULL = unknown.
+    max_input_tokens: Mapped[int | None] = mapped_column(Integer)
+    # Enforced by the gateway on max_tokens / max_completion_tokens. NULL = none.
+    max_output_tokens: Mapped[int | None] = mapped_column(Integer)
+    # Merged under every request body (the client's fields win). NULL = none.
+    default_body: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
+    # reasoning_effort handling: passthrough | strip | mapped (level -> fragment object).
+    reasoning_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="passthrough", server_default="passthrough"
+    )
+    reasoning_fragments: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
+    reasoning_default_level: Mapped[str | None] = mapped_column(String(32))
+
+    id = synonym("name_id")
+
+
+class ModelDeployment(TimestampMixin, Base):
+    """One upstream serving a model inside one config zone.
+
+    A deployment is per zone: the same model may be served by different upstreams (or not
+    at all) in different zones. Its upstream must belong to the same zone (composite FK).
+    The health check and the Test now result are properties of the deployment, not of the
+    definition: they probe one upstream.
+    """
+
+    __tablename__ = "model_deployments"
+    __table_args__ = (
+        PrimaryKeyConstraint("name_id", "zone"),
+        # The upstream is in this deployment's zone, by construction.
+        ForeignKeyConstraint(
+            ["upstream_id", "zone"],
+            ["upstreams.id", "upstreams.zone"],
+            ondelete="RESTRICT",
+        ),
         CheckConstraint(
             "(chat_check_interval_ms IS NULL) = (chat_check_timeout_ms IS NULL)"
             " AND (chat_check_interval_ms IS NOT NULL OR (chat_check_unhealthy_threshold IS NULL"
@@ -1326,32 +1538,15 @@ class Model(TimestampMixin, Base):
             " AND (chat_check_healthy_threshold IS NULL OR chat_check_healthy_threshold > 0)",
             name="chat_check_thresholds",
         ),
+        Index(None, "upstream_id", "zone"),
     )
 
-    name_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
-    kind: Mapped[str] = mapped_column(
-        String(32), nullable=False, default="model", server_default="model"
+    name_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("models.name_id", ondelete="CASCADE"), nullable=False
     )
-    upstream_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("upstreams.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.id", ondelete="RESTRICT"), nullable=False)
+    upstream_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
     upstream_model: Mapped[str] = mapped_column(String(400), nullable=False)
-    model_type: Mapped[ModelType] = mapped_column(_enum(ModelType, "model_type"), nullable=False)
-    price_nano_usd_per_audio_second: Mapped[int | None] = mapped_column(BigInteger)
-    price_input_nano_usd_per_mtok: Mapped[int | None] = mapped_column(BigInteger)
-    price_output_nano_usd_per_mtok: Mapped[int | None] = mapped_column(BigInteger)
-    # Context window, informational (the gateway does not tokenize). NULL = unknown.
-    max_input_tokens: Mapped[int | None] = mapped_column(Integer)
-    # Enforced by the gateway on max_tokens / max_completion_tokens. NULL = none.
-    max_output_tokens: Mapped[int | None] = mapped_column(Integer)
-    # Merged under every request body (the client's fields win). NULL = none.
-    default_body: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
-    # reasoning_effort handling: passthrough | strip | mapped (level -> fragment object).
-    reasoning_mode: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="passthrough", server_default="passthrough"
-    )
-    reasoning_fragments: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
-    reasoning_default_level: Mapped[str | None] = mapped_column(String(32))
     # Periodic type-specific probe by the gateway; interval NULL = not probed.
     chat_check_interval_ms: Mapped[int | None] = mapped_column(Integer)
     chat_check_timeout_ms: Mapped[int | None] = mapped_column(Integer)
@@ -1362,8 +1557,6 @@ class Model(TimestampMixin, Base):
     probe_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     probe_ok: Mapped[bool | None] = mapped_column(Boolean)
     probe_ok_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-    id = synonym("name_id")
 
 
 class Alias(TimestampMixin, Base):
@@ -1465,6 +1658,10 @@ class Router(TimestampMixin, Base):
     plugin_timeout_ms: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
     )
+    # Level injected when the client sends no reasoning_effort, before the serving member's
+    # transform (proto Router.reasoning_default_level). It must be a level every member,
+    # split member and fallback accepts; NULL = none.
+    reasoning_default_level: Mapped[str | None] = mapped_column(String(32))
 
     id = synonym("name_id")
 
@@ -1558,14 +1755,24 @@ class RouterSplitMember(Base):
     position: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
-class PolicyGrant(Base):
-    """A name in the `allowed_models` of an org (only `org_id` set), a team (only
-    `team_id` set), a member (team and user) or a service account. By name id, so a
-    rename keeps it.
-    """
+# The five owner shapes of a model grant: org only, team only, team + member, team +
+# service account, or key only. Shared by `policy_grants` and `policy_group_grants`.
+_POLICY_OWNER_SHAPE = (
+    "(key_id IS NULL AND ("
+    "(org_id IS NOT NULL AND team_id IS NULL AND user_id IS NULL"
+    " AND service_account_id IS NULL)"
+    " OR (org_id IS NULL AND team_id IS NOT NULL"
+    " AND NOT (user_id IS NOT NULL AND service_account_id IS NOT NULL))))"
+    " OR (key_id IS NOT NULL AND org_id IS NULL AND team_id IS NULL AND user_id IS NULL"
+    " AND service_account_id IS NULL)"
+)
 
-    __tablename__ = "policy_grants"
-    __table_args__ = (
+
+def _policy_owner_args(table: str, target_column: str) -> tuple:
+    """Constraints and indexes of a model grant table: the composite owner FKs, the five
+    owner shapes and one partial unique index per shape.
+    """
+    return (
         ForeignKeyConstraint(
             ["team_id", "user_id"],
             ["member_policies.team_id", "member_policies.user_id"],
@@ -1576,47 +1783,57 @@ class PolicyGrant(Base):
             ["service_accounts.id", "service_accounts.team_id"],
             ondelete="CASCADE",
         ),
-        # Exactly four shapes: org only, team only, team + member, team + service account.
-        CheckConstraint(
-            "(org_id IS NOT NULL AND team_id IS NULL AND user_id IS NULL"
-            " AND service_account_id IS NULL)"
-            " OR (org_id IS NULL AND team_id IS NOT NULL"
-            " AND NOT (user_id IS NOT NULL AND service_account_id IS NOT NULL))",
-            name="owner_shape",
-        ),
+        CheckConstraint(_POLICY_OWNER_SHAPE, name="owner_shape"),
         Index(
-            "uq_policy_grants_org",
+            f"uq_{table}_org",
             "org_id",
-            "name_id",
+            target_column,
             unique=True,
             postgresql_where=text("org_id IS NOT NULL"),
         ),
         Index(
-            "uq_policy_grants_team",
+            f"uq_{table}_team",
             "team_id",
-            "name_id",
+            target_column,
             unique=True,
             postgresql_where=text(
                 "user_id IS NULL AND service_account_id IS NULL AND org_id IS NULL"
             ),
         ),
         Index(
-            "uq_policy_grants_member",
+            f"uq_{table}_member",
             "team_id",
             "user_id",
-            "name_id",
+            target_column,
             unique=True,
             postgresql_where=text("user_id IS NOT NULL"),
         ),
         Index(
-            "uq_policy_grants_service_account",
+            f"uq_{table}_service_account",
             "service_account_id",
-            "name_id",
+            target_column,
             unique=True,
             postgresql_where=text("service_account_id IS NOT NULL"),
         ),
-        Index(None, "name_id"),
+        Index(
+            f"uq_{table}_key",
+            "key_id",
+            target_column,
+            unique=True,
+            postgresql_where=text("key_id IS NOT NULL"),
+        ),
+        Index(None, target_column),
     )
+
+
+class PolicyGrant(Base):
+    """A name in the `allowed_models` of an org (only `org_id` set), a team (only
+    `team_id` set), a member (team and user), a service account or a key (only `key_id`
+    set). By name id, so a rename keeps it.
+    """
+
+    __tablename__ = "policy_grants"
+    __table_args__ = _policy_owner_args("policy_grants", "name_id")
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
     name_id: Mapped[uuid.UUID] = mapped_column(
@@ -1626,6 +1843,57 @@ class PolicyGrant(Base):
     team_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"))
     user_id: Mapped[uuid.UUID | None] = mapped_column()
     service_account_id: Mapped[uuid.UUID | None] = mapped_column()
+    key_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("api_keys.id", ondelete="CASCADE"))
+
+
+class ModelGroup(TimestampMixin, Base):
+    """A named set of catalog names (models, aliases, routers) granted as one unit.
+
+    A group is not callable: its name lives outside `catalog_names` and never reaches the
+    snapshot. Groups do not nest. A grant of a group (`policy_group_grants`) stands for
+    its current members, so changing the members changes every holder at the next compile;
+    the compiler intersects down the chain as usual, so a member a parent does not allow
+    is simply dropped. Groups are not part of a rollback's catalog state.
+    """
+
+    __tablename__ = "model_groups"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
+    name: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
+    description: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+
+
+class ModelGroupMember(Base):
+    """One catalog name in a model group. Deleting the name removes it (audited)."""
+
+    __tablename__ = "model_group_members"
+    __table_args__ = (PrimaryKeyConstraint("group_id", "name_id"), Index(None, "name_id"))
+
+    group_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("model_groups.id", ondelete="CASCADE"), nullable=False
+    )
+    name_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("catalog_names.id", ondelete="CASCADE"), nullable=False
+    )
+
+
+class PolicyGroupGrant(Base):
+    """A model group in the `allowed_groups` of an org, team, member, service account or
+    key: the same five owner shapes as `PolicyGrant`.
+    """
+
+    __tablename__ = "policy_group_grants"
+    __table_args__ = _policy_owner_args("policy_group_grants", "group_id")
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
+    group_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("model_groups.id", ondelete="CASCADE"), nullable=False
+    )
+    org_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("orgs.id", ondelete="CASCADE"))
+    team_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"))
+    user_id: Mapped[uuid.UUID | None] = mapped_column()
+    service_account_id: Mapped[uuid.UUID | None] = mapped_column()
+    key_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("api_keys.id", ondelete="CASCADE"))
 
 
 def _current_name(id_column) -> Any:
@@ -1637,6 +1905,12 @@ def _current_name(id_column) -> Any:
     )
 
 
+# Read-only: whether the user has linked an IdP identity (signed in at least once), which an
+# installation or org admin role requires (`api.common.require_signed_in`).
+User.has_signed_in = column_property(
+    select(UserIdentity.id).where(UserIdentity.user_id == User.id).exists()
+)
+
 # Read-only: a rename writes `catalog_names`.
 Model.name = column_property(_current_name(Model.name_id))
 Alias.name = column_property(_current_name(Alias.name_id))
@@ -1645,7 +1919,7 @@ Router.name = column_property(_current_name(Router.name_id))
 
 
 def _granted_names(*owner) -> Any:
-    """The owner's grants as current names, sorted (empty array, not NULL, when none)."""
+    """The owner's direct grants as current names, sorted (empty array, not NULL, when none)."""
     return (
         select(
             func.coalesce(
@@ -1661,22 +1935,85 @@ def _granted_names(*owner) -> Any:
     )
 
 
-Team.allowed_models = column_property(
-    _granted_names(
-        PolicyGrant.team_id == Team.id,
-        PolicyGrant.user_id.is_(None),
-        PolicyGrant.service_account_id.is_(None),
+def _granted_groups(*owner) -> Any:
+    """The owner's granted model groups as names, sorted (empty array when none)."""
+    return (
+        select(
+            func.coalesce(
+                func.array_agg(aggregate_order_by(cast(ModelGroup.name, Text), ModelGroup.name)),
+                cast(text("'{}'"), ARRAY(Text)),
+            )
+        )
+        .select_from(PolicyGroupGrant)
+        .join(ModelGroup, ModelGroup.id == PolicyGroupGrant.group_id)
+        .where(*owner)
+        .correlate_except(PolicyGroupGrant, ModelGroup)
+        .scalar_subquery()
     )
-)
-Org.allowed_models = column_property(_granted_names(PolicyGrant.org_id == Org.id))
-MemberPolicy.allowed_models = column_property(
-    _granted_names(
-        PolicyGrant.team_id == MemberPolicy.team_id, PolicyGrant.user_id == MemberPolicy.user_id
+
+
+def _granted_union(direct_owner: tuple, group_owner: tuple) -> Any:
+    """Direct grants plus the current members of the granted groups, as sorted unique names.
+
+    This is the set the resolver intersects (`quota.policy_of`); `allowed_models` and
+    `allowed_groups` stay the level's own rows, for the policy responses.
+    """
+    direct = (
+        select(PolicyGrant.name_id.label("name_id"))
+        .where(*direct_owner)
+        .correlate_except(PolicyGrant)
     )
-)
-ServiceAccount.allowed_models = column_property(
-    _granted_names(PolicyGrant.service_account_id == ServiceAccount.id)
-)
+    via_groups = (
+        select(ModelGroupMember.name_id.label("name_id"))
+        .join(PolicyGroupGrant, PolicyGroupGrant.group_id == ModelGroupMember.group_id)
+        .where(*group_owner)
+        .correlate_except(PolicyGroupGrant, ModelGroupMember)
+    )
+    ids = direct.union(via_groups).subquery()
+    return (
+        select(
+            func.coalesce(
+                func.array_agg(aggregate_order_by(cast(CatalogName.name, Text), CatalogName.name)),
+                cast(text("'{}'"), ARRAY(Text)),
+            )
+        )
+        .select_from(ids)
+        .join(CatalogName, CatalogName.id == ids.c.name_id)
+        .correlate_except(CatalogName)
+        .scalar_subquery()
+    )
+
+
+def _model_owner_columns(grant: type, row: type) -> tuple:
+    """Owner predicates of a model grant table (`PolicyGrant` or `PolicyGroupGrant`)."""
+    if row is Org:
+        return (grant.org_id == Org.id,)
+    if row is Team:
+        return (
+            grant.team_id == Team.id,
+            grant.user_id.is_(None),
+            grant.service_account_id.is_(None),
+        )
+    if row is MemberPolicy:
+        return (grant.team_id == MemberPolicy.team_id, grant.user_id == MemberPolicy.user_id)
+    if row is ServiceAccount:
+        return (grant.service_account_id == ServiceAccount.id,)
+    return (grant.key_id == ApiKey.id,)
+
+
+for _grant_row in (Org, Team, MemberPolicy, ServiceAccount, ApiKey):
+    _grant_row.allowed_models = column_property(
+        _granted_names(*_model_owner_columns(PolicyGrant, _grant_row))
+    )
+    _grant_row.allowed_groups = column_property(
+        _granted_groups(*_model_owner_columns(PolicyGroupGrant, _grant_row))
+    )
+    _grant_row.granted_models = column_property(
+        _granted_union(
+            _model_owner_columns(PolicyGrant, _grant_row),
+            _model_owner_columns(PolicyGroupGrant, _grant_row),
+        )
+    )
 
 
 def _granted_mcp_servers(*owner) -> Any:
@@ -1791,7 +2128,7 @@ class ConfigVersion(Base):
 
     __tablename__ = "config_versions"
     __table_args__ = (
-        PrimaryKeyConstraint("scope", "version"),
+        PrimaryKeyConstraint("zone", "version"),
         _hash32("digest"),
         CheckConstraint("version > 0", name="version_positive"),
         CheckConstraint("(payload IS NULL) = (compacted_at IS NOT NULL)", name="compaction"),
@@ -1801,12 +2138,10 @@ class ConfigVersion(Base):
         CheckConstraint(
             "(kind = 'rollback') = (rollback_of_version IS NOT NULL)", name="rollback_ref"
         ),
-        Index(None, "scope", "source_revision"),
+        Index(None, "zone", "source_revision"),
     )
 
-    scope: Mapped[str] = mapped_column(
-        ForeignKey("scopes.name", ondelete="RESTRICT"), nullable=False
-    )
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.id", ondelete="RESTRICT"), nullable=False)
     version: Mapped[int] = mapped_column(BigInteger, nullable=False)
     # Serialized lumewarp.config.v1.Snapshot.
     payload: Mapped[bytes | None] = mapped_column(LargeBinary)
@@ -1827,7 +2162,7 @@ class ConfigVersion(Base):
 
 
 class ConfigOutbox(Base):
-    """ "Recompile scope" requests, written in the same transaction as the source mutation
+    """ "Recompile zone" requests, written in the same transaction as the source mutation
     (`outbox.enqueue_recompile`). The compiler loop drains rows with
     source_revision <= the revision it compiled.
     """
@@ -1837,16 +2172,14 @@ class ConfigOutbox(Base):
         CheckConstraint("attempts >= 0", name="attempts_nonneg"),
         Index(
             "ix_config_outbox_pending",
-            "scope",
+            "zone",
             "id",
             postgresql_where=text("status = 'pending'"),
         ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
-    scope: Mapped[str] = mapped_column(
-        ForeignKey("scopes.name", ondelete="RESTRICT"), nullable=False
-    )
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.id", ondelete="RESTRICT"), nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     source_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
     status: Mapped[OutboxStatus] = mapped_column(
@@ -1863,26 +2196,6 @@ class ConfigOutbox(Base):
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
-class GatewayToken(Base):
-    """Gateway credential (`lwg-...`): a scope credential with a label, not bound to a
-    gateway id. Any number of gateways may authenticate with one token. Hash only.
-    """
-
-    __tablename__ = "gateway_tokens"
-    __table_args__ = (_hash32("token_hash"), Index(None, "scope"))
-
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
-    scope: Mapped[str] = mapped_column(
-        ForeignKey("scopes.name", ondelete="RESTRICT"), nullable=False
-    )
-    name: Mapped[str] = mapped_column(String(200), nullable=False, server_default="")
-    token_hash: Mapped[bytes] = mapped_column(LargeBinary, nullable=False, unique=True)
-    display_prefix: Mapped[str] = mapped_column(String(32), nullable=False)
-    created_at: Mapped[datetime] = _now()
-    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-
 class GatewaySession(Base):
     """Last known stream state per gateway process, for status/UI. A gateway is one
     process: a restart is a new gateway id and a new row. Authoritative ACK/pending state
@@ -1891,18 +2204,13 @@ class GatewaySession(Base):
     """
 
     __tablename__ = "gateway_sessions"
-    __table_args__ = (PrimaryKeyConstraint("scope", "gateway_id"),)
+    __table_args__ = (PrimaryKeyConstraint("zone", "gateway_id"),)
 
-    scope: Mapped[str] = mapped_column(
-        ForeignKey("scopes.name", ondelete="RESTRICT"), nullable=False
-    )
-    # Hello.gateway_id: this process. `[A-Za-z0-9._-]`, at most 100 characters.
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.id", ondelete="RESTRICT"), nullable=False)
+    # Assigned by the control plane in Welcome: this stream's id. `[A-Za-z0-9._-]`, at most
+    # 100 characters; a reconnect is a new id and a new row.
     gateway_id: Mapped[str] = mapped_column(String(100), nullable=False)
     session_id: Mapped[uuid.UUID | None] = mapped_column()
-    # The token of the latest Hello; revoking it closes this gateway's stream.
-    token_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("gateway_tokens.id", ondelete="CASCADE"), nullable=False
-    )
     connected: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     gateway_version: Mapped[str] = mapped_column(String(100), nullable=False, server_default="")
     capabilities: Mapped[list[str]] = mapped_column(
@@ -1915,7 +2223,7 @@ class GatewaySession(Base):
     last_nack_version: Mapped[int | None] = mapped_column(BigInteger)
     last_nack_code: Mapped[str | None] = mapped_column(String(64))
     last_nack_reason: Mapped[str | None] = mapped_column(Text)
-    # Hello.shared_limits: display only. Quarantine is scope-wide, in GatewayQuarantine.
+    # Hello.shared_limits: display only. Quarantine is zone-wide, in GatewayQuarantine.
     shared_limits_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="false"
     )
@@ -1935,18 +2243,16 @@ class GatewaySession(Base):
 
 
 class GatewayQuarantine(Base):
-    """A config version a gateway rejected as INVALID_CONFIG: no gateway in the scope is
+    """A config version a gateway rejected as INVALID_CONFIG: no gateway in the zone is
     sent it (docs/config-protocol.md). Every gateway gets the same snapshot, so the version is
-    withheld scope-wide; the row outlives sessions, and a newer published version is tried
+    withheld zone-wide; the row outlives sessions, and a newer published version is tried
     again from scratch.
     """
 
     __tablename__ = "gateway_quarantines"
-    __table_args__ = (PrimaryKeyConstraint("scope"),)
+    __table_args__ = (PrimaryKeyConstraint("zone"),)
 
-    scope: Mapped[str] = mapped_column(
-        ForeignKey("scopes.name", ondelete="RESTRICT"), nullable=False
-    )
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.id", ondelete="RESTRICT"), nullable=False)
     quarantined_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
     updated_at: Mapped[datetime] = _now()
 
@@ -1959,24 +2265,20 @@ class GatewayPlugin(Base):
 
     __tablename__ = "gateway_plugins"
     __table_args__ = (
-        PrimaryKeyConstraint("scope", "gateway_id", "kind", "name"),
+        PrimaryKeyConstraint("zone", "gateway_id", "kind", "name"),
         ForeignKeyConstraint(
-            ["scope", "gateway_id"],
-            ["gateway_sessions.scope", "gateway_sessions.gateway_id"],
+            ["zone", "gateway_id"],
+            ["gateway_sessions.zone", "gateway_sessions.gateway_id"],
             ondelete="CASCADE",
         ),
     )
 
-    scope: Mapped[str] = mapped_column(String(128), nullable=False)
+    zone: Mapped[str] = mapped_column(String(64), nullable=False)
     gateway_id: Mapped[str] = mapped_column(String(100), nullable=False)
     kind: Mapped[PluginKind] = mapped_column(_enum(PluginKind, "plugin_kind"), nullable=False)
     name: Mapped[str] = mapped_column(String(63), nullable=False)
     digest: Mapped[str] = mapped_column(String(128), nullable=False)
     descriptor: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    # The report stops counting when this token is revoked.
-    token_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("gateway_tokens.id", ondelete="CASCADE"), nullable=False
-    )
     seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
@@ -2022,7 +2324,9 @@ class UsageEvent(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     request_id: Mapped[uuid.UUID] = mapped_column(nullable=False, unique=True)
-    # The reporting process (ReportRequest.gateway_id), never derived from the token.
+    # The id Welcome assigned to the reporting stream (ReportRequest.gateway_id); empty for
+    # events served before any handshake, attributed to no gateway row. No FK: this is an
+    # append-only log.
     gateway_id: Mapped[str] = mapped_column(String(100), nullable=False)
     # Completion time (UsageEvent.timestamp_unix_ms); budget windows use it.
     ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -2030,6 +2334,9 @@ class UsageEvent(Base):
     received_at: Mapped[datetime] = _now()
     key_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
     team_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    # The zone of the authenticated zone token (never a gateway claim), stamped at ingest.
+    # No FK: this is an append-only log and a zone row outlives its versions.
+    zone: Mapped[str] = mapped_column(String(64), nullable=False)
     # The key's owner at ingest time (user or service account id).
     owner_kind: Mapped[KeyOwnerKind] = mapped_column(
         _enum(KeyOwnerKind, "key_owner_kind"), nullable=False
@@ -2114,8 +2421,9 @@ class OrgBudgetWindow(Base):
     """
 
     __tablename__ = "org_budget_windows"
-    __table_args__ = (PrimaryKeyConstraint("org_id", "window_start"),)
+    __table_args__ = (PrimaryKeyConstraint("zone", "org_id", "window_start"),)
 
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.id", ondelete="CASCADE"), nullable=False)
     org_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("orgs.id", ondelete="CASCADE"), nullable=False
     )
@@ -2134,7 +2442,7 @@ class UsageTotal(Base):
 
     __tablename__ = "usage_totals"
     __table_args__ = (
-        PrimaryKeyConstraint("scope_type", "scope_id", "window_start"),
+        PrimaryKeyConstraint("zone", "scope_type", "scope_id", "window_start"),
         CheckConstraint(
             "cost_nano_usd >= 0 AND prompt_tokens >= 0 AND completion_tokens >= 0"
             " AND audio_ms >= 0 AND request_count >= 0 AND unknown_cost_count >= 0",
@@ -2142,6 +2450,7 @@ class UsageTotal(Base):
         ),
     )
 
+    zone: Mapped[str] = mapped_column(ForeignKey("zones.id", ondelete="CASCADE"), nullable=False)
     scope_type: Mapped[ScopeType] = mapped_column(_enum(ScopeType, "scope_type"), nullable=False)
     scope_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
     window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

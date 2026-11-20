@@ -9,9 +9,13 @@ import { DataTable } from "../components/Table";
 import { useAliases, useById, useCan, useModels, useMut, useRouters } from "../hooks";
 import { aliasUpstreamModels, matches } from "../lib/catalog";
 import { typeLabel } from "../lib/modelType";
+import { useZone } from "../zone";
+import { NotAvailableBadge, unavailableHere } from "./Routers";
 
 export function Aliases() {
   const perms = useCan();
+  const { id: zone, zone: zoneRow } = useZone();
+  const zoneLabel = zoneRow?.name || zone;
   const list = useAliases();
   const models = useModels();
   const routers = useRouters();
@@ -58,9 +62,12 @@ export function Aliases() {
             header: "Name",
             sort: (a, b) => a.name.localeCompare(b.name),
             cell: (r) => (
-              <Link to="/aliases/$aliasId" params={{ aliasId: r.id }} className="font-semibold hover:underline">
-                {r.name}
-              </Link>
+              <span className="inline-flex flex-wrap items-center gap-2">
+                <Link to="/aliases/$aliasId" params={{ aliasId: r.id }} className="font-semibold hover:underline">
+                  {r.name}
+                </Link>
+                {unavailableHere(r, zone) && <NotAvailableBadge zoneLabel={zoneLabel} />}
+              </span>
             ),
           },
           {

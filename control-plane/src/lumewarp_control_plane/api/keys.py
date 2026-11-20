@@ -2,7 +2,8 @@
 
 The raw `lw-...` secret is returned exactly once from `createKey` / `rotateKey`; only its
 sha256 and a short display prefix are stored. A key is owned by a team member or by a
-service account and carries no policy of its own (the owner's policy applies).
+service account. Its own policy is the last level of the hierarchy: optional limits, and a
+model list that inherits the owner's set or narrows it (`model_access` `inherit`/`list`).
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ from lumewarp_control_plane.api.common import (
     ensure_key_read,
     ensure_not_null,
     get_team_or_404,
-    lock_scope,
+    lock_hierarchy,
     mutation,
     parse_uuid_cursor,
     validation_error,
@@ -39,9 +40,14 @@ from lumewarp_control_plane.api.common import (
 from lumewarp_control_plane.api.key_refs import key_refs
 from lumewarp_control_plane.api.openapi import RATE_LIMITED
 from lumewarp_control_plane.api.policy import (
+    Policy,
+    member_defaults_of,
     owner_effective_of,
     policy_of,
+    save_model_grants,
     validate_key_limits,
+    validate_key_models,
+    violation,
 )
 from lumewarp_control_plane.api.schemas import (
     KeyCreate,
@@ -51,6 +57,7 @@ from lumewarp_control_plane.api.schemas import (
 )
 from lumewarp_control_plane.api.schemas import KeyCreated as KeyCreatedBase
 from lumewarp_control_plane.api.schemas import KeyOut as KeyOutBase
+from lumewarp_control_plane.api.zone_limits import limits_of, zone_or_404
 from lumewarp_control_plane.authz import (
     Action,
     Authz,
@@ -64,13 +71,19 @@ from lumewarp_control_plane.metrics import note_suspended
 from lumewarp_control_plane.models import (
     ApiKey,
     KeyLifecycle,
+    KeyMinCreatorRole,
     KeyOwnerKind,
     MemberPolicy,
+    ModelAccess,
     Org,
     ServiceAccount,
     Team,
+    TeamMember,
     User,
+    Zone,
+    ZoneLimit,
 )
+from lumewarp_control_plane.quota import org_effective, owner_effective, team_effective
 from lumewarp_control_plane.security import SecretKind, generate_secret
 
 router = APIRouter(tags=["keys"])
@@ -174,15 +187,28 @@ async def _rate_limit(
 
 
 async def _owner_effective(session: AsyncSession, team: Team, key: ApiKey):
-    """The effective policy of a key's owner (member exception/defaults or the account)."""
+    """The effective policy of a key's owner in the key's zone."""
     if key.owner_kind is KeyOwnerKind.SERVICE_ACCOUNT:
         account = await session.get(ServiceAccount, key.service_account_id)
         if account is None:
             raise not_found("service account not found")
-        return await owner_effective_of(session, team, policy_of(account), service_account=True)
+        limits = await limits_of(
+            session, key.zone, {"team_id": team.id, "service_account_id": account.id}
+        )
+        return await owner_effective_of(
+            session,
+            team,
+            policy_of(account, limits),
+            service_account=True,
+            zone=key.zone,
+        )
     policy_row = await session.get(MemberPolicy, (key.team_id, key.user_id))
+    limits = await limits_of(session, key.zone, {"team_id": team.id, "user_id": key.user_id})
     return await owner_effective_of(
-        session, team, policy_of(policy_row) if policy_row is not None else None
+        session,
+        team,
+        policy_of(policy_row, limits) if policy_row is not None else None,
+        zone=key.zone,
     )
 
 
@@ -212,6 +238,372 @@ async def _check_key_limits(
         tpm_limit=body.tpm_limit if "tpm_limit" in changed else None,
         max_parallel=body.max_parallel if "max_parallel" in changed else None,
     )
+
+
+_KEY_MODEL_FIELDS = {"model_access", "allowed_models", "allowed_groups"}
+
+
+def _key_policy(key: ApiKey) -> Policy:
+    """The key's stored model half as a policy (limits are checked separately)."""
+    return Policy(
+        model_access=key.model_access,
+        allowed_models=tuple(key.allowed_models or ()),
+        allowed_groups=tuple(key.allowed_groups or ()),
+        group_models=tuple(key.granted_models or ()),
+    )
+
+
+def _proposed_key_policy(body: KeyCreate | KeyUpdate, base: Policy | None) -> Policy:
+    """The key's model list after this write, following `policy_from_fields`'s rules:
+    a list is only accepted under `list`, and leaving `list` clears both lists.
+    """
+    supplied = body.model_fields_set
+    if "model_access" in supplied and body.model_access is not None:
+        mode = ModelAccess(body.model_access)
+    else:
+        mode = base.model_access if base is not None else ModelAccess.INHERIT
+    lists: dict[str, tuple[str, ...]] = {}
+    for name in ("allowed_models", "allowed_groups"):
+        value = getattr(body, name)
+        if name in supplied and value is not None:
+            if value and mode is not ModelAccess.LIST:
+                raise violation(name, "only allowed when model_access is 'list'")
+            lists[name] = tuple(sorted(value))
+        elif base is not None and base.model_access is ModelAccess.LIST:
+            lists[name] = getattr(base, name)
+        else:
+            lists[name] = ()
+        if mode is not ModelAccess.LIST:
+            lists[name] = ()
+    return Policy(
+        model_access=mode,
+        allowed_models=lists["allowed_models"],
+        allowed_groups=lists["allowed_groups"],
+    )
+
+
+async def _owner_models(
+    session: AsyncSession, keys: list[ApiKey]
+) -> dict[uuid.UUID, list[str] | None]:
+    """Each key's owner's effective model set (None = every name), batched per page.
+
+    The key model picker is scoped by it. Teams, orgs and owner rows are read once for the
+    whole page, never once per key.
+    """
+    if not keys:
+        return {}
+    # Per distinct team and org, through the identity map: a team page already holds its
+    # team, and a page never needs more than one read per team.
+    teams: dict[uuid.UUID, Team] = {}
+    for team_id in sorted({key.team_id for key in keys}):
+        team = await session.get(Team, team_id)
+        if team is not None:
+            teams[team_id] = team
+    orgs: dict[uuid.UUID, Org] = {}
+    for org_id in sorted({team.org_id for team in teams.values()}):
+        org = await session.get(Org, org_id)
+        if org is not None:
+            orgs[org_id] = org
+    user_pairs = {(key.team_id, key.user_id) for key in keys if key.owner_kind is KeyOwnerKind.USER}
+    member_rows = {}
+    if user_pairs:
+        member_rows = {
+            (row.team_id, row.user_id): row
+            for row in await session.scalars(
+                select(MemberPolicy).where(
+                    MemberPolicy.user_id.in_({user_id for _, user_id in user_pairs}),
+                    MemberPolicy.team_id.in_({team_id for team_id, _ in user_pairs}),
+                )
+            )
+        }
+    account_ids = {
+        key.service_account_id for key in keys if key.owner_kind is KeyOwnerKind.SERVICE_ACCOUNT
+    }
+    accounts = {}
+    if account_ids:
+        accounts = {
+            row.id: row
+            for row in await session.scalars(
+                select(ServiceAccount).where(ServiceAccount.id.in_(account_ids))
+            )
+        }
+    # Zone limits are read per distinct key zone, in one query each.
+    limits_by_key_zone: dict[str, dict] = {}
+    for zone in {key.zone for key in keys}:
+        limits_by_key_zone[zone] = (
+            {
+                ("org", org_id): row
+                for org_id, row in (
+                    (row.org_id, row)
+                    for row in await session.scalars(
+                        select(ZoneLimit).where(
+                            ZoneLimit.zone == zone, ZoneLimit.org_id.in_(list(orgs))
+                        )
+                    )
+                )
+            }
+            | {
+                ("team", row.team_id): row
+                for row in await session.scalars(
+                    select(ZoneLimit).where(
+                        ZoneLimit.zone == zone, ZoneLimit.team_id.in_(list(teams))
+                    )
+                )
+                if row.user_id is None and row.service_account_id is None and row.org_id is None
+            }
+            | {
+                ("member", row.team_id, row.user_id): row
+                for row in await session.scalars(
+                    select(ZoneLimit).where(
+                        ZoneLimit.zone == zone,
+                        ZoneLimit.team_id.in_(list(teams)),
+                        ZoneLimit.user_id.is_not(None),
+                    )
+                )
+            }
+            | {
+                ("service_account", row.service_account_id): row
+                for row in await session.scalars(
+                    select(ZoneLimit).where(
+                        ZoneLimit.zone == zone, ZoneLimit.service_account_id.is_not(None)
+                    )
+                )
+            }
+        )
+    out: dict[uuid.UUID, list[str] | None] = {}
+    for key in keys:
+        team = teams.get(key.team_id)
+        if team is None or team.org_id not in orgs:
+            out[key.id] = []
+            continue
+        zone_limits = limits_by_key_zone.get(key.zone, {})
+        team_eff = team_effective(
+            org_effective(orgs[team.org_id], zone_limits.get(("org", team.org_id))),
+            team,
+            zone_limits.get(("team", team.id)),
+        )
+        defaults = await member_defaults_of(session, key.zone, team.id)
+        if key.owner_kind is KeyOwnerKind.SERVICE_ACCOUNT:
+            account = accounts.get(key.service_account_id)
+            owner = owner_effective(
+                team_eff,
+                defaults,
+                policy_of(account, zone_limits.get(("service_account", key.service_account_id)))
+                if account is not None
+                else None,
+                service_account=True,
+            )
+        else:
+            row = member_rows.get((key.team_id, key.user_id))
+            owner = owner_effective(
+                team_eff,
+                defaults,
+                policy_of(row, zone_limits.get(("member", key.team_id, key.user_id)))
+                if row is not None
+                else None,
+                service_account=False,
+            )
+        out[key.id] = None if owner.models is None else sorted(owner.models)
+    return out
+
+
+# The key rules a zone applies, in rank order: installation and org admins outrank a team
+# admin, which outranks a member.
+_ROLE_RANK = {
+    KeyMinCreatorRole.MEMBER: 0,
+    KeyMinCreatorRole.TEAM_ADMIN: 1,
+    KeyMinCreatorRole.ORG_ADMIN: 2,
+}
+
+
+async def _caller_rank(authz: RequestAuthz, team: Team) -> int:
+    """The caller's effective team role: org/installation admin > team admin > member."""
+    if await authz.is_admin() or await authz.is_org_admin(team.org_id):
+        return 2
+    if await authz.allowed(Action.TEAM_MEMBERS_MANAGE, team.id):
+        return 1
+    return 0
+
+
+def _lifetime_cap(zone: Zone, team: Team, *, user_key: bool) -> int | None:
+    """The effective lifetime cap: min(zone, team) for user keys, zone for SA keys."""
+    if user_key:
+        return _min_cap(zone.key_max_lifetime_seconds, team.max_member_key_lifetime_seconds)
+    return zone.key_max_lifetime_seconds
+
+
+def _member_cap(zone: Zone, team: Team) -> int | None:
+    return _min_cap(zone.key_max_per_member, team.max_keys_per_member)
+
+
+def _min_cap(*values: int | None) -> int | None:
+    present = [value for value in values if value is not None]
+    return min(present) if present else None
+
+
+async def _member_key_count(
+    session: AsyncSession, zone: str, team_id: uuid.UUID, user_id: uuid.UUID
+) -> int:
+    return (
+        await session.scalar(
+            select(func.count())
+            .select_from(ApiKey)
+            .where(
+                ApiKey.team_id == team_id,
+                ApiKey.zone == zone,
+                ApiKey.owner_kind == KeyOwnerKind.USER,
+                ApiKey.user_id == user_id,
+                ApiKey.lifecycle != KeyLifecycle.REVOKED,
+            )
+        )
+        or 0
+    )
+
+
+def _expiry_for_create(
+    zone: Zone, team: Team, *, user_key: bool, expires_at: datetime | None
+) -> datetime | None:
+    """Apply key_expiry_required and the lifetime cap to a new key."""
+    cap = _lifetime_cap(zone, team, user_key=user_key)
+    if expires_at is None:
+        if cap is not None:
+            return datetime.now(UTC) + timedelta(seconds=cap)
+        if zone.key_expiry_required:
+            raise validation_error("expires_at", "keys in this zone must have an expiry")
+        return None
+    if cap is not None:
+        deadline = datetime.now(UTC) + timedelta(seconds=cap)
+        if expires_at > deadline:
+            raise validation_error("expires_at", f"keys in this zone may not outlive {cap} seconds")
+    return expires_at
+
+
+def _expiry_for_update(
+    zone: Zone, team: Team, *, user_key: bool, expires_at: datetime | None
+) -> None:
+    """An expiry change may not clear or exceed the zone's current rule.
+
+    Existing keys that already violate a tightened rule keep working until they rotate or
+    expire; only a write that changes the expiry is judged here.
+    """
+    cap = _lifetime_cap(zone, team, user_key=user_key)
+    if expires_at is None:
+        if zone.key_expiry_required:
+            raise validation_error("expires_at", "keys in this zone must have an expiry")
+        if cap is not None:
+            raise validation_error("expires_at", "keys in this zone must keep an expiry")
+        return
+    if cap is not None and expires_at > datetime.now(UTC) + timedelta(seconds=cap):
+        raise validation_error("expires_at", f"keys in this zone may not outlive {cap} seconds")
+
+
+def _violations(
+    key: ApiKey,
+    zone: Zone,
+    team: Team,
+    *,
+    role_rank: int | None,
+    key_count: int | None,
+) -> list[str]:
+    """The zone/team rules this existing key no longer satisfies."""
+    out: list[str] = []
+    user_key = key.owner_kind is KeyOwnerKind.USER
+    if key.owner_kind is KeyOwnerKind.SERVICE_ACCOUNT and not zone.service_account_keys_allowed:
+        out.append("service_account_keys_allowed")
+    if key.owner_kind is KeyOwnerKind.USER and not zone.user_keys_allowed:
+        out.append("user_keys_allowed")
+    if zone.key_expiry_required and key.expires_at is None:
+        out.append("key_expiry_required")
+    cap = _lifetime_cap(zone, team, user_key=user_key)
+    if cap is not None and key.expires_at is not None:
+        if key.expires_at > datetime.now(UTC) + timedelta(seconds=cap):
+            out.append("key_max_lifetime_seconds")
+    member_cap = _member_cap(zone, team)
+    if user_key and member_cap is not None and key_count is not None and key_count > member_cap:
+        out.append("key_max_per_member")
+    if role_rank is not None and role_rank < _ROLE_RANK[zone.key_min_creator_role]:
+        out.append("key_min_creator_role")
+    return out
+
+
+async def _violations_for(
+    session: AsyncSession, keys: list[ApiKey], teams: dict[uuid.UUID, Team]
+) -> dict[uuid.UUID, list[str]]:
+    """Rule violations of a page of keys, batched by zone and (team, owner)."""
+    if not keys:
+        return {}
+    zones = {
+        row.id: row
+        for row in await session.scalars(select(Zone).where(Zone.id.in_({k.zone for k in keys})))
+    }
+    counts: dict[tuple[str, uuid.UUID, uuid.UUID], int] = {}
+    # The count only matters when some zone or team caps member keys.
+    capped = any(row.key_max_per_member is not None for row in zones.values()) or any(
+        team.max_keys_per_member is not None for team in teams.values()
+    )
+    if capped:
+        for zone, team_id, user_id, count in await session.execute(
+            select(ApiKey.zone, ApiKey.team_id, ApiKey.user_id, func.count())
+            .where(
+                ApiKey.owner_kind == KeyOwnerKind.USER,
+                ApiKey.lifecycle != KeyLifecycle.REVOKED,
+                ApiKey.team_id.in_({k.team_id for k in keys}),
+            )
+            .group_by(ApiKey.zone, ApiKey.team_id, ApiKey.user_id)
+        ):
+            counts[(zone, team_id, user_id)] = count
+    roles: dict[tuple[uuid.UUID, uuid.UUID], str] = {
+        (row.team_id, row.user_id): row.role.value
+        for row in await session.scalars(
+            select(TeamMember).where(TeamMember.team_id.in_({k.team_id for k in keys}))
+        )
+    }
+    out: dict[uuid.UUID, list[str]] = {}
+    for key in keys:
+        zone = zones.get(key.zone)
+        team = teams.get(key.team_id)
+        if zone is None or team is None:
+            out[key.id] = []
+            continue
+        role_rank = None
+        if key.owner_kind is KeyOwnerKind.USER:
+            role_rank = 1 if roles.get((key.team_id, key.user_id)) == "admin" else 0
+        elif key.created_by_user_id is not None:
+            role_rank = 1 if roles.get((key.team_id, key.created_by_user_id)) == "admin" else 0
+        out[key.id] = _violations(
+            key,
+            zone,
+            team,
+            role_rank=role_rank,
+            key_count=(
+                counts.get((key.zone, key.team_id, key.user_id))
+                if key.owner_kind is KeyOwnerKind.USER
+                else None
+            ),
+        )
+    return out
+
+
+async def _apply_key_models(
+    session: AsyncSession,
+    team: Team,
+    key: ApiKey,
+    body: KeyCreate | KeyUpdate,
+    *,
+    create: bool = False,
+) -> Policy | None:
+    """Validate the key's model list against its owner's effective set (422) and set
+    `model_access`. Returns the policy whose grants the caller saves once the key has an
+    id, or None when the body does not touch the model list.
+    """
+    if not body.model_fields_set & _KEY_MODEL_FIELDS:
+        return None
+    base = None if create else _key_policy(key)
+    proposed = _proposed_key_policy(body, base)
+    owner = await _owner_effective(session, team, key)
+    await validate_key_models(session, owner, proposed, base)
+    key.model_access = proposed.model_access
+    return proposed
 
 
 async def _member_key_expiry(
@@ -289,6 +681,11 @@ class KeyOut(KeyOutBase):
     team_name: str = Field(description="The name of the team the key belongs to.")
     org_id: uuid.UUID | None = Field(description="The id of the team's org.")
     org_name: str | None = Field(description="The name of the team's org.")
+    owner_models: list[str] | None = Field(
+        default=None,
+        description="The owner's effective models, the most the key can be narrowed to;"
+        " null = every name in the catalog.",
+    )
 
 
 class KeyCreated(KeyCreatedBase):
@@ -302,15 +699,20 @@ def _key_out(
     team_name: str,
     org_id: uuid.UUID | None,
     org_name: str | None,
+    owner_models: list[str] | None,
+    violations: list[str] | None = None,
 ) -> KeyOut:
-    return KeyOut(
+    out = KeyOut(
         **KeyOutBase.model_validate(key).model_dump(),
         owner_active=active,
         service_account_name=account_name,
         team_name=team_name,
         org_id=org_id,
         org_name=org_name,
+        owner_models=owner_models,
     )
+    out.rule_violations = violations or []
+    return out
 
 
 async def _out(session: AsyncSession, key: ApiKey) -> KeyOut:
@@ -318,6 +720,10 @@ async def _out(session: AsyncSession, key: ApiKey) -> KeyOut:
     if key.owner_kind is KeyOwnerKind.USER:
         active = await session.scalar(select(User.is_active).where(User.id == key.user_id))
     ref = (await key_refs(session, [key.id]))[key.id]
+    team = await session.get(Team, key.team_id)
+    violations = (
+        await _violations_for(session, [key], {team.id: team}) if team is not None else {}
+    ).get(key.id)
     return _key_out(
         key,
         active,
@@ -325,19 +731,21 @@ async def _out(session: AsyncSession, key: ApiKey) -> KeyOut:
         ref.team_name,
         ref.org_id,
         ref.org_name,
+        (await _owner_models(session, [key]))[key.id],
+        violations,
     )
 
 
 async def _page(
     session: AsyncSession, stmt: Select[tuple[ApiKey]], limit: int, cursor: str | None
 ) -> Page[KeyOut]:
-    # The team, org and service-account names are joined into the page query itself: the
-    # key list stays one data query at every page size, never one query per row.
+    # The team, org and service-account names are joined into the page query itself, and
+    # the team entity comes from it too: the key list stays one data query at every page
+    # size, never one query per row or per team.
     stmt = (
         stmt.add_columns(
             User.is_active,
-            Team.name,
-            Team.org_id,
+            Team,
             Org.name,
             ServiceAccount.name,
         )
@@ -351,17 +759,23 @@ async def _page(
     rows = (await session.execute(stmt.limit(limit + 1))).all()
     next_cursor = str(rows[limit - 1][0].id) if len(rows) > limit else None
     page_rows = rows[:limit]
+    page_keys = [row[0] for row in page_rows]
+    teams = {row[2].id: row[2] for row in page_rows}
+    owner_models = await _owner_models(session, page_keys)
+    violations = await _violations_for(session, page_keys, teams)
     return Page[KeyOut](
         items=[
             _key_out(
                 key,
                 active,
                 account_name,
-                team_name,
-                org_id,
+                team.name,
+                team.org_id,
                 org_name,
+                owner_models[key.id],
+                violations.get(key.id),
             )
-            for key, active, team_name, org_id, org_name, account_name in page_rows
+            for key, active, team, org_name, account_name in page_rows
         ],
         next_cursor=next_cursor,
     )
@@ -425,6 +839,9 @@ async def list_team_keys(
     user_id: uuid.UUID | None = None,
     service_account_id: uuid.UUID | None = None,
     lifecycle: KeyLifecycle | None = None,
+    zone: Annotated[
+        str | None, Query(description="Only keys of this zone; omitted lists every zone.")
+    ] = None,
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[KeyOut]:
@@ -446,6 +863,8 @@ async def list_team_keys(
         stmt = stmt.where(ApiKey.service_account_id == service_account_id)
     if lifecycle is not None:
         stmt = stmt.where(ApiKey.lifecycle == lifecycle)
+    if zone is not None:
+        stmt = stmt.where(ApiKey.zone == zone)
     return await _page(session, stmt, limit, cursor)
 
 
@@ -468,36 +887,58 @@ async def create_key(
     """Create a virtual API key (`lw-…`). The secret is in this response only. Without
     `service_account_id` the key belongs to the caller, who must belong to or administer the
     team, and the team's `max_keys_per_member` and `max_member_key_lifetime_seconds` apply. A
-    key for a service account requires a team admin. The key's limits may not exceed its owner's
-    effective limits. Limited to 30 attempts per 60 seconds per caller (429).
+    key for a service account requires a team admin. A zone may refuse user-owned keys
+    (`user_keys_allowed`) or service-account keys. The key's limits may not exceed its owner's
+    effective limits, and with `model_access` `list` its models must be within the owner's.
+    Limited to 30 attempts per 60 seconds per caller (429).
     """
     await _rate_limit(request, authz, "create", KEY_CREATE_LIMIT, metrics)
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         team = await get_team_or_404(session, authz, team_id)
+        zone = await zone_or_404(session, body.zone or settings.zone)
+        caller_rank = await _caller_rank(authz, team)
+        if caller_rank < _ROLE_RANK[zone.key_min_creator_role]:
+            raise validation_error(
+                "zone",
+                f"creating a key in zone {zone.id!r} requires {zone.key_min_creator_role.value}",
+            )
         if body.service_account_id is None:
             await authz.require(Action.KEY_CREATE_OWN, team.id)
+            if not zone.user_keys_allowed:
+                raise validation_error("zone", f"zone {zone.id!r} does not allow user keys")
             user_id = authz.user_id
             if user_id is None or not await _may_own_keys(session, authz, team.id, user_id):
                 raise validation_error("team_id", "not a member or admin of this team")
             owner = {"owner_kind": KeyOwnerKind.USER, "user_id": user_id}
-            expires_at = await _member_key_expiry(session, team, user_id, body.expires_at)
+            cap = _member_cap(zone, team)
+            if cap is not None:
+                owned = await _member_key_count(session, zone.id, team.id, user_id)
+                if owned >= cap:
+                    raise conflict(
+                        f"member key limit reached ({cap} per member in zone {zone.id!r})"
+                    )
+            expires_at = _expiry_for_create(zone, team, user_key=True, expires_at=body.expires_at)
         else:
             account = await session.get(ServiceAccount, body.service_account_id)
             if account is None or account.team_id != team.id:
                 raise not_found("service account not found")
             if account.deactivated_at is not None:
                 raise conflict("the service account is deactivated")
+            if not zone.service_account_keys_allowed:
+                raise validation_error(
+                    "zone", f"zone {zone.id!r} does not allow service-account keys"
+                )
             await authz.require(Action.SERVICE_ACCOUNT_MANAGE, team.id)
             owner = {
                 "owner_kind": KeyOwnerKind.SERVICE_ACCOUNT,
                 "service_account_id": account.id,
             }
-            # Member limits do not apply to service accounts (team-admin managed).
-            expires_at = body.expires_at
+            expires_at = _expiry_for_create(zone, team, user_key=False, expires_at=body.expires_at)
         new = generate_secret(SecretKind.API_KEY)
         row = ApiKey(
             team_id=team.id,
+            zone=zone.id,
             name=body.name,
             key_hash=new.hash,
             display_prefix=new.display_prefix,
@@ -510,8 +951,11 @@ async def create_key(
             **owner,
         )
         await _check_key_limits(session, team, row, body, create=True)
+        models = await _apply_key_models(session, team, row, body, create=True)
         session.add(row)
         await session.flush()
+        if models is not None:
+            await save_model_grants(session, row, models)
         await session.refresh(row)
         audit.record(
             session,
@@ -522,12 +966,16 @@ async def create_key(
             team_id=row.team_id,
             details={
                 "name": row.name,
+                "zone": row.zone,
                 "owner_kind": row.owner_kind.value,
                 "owner_id": row.owner_id,
                 "expires_at": row.expires_at.isoformat() if row.expires_at else None,
+                "model_access": row.model_access.value,
+                "allowed_models": row.allowed_models,
+                "allowed_groups": row.allowed_groups,
             },
         )
-        await enqueue_recompile(session, settings, "api.key.create")
+        await enqueue_recompile(session, settings, "api.key.create", row.zone)
     metrics.key_writes.labels("create", "success").inc()
     return KeyCreated(key=await _out(session, row), secret=new.secret)
 
@@ -560,15 +1008,16 @@ async def update_key(
     settings: SettingsDep,
     metrics: MetricsDep,
 ) -> KeyOut:
-    """Rename, change limits, or suspend and resume (`lifecycle`). The owner manages their own key
-    and a team admin any key of the team. An owner may resume only their own `owner` and
+    """Rename, change limits or the model list, or suspend and resume (`lifecycle`). The owner
+    manages their own key and a team admin any key of the team. A changed model list must stay
+    within the owner's effective models. An owner may resume only their own `owner` and
     `owner_removed` suspensions; `admin` and `owner_deactivated` need a team admin. Revoked keys
     are immutable and revoking has its own operation. Limited to 30 attempts per 60 seconds per
     caller (429).
     """
     await _rate_limit(request, authz, "update", KEY_UPDATE_LIMIT, metrics)
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         ensure_not_null(body, "name")
         row = await _get_key(session, authz, key_id)
         await _require_manage(authz, row)
@@ -581,10 +1030,17 @@ async def update_key(
                 raise validation_error("lifecycle", "use POST /keys/{id}/revoke")
         if body.name is not None:
             row.name = body.name
+        zone_row = await session.get(Zone, row.zone)
         if "expires_at" in body.model_fields_set:
-            if row.owner_kind is KeyOwnerKind.USER:
-                team = await _live_team_or_404(session, row.team_id)
-                _check_member_expiry(team, body.expires_at)
+            team = await _live_team_or_404(session, row.team_id)
+            if zone_row is None:
+                raise conflict(f"zone {row.zone!r} no longer exists")
+            _expiry_for_update(
+                zone_row,
+                team,
+                user_key=row.owner_kind is KeyOwnerKind.USER,
+                expires_at=body.expires_at,
+            )
             row.expires_at = body.expires_at
         limit_fields = ("rpm_limit", "tpm_limit", "max_parallel")
         if body.model_fields_set & set(limit_fields):
@@ -595,6 +1051,13 @@ async def update_key(
             for field in limit_fields:
                 if field in body.model_fields_set:
                     setattr(row, field, getattr(body, field))
+        if body.model_fields_set & _KEY_MODEL_FIELDS:
+            # The owner's effective models cap the key's list; an unchanged list is not
+            # rechecked after the owner shrank (the compiler intersects it anyway).
+            team = await _live_team_or_404(session, row.team_id)
+            models = await _apply_key_models(session, team, row, body)
+            if models is not None:
+                await save_model_grants(session, row, models)
         admin_action = (
             Action.SERVICE_ACCOUNT_MANAGE
             if row.owner_kind is KeyOwnerKind.SERVICE_ACCOUNT
@@ -611,6 +1074,16 @@ async def update_key(
                 account = await session.get(ServiceAccount, row.service_account_id)
                 if account is None or account.deactivated_at is not None:
                     raise conflict("the service account is deactivated")
+                if zone_row is not None and not zone_row.service_account_keys_allowed:
+                    raise conflict(f"zone {row.zone!r} does not allow service-account keys")
+            elif zone_row is not None:
+                if not zone_row.user_keys_allowed:
+                    raise conflict(f"zone {row.zone!r} does not allow user keys")
+                team = await _live_team_or_404(session, row.team_id)
+                if zone_row.key_expiry_required and row.expires_at is None:
+                    raise conflict(
+                        f"zone {row.zone!r} requires an expiry; set expires_at before resuming"
+                    )
             owner_resume = (
                 row.suspended_reason == "owner_removed"
                 and row.owner_kind is KeyOwnerKind.USER
@@ -642,7 +1115,7 @@ async def update_key(
                 "changes": body.model_dump(exclude_unset=True, mode="json"),
             },
         )
-        await enqueue_recompile(session, settings, "api.key.update")
+        await enqueue_recompile(session, settings, "api.key.update", row.zone)
     metrics.count_committed_suspensions(session)
     return await _out(session, row)
 
@@ -658,7 +1131,7 @@ async def revoke_key(
     Allowed for the owner and for a team admin. Revoking an already revoked key succeeds.
     """
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         row = await _get_key(session, authz, key_id)
         await _require_manage(authz, row)
         if row.lifecycle is not KeyLifecycle.REVOKED:
@@ -679,7 +1152,7 @@ async def revoke_key(
                 team_id=row.team_id,
                 details={"name": row.name},
             )
-            await enqueue_recompile(session, settings, "api.key.revoke")
+            await enqueue_recompile(session, settings, "api.key.revoke", row.zone)
     return await _out(session, row)
 
 
@@ -706,14 +1179,28 @@ async def rotate_key(
     grace = (body or KeyRotate()).grace_seconds
     await _rate_limit(request, authz, "rotate", KEY_ROTATE_LIMIT, metrics)
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         row = await _get_key(session, authz, key_id)
         await _require_manage(authz, row)
         if row.lifecycle is KeyLifecycle.REVOKED:
             raise conflict("revoked keys cannot be rotated")
-        if row.owner_kind is KeyOwnerKind.USER:
-            team = await _live_team_or_404(session, row.team_id)
-            _enforce_rotation_lifetime(team, row)
+        team = await _live_team_or_404(session, row.team_id)
+        zone_row = await session.get(Zone, row.zone)
+        if zone_row is None:
+            raise conflict(f"zone {row.zone!r} no longer exists")
+        if (
+            row.owner_kind is KeyOwnerKind.SERVICE_ACCOUNT
+            and not zone_row.service_account_keys_allowed
+        ):
+            raise conflict(f"zone {row.zone!r} does not allow service-account keys")
+        if row.owner_kind is KeyOwnerKind.USER and not zone_row.user_keys_allowed:
+            raise conflict(f"zone {row.zone!r} does not allow user keys")
+        row.expires_at = _expiry_for_create(
+            zone_row,
+            team,
+            user_key=row.owner_kind is KeyOwnerKind.USER,
+            expires_at=row.expires_at,
+        )
         new = generate_secret(SecretKind.API_KEY)
         old_hash = row.key_hash
         row.key_hash = new.hash
@@ -738,6 +1225,7 @@ async def rotate_key(
             team_id=row.team_id,
             details={
                 "name": row.name,
+                "zone": row.zone,
                 "grace_seconds": grace,
                 "expires_at": row.expires_at.isoformat() if row.expires_at else None,
                 "previous_key_expires_at": (
@@ -745,7 +1233,7 @@ async def rotate_key(
                 ),
             },
         )
-        await enqueue_recompile(session, settings, "api.key.rotate")
+        await enqueue_recompile(session, settings, "api.key.rotate", row.zone)
     metrics.key_writes.labels("rotate", "success").inc()
     return KeyCreated(key=await _out(session, row), secret=new.secret)
 
@@ -763,6 +1251,9 @@ async def list_own_keys(
             )
         ),
     ] = False,
+    zone: Annotated[
+        str | None, Query(description="Only keys of this zone; omitted lists every zone.")
+    ] = None,
     limit: LimitDep = 50,
     cursor: str | None = None,
 ) -> Page[KeyOut]:
@@ -793,4 +1284,6 @@ async def list_own_keys(
                 ),
             )
         )
+    if zone is not None:
+        stmt = stmt.where(ApiKey.zone == zone)
     return await _page(session, stmt.order_by(ApiKey.id), limit, cursor)

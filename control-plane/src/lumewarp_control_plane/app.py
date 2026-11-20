@@ -41,6 +41,7 @@ from lumewarp_control_plane.metrics import (
     start_metrics_server,
 )
 from lumewarp_control_plane.settings import Settings, get_settings, split_bind
+from lumewarp_control_plane.zones import ensure_zones
 
 log = logging.getLogger(__name__)
 
@@ -110,9 +111,9 @@ async def start_background(app: FastAPI) -> Runtime:
     runtime.grpc_port = grpc_services.bound_port(server)
     registry = grpc_services.registry_for(server)
 
-    def on_published(scope: str, version: int) -> None:
+    def on_published(zone: str, version: int) -> None:
         if registry is not None:
-            registry.notify_published(scope, version)
+            registry.notify_published(zone, version)
 
     runtime.tasks["grpc"] = _supervise(app, runtime, "grpc", server.wait_for_termination())
     runtime.tasks["compiler"] = _supervise(
@@ -122,7 +123,6 @@ async def start_background(app: FastAPI) -> Runtime:
         compiler.run_compiler_loop(
             factory,
             runtime.stop,
-            scope=settings.scope,
             on_published=on_published,
             require_local_membership=app.state.authorizer.manages_grants,
             metrics=metrics,
@@ -152,7 +152,7 @@ async def start_background(app: FastAPI) -> Runtime:
             app,
             runtime,
             "metrics",
-            run_db_gauges(metrics, factory, runtime.stop, scope=settings.scope),
+            run_db_gauges(metrics, factory, runtime.stop),
         )
     return runtime
 
@@ -188,6 +188,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # An optional backend hook: a misconfigured backend aborts startup here.
         if (start := getattr(app.state.authorizer.backend, "start", None)) is not None:
             await start()
+        # A fresh database has no zone row. Create the default zone and every zone named by
+        # a `LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN` before the compiler and gRPC start; an
+        # invalid id or a short token already failed when `settings` was built.
+        # `serve` already requires a migrated database for the gRPC server below, so a
+        # failure here is a startup failure and the process restarts.
+        if settings.background_enabled:
+            await ensure_zones(app.state.session_factory, settings)
         runtime = await start_background(app) if settings.background_enabled else Runtime()
         app.state.runtime = runtime
         app.state.tasks = runtime.tasks
@@ -231,6 +238,11 @@ def create_app(
         log.warning("Break-glass password login is enabled")
     if settings.break_glass_password:
         log.warning("Break-glass uses a plaintext environment password; use a hash in production")
+    if settings.oidc_issuer and not settings.oidc_require_email_verified:
+        log.warning(
+            "LUMEWARP_OIDC_REQUIRE_EMAIL_VERIFIED=false: OIDC emails are trusted without "
+            "email_verified"
+        )
     app.state.metrics = Metrics()
     for reason in usage.SKIP_REASONS:
         app.state.metrics.usage_skipped.labels(reason)

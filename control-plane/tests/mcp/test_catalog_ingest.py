@@ -127,7 +127,7 @@ async def add_server(factory, name: str = "s1", *, publish_now: bool = True, **k
     """A live server with a real config revision (as the API leaves it)."""
     async with factory() as s, s.begin():
         server = await factories.make_mcp_server(s, name, url=f"http://{name}.test/mcp", **kw)
-        server.config_revision = await outbox.enqueue_recompile(s, SCOPE, "test.mcp_server")
+        server.config_revision = await outbox.enqueue_recompile(s, "test.mcp_server", SCOPE)
     if publish_now:
         await publish(factory)
     return server
@@ -136,7 +136,7 @@ async def add_server(factory, name: str = "s1", *, publish_now: bool = True, **k
 async def add_agent(factory, name: str = "a1", *, publish_now: bool = True, **kw) -> A2aAgent:
     async with factory() as s, s.begin():
         agent = await factories.make_agent(s, name, **kw)
-        agent.config_revision = await outbox.enqueue_recompile(s, SCOPE, "test.a2a_agent")
+        agent.config_revision = await outbox.enqueue_recompile(s, "test.a2a_agent", SCOPE)
     if publish_now:
         await publish(factory)
     return agent
@@ -335,7 +335,7 @@ async def test_a_report_older_than_the_server_edit_is_discarded(factory) -> None
     async with factory() as s, s.begin():
         row = await s.get(McpServer, server.id)
         row.url = "http://s1.test/mcp-changed"
-        row.config_revision = await outbox.enqueue_recompile(s, SCOPE, "test.edit")
+        row.config_revision = await outbox.enqueue_recompile(s, "test.edit", SCOPE)
     # Version 1 no longer covers the edited row, and no later version exists yet.
     result = await ingest(
         cpb.CatalogReport(definitions=[definition(server, observe("echo"))]), factory=factory
@@ -618,7 +618,7 @@ async def test_a_card_report_from_another_version_is_discarded(factory) -> None:
     async with factory() as s, s.begin():
         row = await s.get(A2aAgent, agent.id)
         row.url = "http://a1.test/a2a-changed"
-        row.config_revision = await outbox.enqueue_recompile(s, SCOPE, "test.agent_edit")
+        row.config_revision = await outbox.enqueue_recompile(s, "test.agent_edit", SCOPE)
     assert await publish(factory) == 2
     result = await ingest(cpb.CatalogReport(cards=[card(agent)]), factory=factory)
     assert result.discarded["stale_version"] == 1
@@ -665,10 +665,10 @@ async def test_a_rollback_is_a_new_configuration_change(factory) -> None:
     async with factory() as s, s.begin():
         srv = await s.get(McpServer, server.id)
         srv.url = "http://s1.test/mcp-b"
-        srv.config_revision = await outbox.enqueue_recompile(s, SCOPE, "test.edit_server")
+        srv.config_revision = await outbox.enqueue_recompile(s, "test.edit_server", SCOPE)
         ag = await s.get(A2aAgent, agent.id)
         ag.url = "http://a1.test/a2a-b"
-        ag.config_revision = await outbox.enqueue_recompile(s, SCOPE, "test.edit_agent")
+        ag.config_revision = await outbox.enqueue_recompile(s, "test.edit_agent", SCOPE)
     assert await publish(factory) == 2
     # Roll back to v1: URL A is served again, as a new version (3) and revision (5).
     async with factory() as s, s.begin():

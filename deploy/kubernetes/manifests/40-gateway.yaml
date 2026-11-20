@@ -92,7 +92,7 @@ spec:
             - --control-plane=$(LUMEWARP_CONTROL_PLANE_URL)
             - --gateway-token-env=LUMEWARP_GATEWAY_TOKEN
             - --state-dir=/var/lib/lumewarp
-            - --scope=$(LUMEWARP_SCOPE)
+            - --zone=$(LUMEWARP_ZONE)
             - --local-config=/etc/lumewarp/config.yaml
           ports:
             - name: http
@@ -104,13 +104,13 @@ spec:
           env:
             - name: LUMEWARP_CONTROL_PLANE_URL
               value: "http://lumewarp-control-plane:50051"
-            - name: LUMEWARP_SCOPE
+            - name: LUMEWARP_ZONE
               value: "default"
             - name: LUMEWARP_GATEWAY_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: lumewarp-gateway
-                  key: token
+                  name: lumewarp-gateway-tokens
+                  key: LUMEWARP_GATEWAY_ZONE_DEFAULT_TOKEN
             - name: LUMEWARP_ENCRYPTION_KEY
               valueFrom:
                 secretKeyRef:

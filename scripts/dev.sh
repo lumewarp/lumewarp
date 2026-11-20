@@ -1,27 +1,30 @@
 #!/usr/bin/env bash
-# Local dev preview: dev Postgres (+ Keycloak/OpenFGA), mock upstream, control plane,
+# Local dev preview: dev Postgres, Keycloak (+ OpenFGA with DEV_AUTHZ=openfga), mock upstream,
+# control plane,
 # gateway and the Vite UI.
 #
 #   scripts/dev.sh tab        inside herdr: open a `lumewarp-dev` tab, one pane per service
 #   scripts/dev.sh all        everything in this terminal with prefixed logs; Ctrl+C stops it
 #   scripts/dev.sh stop       close the herdr tab (containers keep running)
-#   scripts/dev.sh run <svc>  run one service in the foreground (mock, mcp, a2a, cp, gw, gw2, ui)
+#   scripts/dev.sh run <svc>  run one service in the foreground (mock, mcp, a2a, cp, gw, gw2, gw3, gw4, ui)
 #
 # `make dev` picks `tab` inside herdr and `all` elsewhere.
 #
-#   DEV_AUTHZ=openfga         authorization backend (default builtin)
+#   DEV_AUTHZ=openfga         authorization backend (default builtin); only then is OpenFGA started
 #   LUMEWARP_BREAK_GLASS_PASSWORD  override the development emergency password
 #   DEV_DATABASE=name         use this database in the dev Postgres, created if missing
 #   DEV_OPENWEBUI=0           do not start Open WebUI
 #
 # Ports: UI 5173 (Vite, proxies /api to the CP), CP 8091 (+ gRPC 50051, metrics 9465),
-# gateway 4000 (+ admin 9464) and a second gateway 4001 (+ admin 9466), mock upstream
-# 9100, example MCP 9110, example A2A 9120, Open WebUI 3000, Valkey 56379.
-# Each gateway generates its own id; both share rate limits through Valkey.
-# An empty database gets a model `mock-local`, a router `demo` over it, an alias
-# `demo-latest` to the router, a team `demo` and one key; the key secret is kept in
-# .dev/demo-key. One with no MCP server or A2A agent gets `example` and `helper`,
-# the example servers above. Each start issues a fresh gateway token (.dev/env).
+# four gateways, two per zone: zone `default` on 4000 and 4001 (+ admin 9464, 9466), zone
+# `prod` on 4002 and 4003 (+ admin 9468, 9470); mock upstream 9100, example MCP 9110,
+# example A2A 9120, Open WebUI 3000, Valkey 56379.
+# Each zone's gateways share one token (LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN, which also
+# declares the zone) and their rate limits through Valkey; the control plane assigns ids.
+# An empty database gets a model `mock-local` deployed in both zones, a router `demo` over
+# it, an alias `demo-latest` to the router, a team `demo` and one key per zone; the key
+# secrets are kept in .dev/demo-key (default) and .dev/demo-key-prod. One with no MCP server or A2A agent gets `example` and `helper`,
+# the example servers above. Each start issues fresh zone tokens (.dev/env).
 # Open WebUI runs in a container (no login) with the demo key for both the gateway's
 # OpenAI API and its aggregate MCP endpoint; its chats live in a Docker volume. Its
 # connections come from the environment on every start, so settings changed in its
@@ -31,7 +34,6 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 self="$root/scripts/dev.sh"
 state="$root/.dev"
-sso=1
 authz="${DEV_AUTHZ:-builtin}"
 break_glass_password="${LUMEWARP_BREAK_GLASS_PASSWORD:-dev-break-glass}"
 admin_csrf=""
@@ -61,7 +63,7 @@ dev_tab() { # prints the tab id of an open dev tab, if any
 
 # Containers, builds, migrations and a gateway token; writes .dev/env for `run`.
 prepare() {
-  local ports=(4000 4001 5173 8091 9100 9110 9120 9464 9465 9466 50051)
+  local ports=(4000 4001 4002 4003 5173 8091 9100 9110 9120 9464 9465 9466 9468 9470 50051)
   if [[ $openwebui == 1 ]]; then
     # A previous run's container is replaced below; drop it before checking the port.
     docker rm -f "$openwebui_name" >/dev/null 2>&1 || true
@@ -80,18 +82,25 @@ prepare() {
   log "starting dev Postgres and Valkey"
   "$root/scripts/dev-db.sh" up
   docker compose -f "$root/deploy/dev/compose.yaml" up -d --wait redis
-  if [[ $sso == 1 ]]; then
+  case $authz in
+    builtin | openfga) ;;
+    *) die "DEV_AUTHZ=$authz: use builtin or openfga" ;;
+  esac
+  # OpenFGA runs only when it is the authorization backend.
+  if [[ $authz == openfga ]]; then
     log "starting Keycloak and OpenFGA"
-    "$root/scripts/dev-idp.sh" up | grep '^export ' >>"$env"
-    {
-      echo "export LUMEWARP_PUBLIC_URL=$ui_url"
-      echo "export LUMEWARP_SESSION_COOKIE_SECURE=false"
-      echo "export LUMEWARP_SECRET_KEY=dev-only-lumewarp-secret-key-0123456789abcdef"
-      if [[ $authz == openfga ]]; then echo "export LUMEWARP_AUTHZ_BACKEND=openfga"; fi
-    } >>"$env"
-  elif [[ $authz != builtin ]]; then
-    die "DEV_AUTHZ=$authz needs DEV_SSO=1"
+    with_openfga=1
+  else
+    log "starting Keycloak"
+    with_openfga=0
   fi
+  DEV_IDP_OPENFGA=$with_openfga "$root/scripts/dev-idp.sh" up | grep '^export ' >>"$env"
+  {
+    echo "export LUMEWARP_PUBLIC_URL=$ui_url"
+    echo "export LUMEWARP_SESSION_COOKIE_SECURE=false"
+    echo "export LUMEWARP_SECRET_KEY=dev-only-lumewarp-secret-key-0123456789abcdef"
+    if [[ $authz == openfga ]]; then echo "export LUMEWARP_AUTHZ_BACKEND=openfga"; fi
+  } >>"$env"
 
   log "building mock upstream, example MCP/A2A servers and gateway"
   cargo build --release -q --bins --manifest-path "$root/bench/mock-upstream/Cargo.toml"
@@ -117,9 +126,10 @@ prepare() {
     uv sync -q
     uv run -q lumewarp-control-plane migrate
   )
-  local token
-  token="$(cd "$root/control-plane" && uv run -q lumewarp-control-plane bootstrap \
-    --name gw-dev 2>/dev/null)"
+  command -v openssl >/dev/null || die "openssl is required to generate the development zone tokens"
+  local default_token prod_token
+  default_token="$(openssl rand -base64 48 | tr -d '\n')"
+  prod_token="$(openssl rand -base64 48 | tr -d '\n')"
   {
     echo "export LUMEWARP_DEV_MODE=true"
     echo "export LUMEWARP_PLAYGROUND_GATEWAY_URL=http://127.0.0.1:4000"
@@ -127,7 +137,8 @@ prepare() {
     echo "export LUMEWARP_ENCRYPTION_KEY=dev-only-lumewarp-encryption-key-0123456789"
     printf 'export LUMEWARP_BREAK_GLASS_PASSWORD=%q\n' "$break_glass_password"
     echo "export LUMEWARP_INITIAL_ADMIN_EMAIL=alice@example.com"
-    echo "export LUMEWARP_GATEWAY_TOKEN=$token"
+    echo "export LUMEWARP_GATEWAY_ZONE_DEFAULT_TOKEN=$default_token"
+    echo "export LUMEWARP_GATEWAY_ZONE_PROD_TOKEN=$prod_token"
     # Without an id key the gateway answers 503 on /mcp and /a2a.
     echo "export LUMEWARP_GATEWAY_ID_KEY=ZGV2LW9ubHktbHVtZXdhcnAtZ2F0ZXdheS1pZC1rZXktMDEyMzQ1Njc4OQ=="
     echo "export LUMEWARP_GATEWAY_PUBLIC_URL=http://127.0.0.1:4000"
@@ -138,7 +149,7 @@ prepare() {
   } >>"$env"
   # Listeners of each gateway (`--local-config`).
   local n listen admin
-  for n in 1 2; do
+  for n in 1 2 3 4; do
     listen=$((3999 + n)) admin=$((9462 + 2 * n))
     printf "server:\n  listen: '127.0.0.1:%s'\n  admin_listen: '127.0.0.1:%s'\n" \
       "$listen" "$admin" >"$state/gateway$n.yaml"
@@ -193,7 +204,7 @@ openwebui_up() {
     -v lumewarp-dev-openwebui:/app/backend/data "$openwebui_image" >/dev/null
 }
 
-run_service() { # mock | mcp | a2a | cp | gw | gw2 | ui
+run_service() { # mock | mcp | a2a | cp | gw | gw2 | gw3 | gw4 | ui
   # shellcheck source=/dev/null
   source "$state/env"
   case "$1" in
@@ -201,13 +212,16 @@ run_service() { # mock | mcp | a2a | cp | gw | gw2 | ui
     mcp) exec "$root/bench/mock-upstream/target/release/mcp-a2a-mock" mcp --listen 127.0.0.1:9110 ;;
     a2a) exec "$root/bench/mock-upstream/target/release/mcp-a2a-mock" a2a --listen 127.0.0.1:9120 ;;
     cp) cd "$root/control-plane" && exec uv run lumewarp-control-plane serve ;;
-    gw | gw2)
-      local n=1
-      [[ $1 == gw2 ]] && n=2
+    gw | gw2 | gw3 | gw4)
+      # gw and gw2 serve zone `default`, gw3 and gw4 zone `prod`.
+      local n=${1#gw} zone=default
+      [[ -n $n ]] || n=1
+      ((n <= 2)) || zone=prod
+      local token_env="LUMEWARP_GATEWAY_ZONE_${zone^^}_TOKEN"
       wait_http "$cp_url/healthz" "control plane" # avoids connect-retry warnings at startup
       exec "$root/gateway/target/release/lumewarp" --control-plane http://127.0.0.1:50051 \
-        --gateway-token-env LUMEWARP_GATEWAY_TOKEN --state-dir "$state/gateway$n" \
-        --scope default --local-config "$state/gateway$n.yaml"
+        --gateway-token-env "$token_env" --state-dir "$state/gateway$n" \
+        --zone "$zone" --local-config "$state/gateway$n.yaml"
       ;;
     ui) exec pnpm --dir "$root/ui" dev --host 127.0.0.1 --port 5173 --strictPort ;;
     *) die "unknown service: $1" ;;
@@ -237,22 +251,34 @@ seed() {
   fi
   [[ $(api GET /upstreams | jq '.items | length') == 0 ]] || return 0
   log "seeding demo upstream, model, router, alias, team and key"
-  local org up model router team sa
+  local org model router team sa
   org="$(api GET /orgs | jq -r '.items | map(select(.name == "default")) | first | .id // empty')"
   [[ -n "$org" ]] || org="$(api POST /orgs '{"name":"default"}' | jq -r .id)"
-  up="$(api POST /upstreams '{"name":"mock","kind":"openai_compatible","base_url":"http://127.0.0.1:9100/v1"}' | jq -r .id)"
-  model="$(api POST /models "{\"name\":\"mock-local\",\"upstream_id\":\"$up\",\"upstream_model\":\"mock\",\"model_type\":\"llm\"}" | jq -r .id)"
+  api PATCH /zones/prod \
+    '{"name":"Production","color":"blue","playground_gateway_url":"http://127.0.0.1:4002"}' >/dev/null
+  model="$(api POST /models '{"name":"mock-local","model_type":"llm"}' | jq -r .id)"
+  local zone up
+  for zone in default prod; do
+    up="$(api POST /upstreams "{\"name\":\"mock-$zone\",\"zone\":\"$zone\",\"kind\":\"openai_compatible\",\"base_url\":\"http://127.0.0.1:9100/v1\"}" | jq -r .id)"
+    api PUT "/models/$model/deployments/$zone" \
+      "{\"upstream_id\":\"$up\",\"upstream_model\":\"mock\"}" >/dev/null
+  done
   router="$(api POST /routers "{\"name\":\"demo\",\"members\":[{\"model_id\":\"$model\"}]}" | jq -r .id)"
   api POST /aliases "{\"name\":\"demo-latest\",\"target\":\"$router\"}" >/dev/null
   team="$(api POST /teams "{\"name\":\"demo\",\"org_id\":\"$org\",\"model_access\":\"all\"}" | jq -r .id)"
   sa="$(api POST "/teams/$team/service-accounts" '{"name":"chat"}' | jq -r .id)"
   api POST "/teams/$team/keys" "{\"name\":\"demo\",\"service_account_id\":\"$sa\"}" \
     | jq -r .secret >"$state/demo-key"
+  api POST "/teams/$team/keys" \
+    "{\"name\":\"demo-prod\",\"zone\":\"prod\",\"service_account_id\":\"$sa\"}" \
+    | jq -r .secret >"$state/demo-key-prod"
 }
 
 summary() { # stop hint
   wait_http "http://127.0.0.1:9464/readyz" "gateway"
   wait_http "http://127.0.0.1:9466/readyz" "second gateway"
+  wait_http "http://127.0.0.1:9468/readyz" "third gateway"
+  wait_http "http://127.0.0.1:9470/readyz" "fourth gateway"
   wait_http "$ui_url" "UI"
   wait_http "http://127.0.0.1:9110/_mock/headers" "example MCP server"
   wait_http "http://127.0.0.1:9120/health" "example A2A agent"
@@ -272,12 +298,13 @@ summary() { # stop hint
   UI        $ui_url   (SSO: alice/bob/carol; alice becomes proxy_admin on first login)
   Emergency login uses LUMEWARP_BREAK_GLASS_PASSWORD (development default configured).
   API       $cp_url/api/v1
-  gateway   http://127.0.0.1:4000/v1 and http://127.0.0.1:4001/v1   (names: mock-local, demo, demo-latest)
-            two gateways sharing rate limits through Valkey 127.0.0.1:56379
+  gateway   zone default: http://127.0.0.1:4000/v1 and :4001/v1   (key .dev/demo-key)
+            zone prod:    http://127.0.0.1:4002/v1 and :4003/v1   (key .dev/demo-key-prod)
+            names: mock-local, demo, demo-latest; each zone's pair shares rate limits through Valkey
   MCP       http://127.0.0.1:9110/mcp   (example upstream; control /_mock/)
   A2A       http://127.0.0.1:9120/a2a   (agent card /.well-known/agent-card.json)
-  metrics   http://127.0.0.1:9464/metrics and :9466/metrics (gateways), http://127.0.0.1:9465/metrics (CP)
-  Demo API key is stored in .dev/demo-key (not printed).
+  metrics   http://127.0.0.1:9464, :9466, :9468, :9470/metrics (gateways), http://127.0.0.1:9465/metrics (CP)
+  Demo API keys are stored in .dev/demo-key and .dev/demo-key-prod (not printed).
 $webui
   $1
 
@@ -286,12 +313,12 @@ EOF
 
 case "${1:-all}" in
   run)
-    run_service "${2:?usage: $0 run mock|mcp|a2a|cp|gw|ui}"
+    run_service "${2:?usage: $0 run mock|mcp|a2a|cp|gw|gw2|gw3|gw4|ui}"
     ;;
   all)
     prepare
     trap 'trap - EXIT INT TERM; log stopping; kill 0 2>/dev/null || true' EXIT INT TERM
-    for svc in mock mcp a2a cp gw gw2 ui; do
+    for svc in mock mcp a2a cp gw gw2 gw3 gw4 ui; do
       ("$self" run "$svc" 2>&1 | sed -u "s/^/[$svc] /") &
     done
     seed
@@ -318,7 +345,7 @@ case "${1:-all}" in
       exit 0
     fi
     prepare
-    # Layout: this pane (setup + summary) | cp, gw, gw2 on the right; mock and ui below this one.
+    # Layout: this pane (setup + summary) | cp, gw..gw4 on the right; mock and ui below this one.
     split() { # pane, direction, service -> new pane id
       local id
       id="$(herdr pane split "$1" --direction "$2" --no-focus --cwd "$root" \
@@ -329,7 +356,9 @@ case "${1:-all}" in
     me="$HERDR_PANE_ID"
     cp_pane="$(split "$me" right cp)"
     gw_pane="$(split "$cp_pane" down gw)"
-    split "$gw_pane" down gw2 >/dev/null
+    gw2_pane="$(split "$gw_pane" down gw2)"
+    gw3_pane="$(split "$gw2_pane" down gw3)"
+    split "$gw3_pane" down gw4 >/dev/null
     mock_pane="$(split "$me" down mock)"
     ui_pane="$(split "$mock_pane" right ui)"
     mcp_pane="$(split "$ui_pane" down mcp)"

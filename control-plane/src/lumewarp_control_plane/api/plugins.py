@@ -11,7 +11,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query
 
-from lumewarp_control_plane.api.common import SessionDep, SettingsDep
+from lumewarp_control_plane.api.common import SessionDep, SettingsDep, default_zone
 from lumewarp_control_plane.api.schemas import Page, PluginGatewayOut, PluginOut
 from lumewarp_control_plane.authz import Action, Authz
 from lumewarp_control_plane.compiler.plugins import load_plugins
@@ -29,6 +29,7 @@ async def list_plugins(
         PluginKind | None,
         Query(description="Only this kind; omitted lists all three."),
     ] = None,
+    zone: Annotated[str | None, Query(description="Config zone to inspect.")] = None,
 ) -> Page[PluginOut]:
     """The plugins a write may name, and which connected gateways have each.
 
@@ -38,13 +39,15 @@ async def list_plugins(
     the gateway's own `configure` validates those settings.
     """
     await authz.require(Action.ROUTING_READ)
-    registry = await load_plugins(session, settings.scope)
+    zone = zone or default_zone(settings)
+    registry = await load_plugins(session, zone)
     items = []
     for current_kind in [kind] if kind is not None else list(PluginKind):
         for name in registry.names(current_kind):
             current = registry.current(current_kind, name) or {}
             items.append(
                 PluginOut(
+                    zone=zone,
                     kind=current_kind,
                     name=name,
                     title=current.get("title", ""),

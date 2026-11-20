@@ -21,17 +21,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from lumewarp_control_plane import audit
 from lumewarp_control_plane.models import (
     ActorType,
-    Org,
     OrgBudgetWindow,
     ScopeType,
     Team,
     UsageTotal,
+    ZoneLimit,
 )
 from lumewarp_control_plane.windows import month_window
 
 
 async def reset_org_budget_window(
-    session: AsyncSession, org_id: uuid.UUID, window_start: datetime
+    session: AsyncSession, zone: str, org_id: uuid.UUID, window_start: datetime
 ) -> None:
     """Forget that an org already reported a crossing in this month.
 
@@ -43,6 +43,7 @@ async def reset_org_budget_window(
     """
     await session.execute(
         delete(OrgBudgetWindow).where(
+            OrgBudgetWindow.zone == zone,
             OrgBudgetWindow.org_id == org_id,
             OrgBudgetWindow.window_start == window_start,
         )
@@ -52,14 +53,15 @@ async def reset_org_budget_window(
 async def enforce_org_budgets(
     session: AsyncSession,
     gateway_id: str,
+    zone: str,
     team_ids: set[uuid.UUID],
     window_start: datetime,
 ) -> bool:
-    """Mark newly exceeded orgs for `window_start`; return whether one flipped this month.
+    """Mark newly exceeded orgs in `zone` for `window_start`; whether one flipped this month.
 
     `gateway_id` is the reporting process, used only as the audit actor. `team_ids` are the
     teams whose totals this ingest changed; only their orgs are checked. An org without a
-    budget is never read. The event timestamp has already
+    budget in this zone is never read. The event timestamp has already
     selected the window (`_add_totals`), so a late previous-month event is judged against
     its own month and never blocks the current one: it still records its window row and
     audit, but only a current-month crossing asks for a recompile.
@@ -68,9 +70,14 @@ async def enforce_org_budgets(
         return False
     orgs = (
         await session.execute(
-            select(Org.id, Org.budget_nano_usd)
-            .join(Team, Team.org_id == Org.id)
-            .where(Team.id.in_(team_ids), Org.budget_nano_usd.isnot(None))
+            select(ZoneLimit.org_id, ZoneLimit.budget_nano_usd)
+            .join(Team, Team.org_id == ZoneLimit.org_id)
+            .where(
+                ZoneLimit.zone == zone,
+                ZoneLimit.org_id.is_not(None),
+                ZoneLimit.budget_nano_usd.isnot(None),
+                Team.id.in_(team_ids),
+            )
             .distinct()
         )
     ).all()
@@ -81,6 +88,7 @@ async def enforce_org_budgets(
             .select_from(UsageTotal)
             .join(Team, Team.id == UsageTotal.scope_id)
             .where(
+                UsageTotal.zone == zone,
                 UsageTotal.scope_type == ScopeType.TEAM,
                 UsageTotal.window_start == window_start,
                 Team.org_id == org_id,
@@ -90,9 +98,13 @@ async def enforce_org_budgets(
             continue
         inserted = await session.scalar(
             pg_insert(OrgBudgetWindow)
-            .values(org_id=org_id, window_start=window_start)
+            .values(zone=zone, org_id=org_id, window_start=window_start)
             .on_conflict_do_nothing(
-                index_elements=[OrgBudgetWindow.org_id, OrgBudgetWindow.window_start]
+                index_elements=[
+                    OrgBudgetWindow.zone,
+                    OrgBudgetWindow.org_id,
+                    OrgBudgetWindow.window_start,
+                ]
             )
             .returning(OrgBudgetWindow.org_id)
         )
@@ -103,7 +115,7 @@ async def enforce_org_budgets(
         audit.record(
             session,
             actor_type=ActorType.SYSTEM,
-            actor_id=f"usage:{gateway_id}",
+            actor_id=f"usage:{gateway_id}" if gateway_id else "usage",
             action="budget.hard_exceeded",
             resource_type=ScopeType.ORG.value,
             resource_id=org_id,
@@ -111,6 +123,7 @@ async def enforce_org_budgets(
             # Deliberately not attached to the team whose batch happened to cross it.
             team_id=None,
             details={
+                "zone": zone,
                 "window_start": window_start.isoformat(),
                 "spent_nano_usd": spent,
                 "budget_nano_usd": budget,

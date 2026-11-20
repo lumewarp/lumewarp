@@ -20,7 +20,6 @@ from lumewarp_control_plane.mcp import discover, hashing
 from lumewarp_control_plane.models import (
     AuditLog,
     GatewaySession,
-    GatewayToken,
     McpDefinition,
     McpDefinitionKind,
     McpDefinitionState,
@@ -84,7 +83,6 @@ async def gateway(committed: AsyncSession, api_scope: str) -> AsyncIterator:
 
     yield report
     await committed.rollback()
-    await committed.execute(delete(GatewayToken).where(GatewayToken.name.like(f"{PREFIX}%")))
     await committed.execute(
         delete(GatewaySession).where(GatewaySession.gateway_id.like(f"{PREFIX}%"))
     )
@@ -789,7 +787,7 @@ async def test_discover_records_nothing_when_the_config_changed_in_flight(
                 for name, value in change.items():
                     setattr(row, name, value)
                 row.config_revision = await outbox.enqueue_recompile(
-                    other, api_settings.scope, "test.in_flight_edit"
+                    other, "test.in_flight_edit", api_settings.zone
                 )
             return await base.handle_async_request(request)
 

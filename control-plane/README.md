@@ -16,7 +16,7 @@ Everything about running and administering it is in the manual:
 | [Control-plane quick start](../docs/guide/quickstart-control-plane.md) | Postgres, the Admin UI and a gateway that follows it. |
 | [Control plane settings](../docs/operations/control-plane.md) | Requirements, ports, readiness, CLI, every setting, the Admin UI build. |
 | [Sign-in and authorization](../docs/operations/identity.md) | Credentials, OIDC, break-glass, authorization backends, the key reconciler. |
-| [Administration](../docs/admin/index.md) | Roles, tenancy, keys and limits, the catalog, routers, usage and audit, config versions. |
+| [Administration](../docs/admin/index.md) | Roles, [zones](../docs/admin/zones.md), tenancy, keys and limits, the catalog, routers, usage and audit, config versions. |
 | [Control plane API](../docs/reference/control-plane-api.md) | The OpenAPI document (`python -m lumewarp_control_plane openapi`). |
 | [Python plugins](../docs/extending/python-plugins.md) | `lumewarp.auth` and `lumewarp.authz`. |
 | [Config stream protocol](../docs/config-protocol.md) | The gRPC contract with the gateway. |
@@ -36,17 +36,26 @@ Tests create `lumewarp_test_<random>` on the server from `LUMEWARP_TEST_DATABASE
 
 ### Schema changes
 
-The history is one baseline, `20261106_0001_baseline.py`, generated from `models.py`:
-Lumewarp has never been deployed, so there is no upgrade path from an earlier revision and
-no data-preserving migration code. Edit `models.py`, then with the dev database at head:
+The database baseline has been rebuilt to include zones. An existing development database
+from the previous schema must be dropped and recreated; the current baseline is not an
+in-place migration for that database. The rebuilt baseline is
+`20261106_0001_baseline.py`. Until it is frozen for a release it may be regenerated; after
+that, every schema change is a new revision that preserves existing rows (backfill a new
+required column, for instance with a server default). Never edit a revision that shipped in
+a release. Downgrades are not supported: `downgrade()` raises, and going back means
+restoring a database backup.
+
+Edit `models.py`, then with the dev database at head:
 
 ```sh
 uv run alembic revision --autogenerate -m "what changed"
 ```
 
-Review the generated file (autogenerate duplicates enum CHECK constraints; keep the ones on
-the `sa.Enum` columns). `tests/test_migrations.py::test_models_match_migrations` fails if
-models and migrations drift.
+Review the generated file: autogenerate does not compare CHECK constraints, so add, replace
+or drop them yourself, and make sure existing rows satisfy the new ones.
+`tests/test_migrations.py::test_models_match_migrations` fails if models and migrations
+drift. `tests/test_migration_upgrade.py` verifies that downgrade is refused; there is no
+in-place migration path from the previous development schema.
 
 ### Protobuf
 

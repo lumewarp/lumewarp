@@ -21,7 +21,6 @@ from lumewarp_control_plane.models import (
     Model,
     ModelAccess,
     RequestOutcome,
-    Scope,
     ScopeType,
     Team,
     TeamMember,
@@ -31,6 +30,9 @@ from lumewarp_control_plane.models import (
     UsageEvent,
     UsageState,
     UsageTotal,
+    Zone,
+    ZoneLimit,
+    ZoneMemberDefaults,
 )
 from tests import factories
 
@@ -48,6 +50,7 @@ def _event(request_id: uuid.UUID, ids, cost: int = 100) -> dict:
     return dict(
         request_id=request_id,
         gateway_id="gw-1",
+        zone="default",
         ts=datetime(2026, 10, 22, tzinfo=UTC),
         key_id=uuid.uuid4(),
         team_id=team.id,
@@ -97,13 +100,14 @@ async def test_usage_events_reject_negative(session: AsyncSession) -> None:
 
 
 async def test_usage_totals_primary_key_and_upsert(session: AsyncSession) -> None:
+    await factories.ensure_zone(session, "default")
     scope_id = uuid.uuid4()
     window = datetime(2026, 10, 1, tzinfo=UTC)
-    key = dict(scope_type=ScopeType.TEAM, scope_id=scope_id, window_start=window)
+    key = dict(zone="default", scope_type=ScopeType.TEAM, scope_id=scope_id, window_start=window)
 
     upsert = insert(UsageTotal).values(**key, cost_nano_usd=10, request_count=1)
     upsert = upsert.on_conflict_do_update(
-        index_elements=["scope_type", "scope_id", "window_start"],
+        index_elements=["zone", "scope_type", "scope_id", "window_start"],
         set_={
             "cost_nano_usd": UsageTotal.cost_nano_usd + upsert.excluded.cost_nano_usd,
             "request_count": UsageTotal.request_count + upsert.excluded.request_count,
@@ -151,8 +155,12 @@ async def test_allowlist_modes(session: AsyncSession) -> None:
 
 async def test_budget_and_limit_checks(session: AsyncSession) -> None:
     org = await factories.make_org(session)
-    await _fails(session, Team(name="t2", org_id=org.id, rpm_limit=0))
-    await _fails(session, Team(name="t3", org_id=org.id, budget_nano_usd=-1))
+    await _fails(session, ZoneLimit(zone="default", org_id=org.id, rpm_limit=0))
+    await _fails(session, ZoneLimit(zone="default", org_id=org.id, budget_nano_usd=-1))
+    await _fails(
+        session,
+        ZoneMemberDefaults(zone="default", team_id=uuid.uuid4(), max_parallel=0),
+    )
 
 
 async def test_service_account_key_must_match_team(session: AsyncSession) -> None:
@@ -224,7 +232,14 @@ async def test_user_email_case_insensitive_unique(session: AsyncSession) -> None
 
 
 async def test_routing_checks(session: AsyncSession) -> None:
-    up = Upstream(name="u", kind=UpstreamKind.VLLM, base_url="http://x/v1", api_key_ref="VLLM_KEY")
+    await factories.ensure_zone(session, "default")
+    up = Upstream(
+        name="u",
+        zone="default",
+        kind=UpstreamKind.VLLM,
+        base_url="http://x/v1",
+        api_key_ref="VLLM_KEY",
+    )
     session.add(up)
     await session.flush()
     await _fails(
@@ -232,13 +247,18 @@ async def test_routing_checks(session: AsyncSession) -> None:
         Model(
             name="d1",
             model_type="llm",
-            upstream_id=up.id,
-            upstream_model="m",
             price_input_nano_usd_per_mtok=1,
         ),
     )
     await _fails(
-        session, Upstream(name="u2", kind=UpstreamKind.OPENAI, base_url="x", api_key_ref="$(rm)")
+        session,
+        Upstream(
+            name="u2",
+            zone="default",
+            kind=UpstreamKind.OPENAI,
+            base_url="x",
+            api_key_ref="$(rm)",
+        ),
     )
 
 
@@ -248,7 +268,7 @@ async def test_routing_checks(session: AsyncSession) -> None:
 async def _version(session: AsyncSession, version: int = 1) -> ConfigVersion:
     payload = b"snapshot"
     row = ConfigVersion(
-        scope="default",
+        zone="default",
         version=version,
         payload=payload,
         digest=hashlib.sha256(payload).digest(),
@@ -263,9 +283,9 @@ async def _version(session: AsyncSession, version: int = 1) -> ConfigVersion:
 
 
 async def test_config_versions_immutable(session: AsyncSession) -> None:
-    await factories.scope(session)
+    await factories.zone(session)
     await _version(session)
-    where = (ConfigVersion.scope == "default") & (ConfigVersion.version == 1)
+    where = (ConfigVersion.zone == "default") & (ConfigVersion.version == 1)
     for values in ({"payload": b"other"}, {"source_revision": 9}, {"digest": b"\x01" * 32}):
         with pytest.raises(DBAPIError, match="immutable"):
             async with session.begin_nested():
@@ -281,24 +301,24 @@ async def test_config_versions_immutable(session: AsyncSession) -> None:
         async with session.begin_nested():
             await session.execute(
                 update(ConfigVersion)
-                .where((ConfigVersion.scope == "default") & (ConfigVersion.version == 2))
+                .where((ConfigVersion.zone == "default") & (ConfigVersion.version == 2))
                 .values(payload=None)
             )
 
 
 async def test_enqueue_recompile(session: AsyncSession) -> None:
-    await factories.scope(session)
-    r1 = await outbox.enqueue_recompile(session, "default", "team.create")
-    r2 = await outbox.enqueue_recompile(session, "default", "key.revoke")
+    await factories.zone(session)
+    r1 = await outbox.enqueue_recompile(session, "team.create", "default")
+    r2 = await outbox.enqueue_recompile(session, "key.revoke", "default")
     assert r2 == r1 + 1
     rows = (await session.execute(select(ConfigOutbox).order_by(ConfigOutbox.id))).scalars().all()
     assert [(r.reason, r.source_revision, r.status.value) for r in rows] == [
         ("team.create", r1, "pending"),
         ("key.revoke", r2, "pending"),
     ]
-    assert (await session.get(Scope, "default")).source_revision == r2
+    assert (await session.get(Zone, "default")).source_revision == r2
     with pytest.raises(LookupError):
-        await outbox.enqueue_recompile(session, "nope", "x")
+        await outbox.enqueue_recompile(session, "x", "nope")
 
 
 async def test_audit_records_only_allowlisted_details(session: AsyncSession) -> None:

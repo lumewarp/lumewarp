@@ -22,7 +22,7 @@ use serde_json::{value::RawValue, Map, Value};
 pub const RESERVED_KEYS: [&str; 3] = ["model", "stream", "stream_options"];
 const MAX_REASONING_LEVELS: usize = 16;
 
-fn valid_reasoning_level(level: &str) -> bool {
+pub fn valid_reasoning_level(level: &str) -> bool {
     (1..=32).contains(&level.len())
         && level.as_bytes()[0].is_ascii_alphanumeric()
         && level
@@ -337,6 +337,65 @@ fn invalid(message: &str) -> Rejected {
     }
 }
 
+/// Adds a router's default `reasoning_effort` when the client sent no level.
+///
+/// Runs before the serving member's `Transform`, so a mapped member maps the
+/// injected level, a strip member removes it and a passthrough member forwards
+/// it. The body is returned untouched when the client already sent a value.
+pub fn inject_reasoning_default(
+    body: Bytes,
+    endpoint: usize,
+    level: &str,
+) -> Result<Bytes, Rejected> {
+    let text = std::str::from_utf8(&body).map_err(|_| invalid("Invalid JSON request object"))?;
+    let mut entries = Entries::parse(text)?;
+    let injected = if crate::endpoint::ENDPOINTS[endpoint].label == "responses" {
+        let reasoning = match entries.get("reasoning") {
+            None => None,
+            Some(raw) if raw.trim() == "null" => None,
+            Some(raw) if raw.trim_start().starts_with('{') => Some(raw.to_owned()),
+            // Not a reasoning object: the client sent something else, leave it.
+            Some(_) => return Ok(body),
+        };
+        match reasoning {
+            None => {
+                entries.set("reasoning", reasoning_object(level));
+                true
+            }
+            Some(raw) => {
+                let mut nested = Entries::parse(&raw)?;
+                if nested.get("effort").is_some_and(|v| v.trim() != "null") {
+                    false
+                } else {
+                    nested.set("effort", Value::String(level.into()).to_string());
+                    entries.set("reasoning", nested.encode().into_owned());
+                    true
+                }
+            }
+        }
+    } else {
+        match entries.get(REASONING_FIELD) {
+            Some(raw) if raw.trim() != "null" => false,
+            _ => {
+                entries.set(REASONING_FIELD, Value::String(level.into()).to_string());
+                true
+            }
+        }
+    };
+    if !injected {
+        return Ok(body);
+    }
+    Ok(Bytes::from(entries.encode().into_owned()))
+}
+
+fn reasoning_object(level: &str) -> String {
+    Value::Object(Map::from_iter([(
+        "effort".into(),
+        Value::String(level.into()),
+    )]))
+    .to_string()
+}
+
 /// `over` wins; objects on both sides merge recursively.
 fn merge_values(base: &mut Map<String, Value>, over: &Map<String, Value>) {
     for (key, value) in over {
@@ -389,6 +448,14 @@ impl<'a> Entries<'a> {
 
     fn remove(&mut self, key: &str) {
         self.0.retain(|(k, _)| k != key);
+    }
+
+    /// Replaces the last occurrence, or appends when there is none.
+    fn set(&mut self, key: &str, value: String) {
+        match self.0.iter().rposition(|(k, _)| k == key) {
+            Some(index) => self.0[index].1 = Cow::Owned(value),
+            None => self.0.push((key.into(), Cow::Owned(value))),
+        }
     }
 
     fn reasoning_level(&self) -> Result<Option<Cow<'_, str>>, Rejected> {
@@ -756,5 +823,53 @@ mod tests {
         for bad in [r#"{"model":"x""#, r#"{"model":"x"} trailing"#, r#"[1]"#] {
             assert_eq!(run(&m, bad).unwrap_err().reason, "invalid_body", "{bad}");
         }
+    }
+
+    fn inject(endpoint: usize, body: &str) -> String {
+        let body =
+            inject_reasoning_default(Bytes::copy_from_slice(body.as_bytes()), endpoint, "low")
+                .unwrap();
+        String::from_utf8(body.to_vec()).unwrap()
+    }
+
+    #[test]
+    fn router_default_fills_missing_and_null_levels() {
+        for body in [
+            r#"{"model":"m"}"#,
+            r#"{"model":"m","reasoning_effort":null}"#,
+        ] {
+            let out = json(&inject(0, body));
+            assert_eq!(out["reasoning_effort"], "low", "{body}");
+        }
+        // A client value wins and is returned byte for byte.
+        let body = r#"{ "model":"m", "reasoning_effort":"high" }"#;
+        assert_eq!(inject(0, body), body);
+        let out = json(&inject(0, r#"{"model":"m","reasoning_effort":"high"}"#));
+        assert_eq!(out["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn router_default_fills_the_responses_reasoning_object() {
+        let out = json(&inject(3, r#"{"model":"m"}"#));
+        assert_eq!(out["reasoning"]["effort"], "low");
+
+        let out = json(&inject(
+            3,
+            r#"{"model":"m","reasoning":{"effort":null,"summary":"auto"}}"#,
+        ));
+        assert_eq!(out["reasoning"]["effort"], "low");
+        assert_eq!(out["reasoning"]["summary"], "auto");
+
+        let body = r#"{"model":"m","reasoning":{"effort":"high","summary":"auto"}}"#;
+        assert_eq!(inject(3, body), body);
+        let out = json(&inject(3, body));
+        assert_eq!(out["reasoning"]["effort"], "high");
+        assert_eq!(out["reasoning"]["summary"], "auto");
+    }
+
+    #[test]
+    fn router_default_leaves_a_non_object_reasoning_value_alone() {
+        let body = r#"{"model":"m","reasoning":"high"}"#;
+        assert_eq!(inject(3, body), body);
     }
 }

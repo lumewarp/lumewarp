@@ -1,7 +1,7 @@
-import { Trash2Icon, UserCheckIcon, UserXIcon } from "lucide-react";
+import { CrownIcon, ShieldMinusIcon, ShieldPlusIcon, Trash2Icon, UserCheckIcon, UserXIcon } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { api, type Schemas, type User } from "../api";
+import { api, type InstallationAdmin, type Schemas, type User } from "../api";
 import { Badge, PageHeader } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
 import { FormDialog, required, TextField, useForm } from "../components/Form";
@@ -11,7 +11,7 @@ import { DataTable } from "../components/Table";
 import { useMe, useMut } from "../hooks";
 
 type Values = Schemas["UserCreate"];
-type ConfirmationKind = "activate" | "deactivate" | "delete";
+type ConfirmationKind = "activate" | "deactivate" | "delete" | "make-admin" | "remove-admin" | "transfer";
 
 const PAGE_SIZE = 50;
 const blank: Values = { email: "", display_name: "", is_active: true };
@@ -27,6 +27,14 @@ export function Users() {
     queryFn: () => api.usersPage(cursor),
     enabled: !!me.data?.is_admin,
   });
+  // Installation admins are few: one list, joined to the user rows by id.
+  const admins = useQuery({
+    queryKey: ["installation-admins"],
+    queryFn: () => api.installationAdmins(),
+    enabled: !!me.data?.is_admin,
+  });
+  const roleOf = new Map<string, InstallationAdmin>((admins.data ?? []).map((row) => [row.user_id, row]));
+  const canTransfer = me.data?.installation_role === "proxy_admin" || me.data?.kind === "break_glass";
   const form = useForm<Values>(blank, { email: required("Email") });
   const create = useMut((values: Values) => api.createUser(values), "User created");
   const update = useMut(
@@ -35,6 +43,9 @@ export function Users() {
     "User updated",
   );
   const remove = useMut((user: User) => api.deleteUser(user.id), "User deleted");
+  const makeAdmin = useMut((user: User) => api.assignInstallationAdmin(user.id), "Installation admin added");
+  const removeAdmin = useMut((user: User) => api.removeInstallationAdmin(user.id), "Installation admin removed");
+  const transfer = useMut((user: User) => api.transferProxyAdmin(user.id), "Proxy admin transferred");
 
   if (me.isPending) return <div className="p-8 text-center text-muted-foreground" aria-busy="true">Loading user access…</div>;
   if (me.error) return <Alert variant="destructive"><AlertDescription>{me.error.message}</AlertDescription></Alert>;
@@ -48,32 +59,41 @@ export function Users() {
   };
   const next = users.data?.next_cursor ?? undefined;
   const confirmation = confirming;
-  const confirmMessage = confirmation
-    ? confirmation.kind === "deactivate"
-      ? `Deactivate ${confirmation.user.email}? This suspends the user’s API keys.`
-      : confirmation.kind === "activate"
-        ? `Reactivate ${confirmation.user.email}?`
-        : `Delete ${confirmation.user.email}? If the user owns keys, the API will reject deletion and show why.`
-    : "";
-  const confirmLabel =
-    confirmation?.kind === "delete"
-      ? "Delete"
-      : confirmation?.kind === "deactivate"
-        ? "Deactivate"
-        : "Reactivate";
+  const isMe = (user: User) => user.id === me.data?.user_id;
+  const texts: Record<ConfirmationKind, (user: User) => { title: string; label: string; message: string }> = {
+    deactivate: (user) => ({ title: "Deactivate user", label: "Deactivate", message: `Deactivate ${user.email}? This suspends the user’s API keys.` }),
+    activate: (user) => ({ title: "Reactivate user", label: "Reactivate", message: `Reactivate ${user.email}?` }),
+    delete: (user) => ({ title: "Delete user", label: "Delete", message: `Delete ${user.email}? If the user owns keys, the API will reject deletion and show why.` }),
+    "make-admin": (user) => ({ title: "Make installation admin", label: "Make admin", message: `Make ${user.email} an installation admin? They can then manage the whole installation.` }),
+    "remove-admin": (user) => ({
+      title: "Remove installation admin",
+      label: "Remove admin",
+      message: `Remove ${user.email} as an installation admin?${isMe(user) ? " You will lose installation access." : ""}`,
+    }),
+    transfer: (user) => ({
+      title: "Transfer proxy_admin",
+      label: "Transfer",
+      message: `${user.email} becomes the proxy_admin and the current proxy_admin becomes an admin. The new proxy_admin's personal access tokens are revoked.`,
+    }),
+  };
+  const confirmText = confirmation ? texts[confirmation.kind](confirmation.user) : null;
 
   return (
     <>
       <PageHeader
         title="Users"
-        hint="Installation admin roles are managed in Postgres."
+        hint="Installation admins manage the whole installation; the proxy_admin is the highest role and moves only through a transfer."
         actions={<CreateButton can onClick={() => { form.reset(); setCreating(true); }}>New user</CreateButton>}
       />
+
       <DataTable
         rows={users.data?.items}
         loading={users.isPending}
-        error={users.error}
-        onRetry={() => void users.refetch()}
+        error={users.error ?? admins.error}
+        onRetry={() => {
+          void users.refetch();
+          void admins.refetch();
+        }}
         rowKey={(user) => user.id}
         paging={{
           summary: users.data?.items.length
@@ -106,14 +126,44 @@ export function Users() {
         columns={[
           { key: "email", header: "Email", sort: (a, b) => a.email.localeCompare(b.email), cell: (user) => <strong>{user.email}</strong> },
           { key: "name", header: "Name", cell: (user) => user.display_name || "—" },
+          {
+            key: "role",
+            header: "Role",
+            cell: (user) => {
+              const role = roleOf.get(user.id)?.role;
+              return role ? <Badge tone={role === "proxy_admin" ? "ok" : "muted"}>{role}</Badge> : "—";
+            },
+          },
           { key: "status", header: "Status", cell: (user) => <Badge tone={user.is_active ? "ok" : "danger"}>{user.is_active ? "Active" : "Inactive"}</Badge> },
           {
             key: "actions",
             header: "",
             cell: (user) => {
-              const isSelf = user.id === me.data?.user_id;
+              const isSelf = isMe(user);
+              const role = roleOf.get(user.id)?.role;
               return (
                 <div className="flex justify-end gap-1 whitespace-nowrap">
+                  {role === "admin" && canTransfer && (
+                    <IconAction
+                      label="Transfer proxy_admin"
+                      icon={CrownIcon}
+                      disabled={!user.is_active}
+                      reason="An inactive user cannot become the proxy_admin"
+                      onClick={() => setConfirming({ user, kind: "transfer" })}
+                    />
+                  )}
+                  {role === "admin" && (
+                    <IconAction label="Remove admin" icon={ShieldMinusIcon} onClick={() => setConfirming({ user, kind: "remove-admin" })} />
+                  )}
+                  {!role && (
+                    <IconAction
+                      label="Make admin"
+                      icon={ShieldPlusIcon}
+                      disabled={!user.is_active || !user.has_signed_in}
+                      reason={user.is_active ? "The user must sign in once before receiving a role" : "An inactive user cannot become an admin"}
+                      onClick={() => setConfirming({ user, kind: "make-admin" })}
+                    />
+                  )}
                   <IconAction
                     label={user.is_active ? "Deactivate" : "Reactivate"}
                     icon={user.is_active ? UserXIcon : UserCheckIcon}
@@ -147,23 +197,17 @@ export function Users() {
       </FormDialog>
       <ConfirmDialog
         open={!!confirmation}
-        title={
-          confirmation?.kind === "delete"
-            ? "Delete user"
-            : confirmation?.kind === "deactivate"
-              ? "Deactivate user"
-              : "Reactivate user"
-        }
-        confirmLabel={confirmLabel}
-        message={confirmMessage}
+        title={confirmText?.title ?? ""}
+        confirmLabel={confirmText?.label ?? ""}
+        message={confirmText?.message ?? ""}
         onConfirm={() => {
           if (!confirmation) return Promise.resolve();
-          if (confirmation.kind === "delete") return remove.mutateAsync(confirmation.user);
-          const changes: Schemas["UserUpdate"] =
-            confirmation.kind === "activate"
-              ? { is_active: true }
-              : { is_active: false };
-          return update.mutateAsync({ user: confirmation.user, changes });
+          const { user, kind } = confirmation;
+          if (kind === "delete") return remove.mutateAsync(user);
+          if (kind === "make-admin") return makeAdmin.mutateAsync(user);
+          if (kind === "remove-admin") return removeAdmin.mutateAsync(user);
+          if (kind === "transfer") return transfer.mutateAsync(user);
+          return update.mutateAsync({ user, changes: { is_active: kind === "activate" } });
         }}
         onClose={() => setConfirming(null)}
       />

@@ -59,11 +59,13 @@ impl RedisStore {
     /// Parses the URL; it does not connect, so a gateway can start while Redis
     /// is down (it falls back to per-gateway limits until the first sync).
     pub fn new(redis_url: &str, namespace: &str) -> Result<Self, Error> {
-        Self::with_gateway(redis_url, namespace, gateway_id::gateway_id())
+        // Never the control-plane-assigned id: shared limits must count from
+        // boot, before the first handshake.
+        Self::with_gateway(redis_url, namespace, gateway_id::instance_key())
     }
 
-    /// The gateway id is normally this process's; tests set it explicitly to
-    /// act as several gateways in one process.
+    /// The key is normally this process's random instance key; tests set it
+    /// explicitly to act as several gateways in one process.
     pub fn with_gateway(
         redis_url: &str,
         namespace: &str,

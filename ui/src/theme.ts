@@ -43,6 +43,5 @@ export function useTheme() {
     media.addEventListener("change", sync);
     return () => media.removeEventListener("change", sync);
   }, [theme]);
-  const cycle = () => setTheme((t) => (t === "system" ? "light" : t === "light" ? "dark" : "system"));
-  return { theme, cycle };
+  return { theme, setTheme };
 }

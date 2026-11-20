@@ -1,8 +1,9 @@
 # Authentication and keys
 
-This section is for people and programs that call models through Lumewarp. You need two
-things from whoever runs it: the gateway's base URL, and an API key (`lw-…`), which you can
-usually create yourself ([Your keys](../self-service/index.md)).
+This section is for people and programs that call models through Lumewarp. You need the
+base URL of a gateway in the zone you will use, and an API key (`lw-…`) created in that same
+zone. You can usually create the key yourself ([Your keys](../self-service/index.md)). A key
+works only with its own zone; zone selection is not part of the request URL or headers.
 
 ## Use any OpenAI client
 
@@ -35,7 +36,7 @@ need to know which.
 curl -sS https://gateway.example.com/v1/models -H "Authorization: Bearer lw-..."
 ```
 
-The list contains exactly the names your key may call, each with its `type` (`llm`,
+The list contains exactly the names your key may call in its gateway's zone, each with its `type` (`llm`,
 `embedding`, `transcription` or `decision`). The Admin UI shows the same list on **My keys**,
 with your limits and remaining budget.
 

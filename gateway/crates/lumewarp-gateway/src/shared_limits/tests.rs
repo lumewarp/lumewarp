@@ -350,10 +350,10 @@ fn configuration_is_validated() {
     assert!(Config::from_args(Some("  "), 100, Some("ns"), None)
         .unwrap()
         .is_none());
-    let config = Config::from_args(Some("redis://127.0.0.1:6379"), 100, None, Some("scope"))
+    let config = Config::from_args(Some("redis://127.0.0.1:6379"), 100, None, Some("zone"))
         .unwrap()
         .unwrap();
-    assert_eq!(config.namespace, "scope");
+    assert_eq!(config.namespace, "zone");
     assert_eq!(config.sync_interval, Duration::from_millis(100));
     assert!(Config::from_args(Some("redis://localhost"), 100, None, None).is_err());
     assert!(Config::from_args(Some("http://localhost"), 100, Some("ns"), None).is_err());

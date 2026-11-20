@@ -19,7 +19,7 @@ from pathlib import Path
 
 import httpx
 from loadpacing import CPU_WARNING_FILES
-from stack import ROOT, SCOPE, Gateway, Proc, Stack, free_port, pg, wait_for
+from stack import ROOT, ZONE, Gateway, Proc, Stack, free_port, pg, wait_for
 
 
 def env_int(name: str, default: int) -> int:
@@ -72,6 +72,11 @@ def dist(values: list[float], scale: float = 1.0, digits: int = 1) -> dict:
 # --------------------------------------------------------------------------- fleet
 
 
+
+def set_limits(stack: Stack, owner: dict, **limits) -> dict:
+    """Replace an owner's limits in the load zone (PUT /zones/{zone}/limits)."""
+    return stack.ok("PUT", f"/zones/{ZONE}/limits", json={**owner, **limits})
+
 class Fleet:
     """Teams x mixed service-account/member owners x keys behind one priced mock router."""
 
@@ -108,14 +113,13 @@ class Fleet:
         team_budgets = team_budgets or {}
         for t in range(teams):
             body = {"name": f"team-{t}", "org_id": stack.org_id}
-            if t in team_budgets:
-                body["budget_nano_usd"] = team_budgets[t]
             team = stack.ok("POST", "/teams", json=body)
+            if t in team_budgets:
+                set_limits(stack, {"team_id": team["id"]}, budget_nano_usd=team_budgets[t])
             self.teams.append(team)
             for owner_index in range(owners_per_team):
                 body = {}
-                if (index := len(self.owners)) in budgets:
-                    body["budget_nano_usd"] = budgets[index]
+                index = len(self.owners)
                 if owner_index % 2:
                     token = stack.create_pat(f"owner-{index}@load.test", team["id"], "member")
                     user_id = stack.ok("GET", "/users/me", token)["user_id"]
@@ -125,6 +129,7 @@ class Fleet:
                         "owner_kind": "user",
                         "token": token,
                         "policy_path": f"/teams/{team['id']}/members/{user_id}",
+                        "limit_owner": {"team_id": team["id"], "user_id": user_id},
                         "scope_type": "member",
                         "scope_id": str(uuid.uuid5(uuid.UUID(team["id"]), user_id)),
                     }
@@ -138,9 +143,12 @@ class Fleet:
                         "owner_kind": "service_account",
                         "token": None,
                         "policy_path": f"/service-accounts/{owner['id']}",
+                        "limit_owner": {"team_id": team["id"], "service_account_id": owner["id"]},
                         "scope_type": "service_account",
                         "scope_id": owner["id"],
                     }
+                if index in budgets:
+                    set_limits(stack, owner["limit_owner"], budget_nano_usd=budgets[index])
                 self.owners.append(owner)
                 for _ in range(keys_per_owner):
                     self.keys.append(self.create_key(owner["id"]))
@@ -148,17 +156,15 @@ class Fleet:
 
     def create_model(self, name: str) -> str:
         price_in, price_out = PRICES[name]
-        return self.stack.ok(
-            "POST",
-            "/models",
-            json={
+        return self.stack.create_model(
+            {
                 "name": name,
                 "upstream_id": self.upstream_id,
                 "upstream_model": "mock",
                 "model_type": "llm",
                 "price_input_nano_usd_per_mtok": price_in,
                 "price_output_nano_usd_per_mtok": price_out,
-            },
+            }
         )["id"]
 
     def create_key(self, owner_id: str) -> dict:
@@ -193,16 +199,16 @@ class Fleet:
 def wait_acked(stack: Stack, timeout: float = 15) -> int:
     """Until every source mutation committed so far is compiled (publishing is async: outbox
     + compiler loop) and the gateway ACKed the resulting latest version; returns it."""
-    revision = pg(stack.dsn, "SELECT source_revision FROM scopes WHERE name = $1", SCOPE)[0][
+    revision = pg(stack.dsn, "SELECT source_revision FROM zones WHERE name = $1", ZONE)[0][
         "source_revision"
     ]
     wait_for(
         lambda: (
             not pg(
                 stack.dsn,
-                "SELECT 1 FROM config_outbox WHERE scope = $1 AND status = 'pending'"
+                "SELECT 1 FROM config_outbox WHERE zone = $1 AND status = 'pending'"
                 " AND source_revision <= $2 LIMIT 1",
-                SCOPE,
+                ZONE,
                 revision,
             )
         ),

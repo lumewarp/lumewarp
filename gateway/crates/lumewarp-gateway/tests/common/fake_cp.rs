@@ -12,7 +12,8 @@ use std::{
 };
 
 use lumewarp_proto::config::v1::{
-    gateway_message::Msg, CatalogReport, ConfigUpdate, GatewayMessage, HealthReport,
+    config_update::Update, gateway_message::Msg, CatalogReport, ConfigUpdate, GatewayMessage,
+    HealthReport, Welcome,
 };
 use tokio::{
     net::TcpListener,
@@ -29,6 +30,8 @@ use tonic::{
 pub struct Conn {
     /// Metadata `authorization` header the gateway presented.
     pub authorization: Option<String>,
+    /// Metadata `x-lumewarp-zone` header the gateway presented.
+    pub zone: Option<String>,
     pub inbound: mpsc::UnboundedReceiver<GatewayMessage>,
     /// Dropping it ends the stream from the server side.
     pub outbound: mpsc::UnboundedSender<Result<ConfigUpdate, Status>>,
@@ -92,6 +95,9 @@ impl Conn {
 
 type Conns = mpsc::UnboundedSender<Conn>;
 
+/// The id every stream is welcomed with; the gateway keeps it for usage.
+pub const WELCOME_GATEWAY_ID: &str = "fake-host-0123abcd";
+
 #[derive(Clone)]
 struct Svc(Conns);
 
@@ -121,9 +127,22 @@ impl tonic::server::StreamingService<GatewayMessage> for StreamImpl {
                 .get("authorization")
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_owned);
+            let zone = request
+                .metadata()
+                .get("x-lumewarp-zone")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
             let mut incoming = request.into_inner();
             let (in_tx, in_rx) = mpsc::unbounded_channel();
             let (out_tx, out_rx) = mpsc::unbounded_channel();
+            // Welcome is the first message of every stream and is never
+            // ACKed; a real control plane sends it once Hello is accepted.
+            let _ = out_tx.send(Ok(ConfigUpdate {
+                update: Some(Update::Welcome(Welcome {
+                    gateway_id: WELCOME_GATEWAY_ID.into(),
+                })),
+                target_digest: Vec::new(),
+            }));
             tokio::spawn(async move {
                 while let Ok(Some(message)) = incoming.message().await {
                     if in_tx.send(message).is_err() {
@@ -133,6 +152,7 @@ impl tonic::server::StreamingService<GatewayMessage> for StreamImpl {
             });
             let _ = conns.send(Conn {
                 authorization,
+                zone,
                 inbound: in_rx,
                 outbound: out_tx,
                 health: Vec::new(),

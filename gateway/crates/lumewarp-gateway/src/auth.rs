@@ -668,7 +668,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let boot = |snapshot: &pb::Snapshot| {
             crate::snapshot::store(dir.path(), snapshot).unwrap();
-            let loaded = crate::snapshot::load(dir.path(), "scope-a")
+            let loaded = crate::snapshot::load(dir.path(), "zone-a")
                 .unwrap()
                 .unwrap();
             crate::snapshot::validate(&loaded, crate::snapshot::SUPPORTED_CAPABILITIES).unwrap();

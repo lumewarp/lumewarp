@@ -1,4 +1,5 @@
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
+import { createModel } from "./catalog-helpers";
 import { pick } from "./helpers";
 
 /*
@@ -104,7 +105,7 @@ test("the model picker offers the upstream's list and a custom name, and fills t
   await main.getByRole("button", { name: "Create" }).click();
   await expect(page).toHaveURL(/\/models$/);
   const stored = ((await (await request.get("/api/v1/models?limit=200", { headers: admin })).json()).items as any[]).find((m) => m.name === "pg-model");
-  expect([stored.upstream_model, stored.max_input_tokens, stored.max_output_tokens]).toEqual(["my-finetune", 131072, 8192]);
+  expect([stored.deployments[0].upstream_model, stored.max_input_tokens, stored.max_output_tokens]).toEqual(["my-finetune", 131072, 8192]);
 });
 
 test("model Test now asks the model, and the periodic check is saved", async ({ page, request }) => {
@@ -130,7 +131,7 @@ test("model Test now asks the model, and the periodic check is saved", async ({ 
   await main.getByRole("button", { name: "Test now" }).click();
   await expect(main.getByTestId("model-test-result")).toContainText("HTTP 200");
   await expect(main.getByTestId("model-test-result")).toContainText("2");
-  expect(sent).toEqual([{ model_type: "llm", upstream_id: up.id, upstream_model: "qwen", default_body: { top_k: 20 } }]);
+  expect(sent).toEqual([{ model_type: "llm", upstream_id: up.id, upstream_model: "qwen", default_body: { top_k: 20 }, zone: "default" }]);
 
   await main.getByLabel("Check periodically").click();
   await main.getByLabel("Interval (ms)").fill("30000");
@@ -141,7 +142,7 @@ test("model Test now asks the model, and the periodic check is saved", async ({ 
   await expect(row).toContainText("Unknown");
   await expect(row).toContainText("128k / --");
   const stored = ((await (await request.get("/api/v1/models?limit=200", { headers: admin })).json()).items as any[]).find((m) => m.name === "pg-checked");
-  expect(stored.chat_check).toEqual({ interval_ms: 30000, timeout_ms: 5000, unhealthy_threshold: null, healthy_threshold: null });
+  expect(stored.deployments[0].chat_check).toEqual({ interval_ms: 30000, timeout_ms: 5000, unhealthy_threshold: null, healthy_threshold: null });
 });
 
 test("an upstream auth plugin disables Test now until the upstream is saved", async ({ page, request }) => {
@@ -205,12 +206,7 @@ test("saved plugin Test now maps gateway errors and an unapplied version", async
 
 test("a plugin upstream makes a model's Test now wait for the save, then probe through a gateway", async ({ page, request }) => {
   const up = await pluginUpstream(request, "pg-plugin-model-up");
-  const created = await request.post("/api/v1/models", {
-    headers: admin,
-    data: { name: "pg-plugin-model", model_type: "llm", upstream_id: up.id, upstream_model: "qwen" },
-  });
-  expect(created.status(), await created.text()).toBe(201);
-  const model = (await created.json()) as { id: string };
+  const model = await createModel(request, admin, { name: "pg-plugin-model", model_type: "llm", upstream_id: up.id, upstream_model: "qwen" });
 
   await signIn(page, request, "/models/new");
   const main = page.locator("#main");
@@ -225,7 +221,7 @@ test("a plugin upstream makes a model's Test now wait for the save, then probe t
   await expect(testNow).toHaveAttribute("title", /Save the model first/);
   await expect(main.getByTestId("test-now-hint")).toContainText("Save the model first");
 
-  await page.route(`**/api/v1/models/${model.id}/test`, (route) =>
+  await page.route(`**/api/v1/models/${model.id}/deployments/default/test`, (route) =>
     route.fulfill({ json: { credential: "plugin", probe: probe("http://127.0.0.1:9/v1/chat/completions"), reply: null } }),
   );
   await page.goto(`/models/${model.id}`);
@@ -269,3 +265,43 @@ test("reasoning effort: switch on, add custom levels, set the default, and store
     default_level: "deep.think",
   });
 });
+
+test("reasoning effort: a level with empty fields and a passthrough without default are stored", async ({ page, request }) => {
+  const up = await (await request.post("/api/v1/upstreams", { headers: admin, data: { name: "pg-up4", kind: "vllm", base_url: "http://127.0.0.1:9/v1" } })).json();
+  await page.route(`**/api/v1/upstreams/${up.id}/models`, (route) => route.fulfill({ json: { models: [] } }));
+  await signIn(page, request, "/models/new");
+  const main = page.locator("#main");
+  await main.getByLabel("Name", { exact: true }).fill("pg-empty-level");
+  await pick(main, "Type", "LLM");
+  await main.getByRole("combobox", { name: "Upstream", exact: true }).click();
+  await page.getByRole("option", { name: "pg-up4" }).click();
+  await main.getByRole("combobox", { name: "Upstream model", exact: true }).fill("qwen");
+  await page.getByRole("option", { name: "Use “qwen” (custom)" }).click();
+  await main.getByLabel("Handle reasoning effort").click();
+  await main.getByRole("button", { name: "Add level" }).click();
+  await main.getByLabel("Level 1 name").fill("none");
+  await main.getByRole("button", { name: "Add level" }).click();
+  await main.getByLabel("Level 2 name").fill("high");
+  await main.getByLabel("Level 2 fields").fill('{"chat_template_kwargs": {"enable_thinking": true}}');
+  await main.getByRole("button", { name: "Create" }).click();
+  await expect(page).toHaveURL(/\/models$/);
+  const find = async () => ((await (await request.get("/api/v1/models?limit=200", { headers: admin })).json()).items as any[]).find((m) => m.name === "pg-empty-level");
+  const stored = await find();
+  expect(stored.reasoning).toEqual({ mode: "mapped", fragments: { none: {}, high: { chat_template_kwargs: { enable_thinking: true } } }, default_level: null });
+
+  // Reload: the empty level is still there with an empty field.
+  await page.goto(`/models/${stored.id}`);
+  const names = main.getByLabel(/^Level \d+ name$/);
+  await expect(names).toHaveCount(2);
+  const idx = (await names.evaluateAll((els) => els.map((e) => (e as HTMLInputElement).value))).indexOf("none");
+  expect(idx).toBeGreaterThanOrEqual(0);
+  await expect(main.getByLabel(`Level ${idx + 1} fields`)).toHaveValue("");
+
+  // Passthrough with no default level is accepted.
+  await pick(main, "Mode", "Pass through with a default level");
+  await main.getByRole("button", { name: "Save" }).click();
+  await expect(page).toHaveURL(/\/models$/);
+  expect((await find()).reasoning.mode).toBe("passthrough");
+  expect((await find()).reasoning.default_level ?? null).toBeNull();
+});
+

@@ -7,8 +7,8 @@ Conventions (frozen):
 - Errors are `{error: {code, message}}`: raise `errors.ApiError` (handlers in errors.py).
 - Every mutation writes `audit.record(...)` and, if it changes compiled state,
   `outbox.enqueue_recompile(...)` in the same transaction.
-- Secrets (`lw-` keys, `lwp-` PATs, `lwg-` gateway tokens) are returned once at creation
-  and stored only as sha256 hashes.
+- Secrets (`lw-` keys, `lwp-` PATs) are returned once at creation and stored only as
+  sha256 hashes. Gateway credentials are fixed per zone in the control plane's environment.
 
 Sub-routers are included into `router` here; app.py mounts `router` and nothing else.
 """
@@ -22,6 +22,7 @@ from lumewarp_control_plane.api import (
     installation_admins,
     keys,
     members,
+    model_groups,
     orgs,
     playground,
     plugins,
@@ -33,6 +34,8 @@ from lumewarp_control_plane.api import (
     teams,
     usage,
     users,
+    zone_limits,
+    zones,
 )
 from lumewarp_control_plane.api.schemas import ErrorBody
 
@@ -57,6 +60,7 @@ router.include_router(service_accounts.router)
 router.include_router(keys.router)
 router.include_router(playground.router)
 router.include_router(routing.router)
+router.include_router(model_groups.router)
 router.include_router(targets.router)
 router.include_router(plugins.router)
 router.include_router(users.router)
@@ -66,4 +70,6 @@ router.include_router(requests.router)
 router.include_router(audit.router)
 router.include_router(gateways.router)
 router.include_router(config.router)
+router.include_router(zones.router)
+router.include_router(zone_limits.router)
 router.include_router(session.router)

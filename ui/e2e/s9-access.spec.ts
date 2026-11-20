@@ -159,7 +159,7 @@ test("usage: an admin of one team never requests a member team's directory", asy
 
 test("team settings: a team admin edits name and key limits but not the quota", async ({ page }) => {
   const team = await admin.ensureTeam("s9-settings", { max_keys_per_member: 2 });
-  await admin.patch<{ id: string }>(`/teams/${team.id}`, { rpm_limit: 10, budget_nano_usd: 5000 });
+  await admin.zoneLimits({ team_id: team.id }, { rpm_limit: 10, budget_nano_usd: 5000 });
   await admin.putMember(team.id, TEAM_ADMIN_EMAIL, "admin");
   await signIn(page, TEAM_ADMIN, `/teams/${team.id}`);
   await page.getByRole("tab", { name: "Settings", exact: true }).click();

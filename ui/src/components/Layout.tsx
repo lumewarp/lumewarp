@@ -1,4 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
 import { Link, Outlet, useNavigate } from "@tanstack/react-router";
 import {
   BarChart3,
@@ -7,12 +8,15 @@ import {
   Building2,
   Cable,
   CornerDownRight,
+  Layers,
   History,
   KeyRound,
-  LayoutDashboard,
   ListOrdered,
+  ChevronDown,
+  Globe,
   LogOut,
   Menu,
+  PanelLeft,
   MessageSquare,
   Monitor,
   Moon,
@@ -21,7 +25,6 @@ import {
   Route,
   ScrollText,
   Server,
-  Settings,
   ShieldCheck,
   Sun,
   Users,
@@ -33,14 +36,26 @@ import { clearCsrfToken } from "../auth";
 import type { Me } from "../api";
 import { hasAccess, useCan, useMe, type Access } from "../hooks";
 import { useTheme } from "../theme";
+import { useZone, ZoneBadge } from "../zone";
 import { AuthzNotice } from "../pages/Access";
 import { useClearSecrets } from "./SecretProvider";
 import { Badge } from "./Bits";
 import { useToast } from "./Toast";
 import { Button } from "./ui/button";
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "./ui/dropdown-menu";
+import {
   Sidebar,
   SidebarContent,
+  SidebarFooter,
   SidebarGroup,
   SidebarGroupContent,
   SidebarGroupLabel,
@@ -49,6 +64,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarProvider,
+  SidebarRail,
   useSidebar,
 } from "./ui/sidebar";
 
@@ -62,7 +78,6 @@ const NAV: { group: string | null; items: NavItem[] }[] = [
     items: [
       { to: "/my-keys", label: "My keys", icon: KeyRound },
       { to: "/playground", label: "Playground", icon: MessageSquare, noBreakGlass: true },
-      { to: "/", label: "Overview", icon: LayoutDashboard, access: "teamAdmin" },
     ],
   },
   {
@@ -79,6 +94,7 @@ const NAV: { group: string | null; items: NavItem[] }[] = [
       { to: "/upstreams", label: "Upstreams", icon: Server, access: "installationAdmin" },
       { to: "/models", label: "Models", icon: Boxes, access: "installationAdmin" },
       { to: "/aliases", label: "Aliases", icon: CornerDownRight, access: "installationAdmin" },
+      { to: "/model-groups", label: "Model groups", icon: Layers, access: "installationAdmin" },
       { to: "/routers", label: "Routers", icon: Route, access: "installationAdmin" },
     ],
   },
@@ -103,7 +119,6 @@ const NAV: { group: string | null; items: NavItem[] }[] = [
       { to: "/gateways", label: "Gateways", icon: Radio, access: "installationAdmin" },
       { to: "/plugins", label: "Plugins", icon: Plug, access: "installationAdmin" },
       { to: "/config", label: "Config versions", icon: History, access: "installationAdmin" },
-      { to: "/settings", label: "Settings", icon: Settings },
     ],
   },
 ];
@@ -120,6 +135,7 @@ function roleLabel(me: Me) {
 const THEME_LABEL = { system: "Auto", light: "Light", dark: "Dark" } as const;
 const THEME_ICON = { system: Monitor, light: Sun, dark: Moon } as const;
 
+/** Phones only: opens the navigation drawer. From md up the sidebar has its own collapse button. */
 function NavToggle() {
   const { openMobile, toggleSidebar } = useSidebar();
   return (
@@ -129,19 +145,55 @@ function NavToggle() {
   );
 }
 
+/** Desktop: collapses the sidebar to its icons and back, at the bottom of the sidebar. */
+function CollapseButton() {
+  const { isMobile, open, toggleSidebar } = useSidebar();
+  if (isMobile) return null;
+  const label = open ? "Collapse navigation" : "Expand navigation";
+  return (
+    <SidebarMenu>
+      <SidebarMenuItem>
+        <SidebarMenuButton aria-label={label} title={open ? undefined : label} aria-expanded={open} onClick={toggleSidebar} className="text-sidebar-foreground/80">
+          <PanelLeft aria-hidden="true" />
+          <span>Collapse</span>
+        </SidebarMenuButton>
+      </SidebarMenuItem>
+    </SidebarMenu>
+  );
+}
+
+// The desktop sidebar's expanded/collapsed choice is a per-browser convenience.
+const SIDEBAR_KEY = "lumewarp.sidebar";
+function readSidebarOpen(): boolean {
+  try {
+    return localStorage.getItem(SIDEBAR_KEY) !== "collapsed";
+  } catch {
+    return true;
+  }
+}
+function writeSidebarOpen(open: boolean) {
+  try {
+    localStorage.setItem(SIDEBAR_KEY, open ? "expanded" : "collapsed");
+  } catch {
+    // Storage blocked: the choice lasts until the page reloads.
+  }
+}
+
 function NavSidebar({ installationAdmin, orgAdmin, teamAdmin, breakGlass }: { installationAdmin: boolean; orgAdmin: boolean; teamAdmin: boolean; breakGlass: boolean }) {
-  const { setOpenMobile } = useSidebar();
+  const { isMobile, setOpenMobile, state } = useSidebar();
+  // Collapsed to icons, a link names itself on hover.
+  const collapsed = state === "collapsed" && !isMobile;
   const perms = { isInstallationAdmin: installationAdmin, isOrgAdmin: orgAdmin, isTeamAdmin: teamAdmin };
   return (
-    <Sidebar>
-      <SidebarHeader className="px-5 pt-4 pb-1">
-        <div className="flex items-center gap-2.5 text-base font-bold">
-          <img src="/favicon.svg" alt="" aria-hidden="true" className="size-6" />
-          Lumewarp
+    <Sidebar collapsible="icon">
+      <SidebarHeader className="px-5 pt-4 pb-1 group-data-[collapsible=icon]:px-2">
+        <div className="flex items-center gap-2.5 text-base font-bold group-data-[collapsible=icon]:justify-center">
+          <img src="/favicon.svg" alt="" aria-hidden="true" className="size-6 shrink-0" />
+          <span className="group-data-[collapsible=icon]:hidden">Lumewarp</span>
         </div>
       </SidebarHeader>
       <SidebarContent>
-        <nav aria-label="Main" className="flex min-h-0 flex-col gap-1 overflow-y-auto">
+        <nav aria-label="Main" className="flex min-h-0 flex-col gap-1 overflow-x-hidden overflow-y-auto">
           {NAV.map((section) => {
             const items = section.items.filter((n) => hasAccess(perms, n.access ?? "member") && !(breakGlass && n.noBreakGlass));
             if (!items.length) return null;
@@ -158,9 +210,9 @@ function NavSidebar({ installationAdmin, orgAdmin, teamAdmin, breakGlass }: { in
                             asChild
                             className="text-sidebar-foreground/80 data-[status=active]:bg-sidebar-primary data-[status=active]:text-sidebar-primary-foreground data-[status=active]:hover:bg-sidebar-primary data-[status=active]:hover:text-sidebar-primary-foreground"
                           >
-                            <Link to={n.to} activeProps={{ "aria-current": "page" }} activeOptions={{ exact: n.to === "/" }} onClick={() => setOpenMobile(false)}>
+                            <Link to={n.to} title={collapsed ? n.label : undefined} activeProps={{ "aria-current": "page" }} onClick={() => setOpenMobile(false)}>
                               <Icon aria-hidden="true" />
-                              {n.label}
+                              <span>{n.label}</span>
                             </Link>
                           </SidebarMenuButton>
                         </SidebarMenuItem>
@@ -173,19 +225,123 @@ function NavSidebar({ installationAdmin, orgAdmin, teamAdmin, breakGlass }: { in
           })}
         </nav>
       </SidebarContent>
+      <SidebarFooter className="p-2">
+        <CollapseButton />
+      </SidebarFooter>
+      <SidebarRail />
     </Sidebar>
+  );
+}
+
+/** The zone this view is looking at, at the left of the header; admins also reach Manage zones and New zone here. */
+function ZoneSwitcher({ installationAdmin }: { installationAdmin: boolean }) {
+  const { id, zone, zones, isLoading, setZone } = useZone();
+  const navigate = useNavigate();
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="outline" size="sm" className="max-w-[240px]" data-testid="zone-switcher">
+          {zone ? <ZoneBadge zone={zone} /> : <span className="truncate text-muted-foreground">{isLoading ? "Zone…" : id}</span>}
+          <ChevronDown className="size-4" aria-hidden="true" />
+          <span className="sr-only">Zone menu</span>
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="w-60">
+        <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">Zone</DropdownMenuLabel>
+        <DropdownMenuRadioGroup value={id} onValueChange={setZone}>
+          {zones.map((z) => (
+            <DropdownMenuRadioItem key={z.id} value={z.id} data-testid={`zone-option-${z.id}`}>
+              <ZoneBadge zone={z} />
+            </DropdownMenuRadioItem>
+          ))}
+        </DropdownMenuRadioGroup>
+        {installationAdmin && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={() => void navigate({ to: "/zones", search: {} })}>
+              <Globe aria-hidden="true" />
+              Manage zones
+            </DropdownMenuItem>
+          </>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/** Who is signed in, the theme and Sign out, in one menu at the top right. */
+function AccountMenu({ me, theme, onTheme, onSignOut }: { me: Me | undefined; theme: keyof typeof THEME_LABEL; onTheme: (theme: keyof typeof THEME_LABEL) => void; onSignOut: () => void }) {
+  const name = me ? me.display_name || me.email || "Bootstrap admin" : "Account";
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="outline" size="sm" className="max-w-[260px]" title={me?.email ?? undefined} data-testid="principal">
+          <span className="hidden min-w-0 truncate sm:inline">{name}</span>
+          {me && <Badge tone="info">{roleLabel(me)}</Badge>}
+          <ChevronDown className="size-4" aria-hidden="true" />
+          <span className="sr-only">Account menu</span>
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-56">
+        {me && (
+          <DropdownMenuLabel className="flex flex-col gap-0.5">
+            <span className="truncate">{name}</span>
+            {me.email && me.email !== name && <span className="truncate text-xs font-normal text-muted-foreground">{me.email}</span>}
+          </DropdownMenuLabel>
+        )}
+        {me && (
+          <div className="flex flex-wrap gap-1 px-2 pb-1.5" data-testid="session-roles">
+            {me.installation_role && <Badge tone="info">{me.installation_role === "proxy_admin" ? "proxy admin" : "installation admin"}</Badge>}
+            {!me.installation_role &&
+              me.admin_orgs?.map((org) => (
+                <Badge key={org.id} tone="info">
+                  {org.name} · org admin
+                </Badge>
+              ))}
+            {/* Direct memberships only: inherited teams follow from the roles above. */}
+            {me.teams
+              .filter((team) => team.direct)
+              .map((team) => (
+                <Badge key={team.team_id} tone="info">
+                  {team.team_name} · {team.role}
+                </Badge>
+              ))}
+            {!me.is_admin && !me.admin_orgs?.length && me.teams.length === 0 && <span className="text-xs text-muted-foreground">No team memberships.</span>}
+          </div>
+        )}
+        <DropdownMenuSeparator />
+        <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">Theme</DropdownMenuLabel>
+        <DropdownMenuRadioGroup value={theme} onValueChange={(value) => onTheme(value as keyof typeof THEME_LABEL)}>
+          {(Object.keys(THEME_LABEL) as (keyof typeof THEME_LABEL)[]).map((key) => {
+            const Icon = THEME_ICON[key];
+            return (
+              <DropdownMenuRadioItem key={key} value={key}>
+                <Icon aria-hidden="true" />
+                {THEME_LABEL[key]}
+              </DropdownMenuRadioItem>
+            );
+          })}
+        </DropdownMenuRadioGroup>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={onSignOut}>
+          <LogOut aria-hidden="true" />
+          Sign out
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
 export function Layout() {
   const me = useMe();
   const perms = useCan();
-  const { theme, cycle } = useTheme();
+  const { theme, setTheme } = useTheme();
   const qc = useQueryClient();
   const navigate = useNavigate();
   const toast = useToast();
   const clearSecrets = useClearSecrets();
-  const ThemeIcon = THEME_ICON[theme];
+  const [sidebarOpen, setSidebarOpen] = useState(readSidebarOpen);
+  const zone = useZone();
 
   const logout = async () => {
     try {
@@ -201,7 +357,14 @@ export function Layout() {
   };
 
   return (
-    <SidebarProvider className="bg-background">
+    <SidebarProvider
+      className="bg-background"
+      open={sidebarOpen}
+      onOpenChange={(open) => {
+        setSidebarOpen(open);
+        writeSidebarOpen(open);
+      }}
+    >
       <a
         className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-[100] focus:rounded-md focus:border focus:bg-background focus:px-3 focus:py-2 focus:shadow"
         href="#main"
@@ -210,23 +373,15 @@ export function Layout() {
       </a>
       <NavSidebar installationAdmin={perms.isInstallationAdmin} orgAdmin={perms.isOrgAdmin} teamAdmin={perms.isTeamAdmin} breakGlass={me.data?.kind === "break_glass"} />
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="sticky top-0 z-40 flex items-center gap-2 border-b bg-background/95 px-4 py-2.5 backdrop-blur md:px-6">
+        <header
+          className="sticky top-0 z-40 flex items-center gap-2 border-b bg-background/95 px-4 py-2.5 backdrop-blur md:px-6"
+          data-testid="app-header"
+          data-zone={zone.id}
+        >
           <NavToggle />
+          <ZoneSwitcher installationAdmin={perms.isInstallationAdmin} />
           <span className="flex-1" />
-          <Button variant="outline" size="sm" onClick={cycle} title="Cycle theme">
-            <ThemeIcon className="size-4" aria-hidden="true" />
-            <span>Theme: {THEME_LABEL[theme]}</span>
-          </Button>
-          {me.data && (
-            <span className="flex min-w-0 items-center gap-2" title={me.data.email ?? undefined} data-testid="principal">
-              <span className="hidden max-w-[180px] truncate sm:inline">{me.data.display_name || me.data.email || "Bootstrap admin"}</span>
-              <Badge tone="info">{roleLabel(me.data)}</Badge>
-            </span>
-          )}
-          <Button variant="outline" size="sm" onClick={() => void logout()}>
-            <LogOut className="size-4 sm:hidden" aria-hidden="true" />
-            <span className="sr-only sm:not-sr-only">Sign out</span>
-          </Button>
+          <AccountMenu me={me.data} theme={theme} onTheme={setTheme} onSignOut={() => void logout()} />
         </header>
         {me.data?.authz_unavailable && (
           <div className="border-b bg-background px-4 py-3 md:px-6">

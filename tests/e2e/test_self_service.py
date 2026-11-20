@@ -79,10 +79,7 @@ def self_service(request, binaries):
                     "api_key_ref": UPSTREAM_KEY_REF,
                 },
             )
-            state.model = stack.ok(
-                "POST",
-                "/models",
-                json={
+            state.model = stack.create_model({
                     "name": "mock-a",
                     "model_type": "llm",
                     "upstream_id": upstream["id"],
@@ -91,10 +88,7 @@ def self_service(request, binaries):
                     "price_output_nano_usd_per_mtok": 2_000_000_000,
                 },
             )
-            state.other_model = stack.ok(
-                "POST",
-                "/models",
-                json={
+            state.other_model = stack.create_model({
                     "name": "other-a",
                     "model_type": "llm",
                     "upstream_id": upstream["id"],
@@ -121,24 +115,33 @@ def self_service(request, binaries):
                     "org_id": stack.org_id,
                     "model_access": "list",
                     "allowed_models": ["mock"],
+                    "max_keys_per_member": MAX_KEYS,
+                    "max_member_key_lifetime_seconds": LIFETIME,
+                },
+            )
+            stack.ok(
+                "PUT",
+                "/zones/e2e/limits",
+                json={
+                    "team_id": state.team["id"],
                     "rpm_limit": RPM_LIMIT,
                     "tpm_limit": TPM_LIMIT,
                     "max_parallel": 16,
                     "budget_nano_usd": TEAM_BUDGET,
-                    "max_keys_per_member": MAX_KEYS,
-                    "max_member_key_lifetime_seconds": LIFETIME,
                 },
             )
             grant(state, state.user, "member")
             # Alice only exists here to own a key Bob may not touch.
             grant(state, state.admin_user, "admin")
             if state.backend == "builtin":
-                cookie_api(
-                    state.admin,
-                    stack,
-                    "PATCH",
-                    f"/teams/{state.team['id']}/members/{state.user['id']}",
-                    json={"budget_nano_usd": MEMBER_BUDGET},
+                stack.ok(
+                    "PUT",
+                    "/zones/e2e/limits",
+                    json={
+                        "team_id": state.team["id"],
+                        "user_id": state.user["id"],
+                        "budget_nano_usd": MEMBER_BUDGET,
+                    },
                 )
             state.gateway = stack.start_gateway()
             wait_for(
@@ -704,10 +707,21 @@ def test_11_audit_rows_exist_and_contain_no_secret(self_service):
     # The create details keep the owner and expiry, the rotate details the grace.
     actions_details = zip(rows, details, strict=True)
     create = next(detail for row, detail in actions_details if row["action"] == "key.create")
-    assert set(create) == {"name", "owner_kind", "owner_id", "expires_at"}
+    assert set(create) == {
+        "name",
+        "zone",
+        "owner_kind",
+        "owner_id",
+        "expires_at",
+        "model_access",
+        "allowed_models",
+        "allowed_groups",
+    }
     actions_details = zip(rows, details, strict=True)
     rotate = next(detail for row, detail in actions_details if row["action"] == "key.rotate")
-    assert {"name", "grace_seconds", "expires_at", "previous_key_expires_at"} == set(rotate)
+    assert {"name", "zone", "grace_seconds", "expires_at", "previous_key_expires_at"} == set(
+        rotate
+    )
     # Bob, a plain member, has no audit view: the team's audit is the team-admin view.
     denied = self_service.member.get(
         stack.api_url + "/audit",

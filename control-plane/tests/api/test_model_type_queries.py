@@ -5,7 +5,7 @@ from sqlalchemy import event
 
 from lumewarp_control_plane.model_types import called_name_type
 from lumewarp_control_plane.models import ModelType
-from tests.api.helpers import ADMIN_AUTH, suffix
+from tests.api.helpers import ADMIN_AUTH, set_playground_url, suffix
 from tests.api.test_playground import setup_keys
 from tests.factories import make_alias, make_key, make_model, make_router
 
@@ -52,6 +52,7 @@ async def test_playground_loads_types_once_for_many_keys(client, committed):
     engine = client.app.state.engine.sync_engine
     event.listen(engine, "before_cursor_execute", capture)
     try:
+        await set_playground_url(client, committed, "http://gateway:4000")
         response = client.get("/api/v1/playground", headers=headers)
         assert response.status_code == 200, response.text
         assert len(response.json()["keys"]) >= 5

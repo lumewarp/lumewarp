@@ -87,17 +87,20 @@ class Metrics:
         )
         self.config_version = Gauge(
             "lumewarp_cp_config_version",
-            "Latest published config version of this control plane's scope.",
+            "Latest published config version of each zone.",
+            ["zone"],
             registry=r,
         )
         self.outbox_pending = Gauge(
             "lumewarp_cp_outbox_pending",
-            "Pending config outbox entries (refreshed every few seconds).",
+            "Pending config outbox entries per zone (refreshed every few seconds).",
+            ["zone"],
             registry=r,
         )
         self.gateway_sessions = Gauge(
             "lumewarp_cp_gateway_sessions",
-            "Connected gateway config-stream sessions, one per gateway process.",
+            "Connected gateway config-stream sessions per zone, one per gateway process.",
+            ["zone"],
             registry=r,
         )
         self.gateway_acks = Counter(
@@ -248,22 +251,34 @@ DISCARD = Metrics()
 # --------------------------------------------------------------------------- DB gauges
 
 
-async def refresh_db_gauges(metrics: Metrics, session_factory: SessionFactory, scope: str) -> None:
-    """One bounded refresh: a COUNT of pending outbox rows and the latest version."""
-    from lumewarp_control_plane.models import ConfigOutbox, ConfigVersion, OutboxStatus
+async def refresh_db_gauges(metrics: Metrics, session_factory: SessionFactory) -> None:
+    """One bounded refresh per zone: pending outbox rows and the latest version."""
+    from lumewarp_control_plane.models import ConfigOutbox, ConfigVersion, OutboxStatus, Zone
 
     async with session_factory() as session:
-        pending = await session.scalar(
-            select(func.count()).where(
-                ConfigOutbox.scope == scope, ConfigOutbox.status == OutboxStatus.PENDING
-            )
+        zones = list((await session.scalars(select(Zone.id))).all())
+        pending = dict(
+            (
+                await session.execute(
+                    select(ConfigOutbox.zone, func.count())
+                    .where(ConfigOutbox.status == OutboxStatus.PENDING)
+                    .group_by(ConfigOutbox.zone)
+                )
+            ).all()
         )
-        latest = await session.scalar(
-            select(func.max(ConfigVersion.version)).where(ConfigVersion.scope == scope)
+        latest = dict(
+            (
+                await session.execute(
+                    select(ConfigVersion.zone, func.max(ConfigVersion.version)).group_by(
+                        ConfigVersion.zone
+                    )
+                )
+            ).all()
         )
-    metrics.outbox_pending.set(pending or 0)
-    if latest is not None:
-        metrics.config_version.set(latest)
+    for zone in zones:
+        metrics.outbox_pending.labels(zone=zone).set(pending.get(zone, 0))
+        if latest.get(zone) is not None:
+            metrics.config_version.labels(zone=zone).set(latest[zone])
 
 
 async def run_db_gauges(
@@ -271,13 +286,12 @@ async def run_db_gauges(
     session_factory: SessionFactory,
     stop: asyncio.Event,
     *,
-    scope: str,
     interval_seconds: float = DB_GAUGE_INTERVAL_SECONDS,
 ) -> None:
     """Refresh the DB-backed gauges every `interval_seconds` until `stop` is set."""
     while not stop.is_set():
         try:
-            await refresh_db_gauges(metrics, session_factory, scope)
+            await refresh_db_gauges(metrics, session_factory)
         except Exception:
             log.warning("metrics: refreshing database gauges failed", exc_info=True)
         try:

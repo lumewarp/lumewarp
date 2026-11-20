@@ -72,6 +72,31 @@ export const fmtUsd = (nano: number | null | undefined, empty = "—") =>
 /** Counts and token totals, in the reader's locale. The table and the charts share it. */
 export const fmtNumber = (value: number) => value.toLocaleString();
 
+const COMPACT: [number, string][] = [
+  [1e12, "T"],
+  [1e9, "B"],
+  [1e6, "M"],
+  [1e3, "k"],
+];
+
+/**
+ * A large count shortened for charts and summary tiles: 12,345 → 12.3k, 4,567,890,123 → 4.57B, up to T.
+ * Three significant digits; below 10,000 the full number. Tables keep `fmtNumber`.
+ */
+export function fmtCompact(value: number): string {
+  const abs = Math.abs(value);
+  if (abs < 1e4) return fmtNumber(value);
+  for (let i = 0; i < COMPACT.length; i++) {
+    const [unit, suffix] = COMPACT[i];
+    if (abs < unit) continue;
+    const short = Number((value / unit).toPrecision(3));
+    // 999,950 rounds to 1000k: say 1M instead.
+    if (Math.abs(short) >= 1000 && i > 0) return `${Number((value / COMPACT[i - 1][0]).toPrecision(3))}${COMPACT[i - 1][1]}`;
+    return `${short}${suffix}`;
+  }
+  return fmtNumber(value);
+}
+
 /**
  * A token length as k/M: binary steps when the number is a multiple of 1024 (32768 → 32k,
  * 1048576 → 1M), decimal otherwise (128000 → 128k), at most one decimal place.

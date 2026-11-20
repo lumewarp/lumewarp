@@ -10,7 +10,7 @@ test.beforeEach(async ({ page, request }) => {
   expect(response.status()).toBe(204);
   await page.context().addCookies((await request.storageState()).cookies);
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Usage", level: 1 })).toBeVisible();
 });
 
 const toggle = (page: Page) => page.getByRole("button", { name: "Toggle navigation" });
@@ -29,7 +29,7 @@ test("phone: the navigation opens, closes on Esc and returns focus", async ({ pa
   expect(top).toBe("sheet-overlay");
   // Background is locked: no scrolling and the page behind is inert for assistive tech.
   expect(await page.evaluate(() => getComputedStyle(document.body).overflow)).toBe("hidden");
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeHidden();
+  await expect(page.getByRole("heading", { name: "Usage", level: 1 })).toBeHidden();
   await page.keyboard.press("Escape");
   await expect(nav).toHaveCount(0);
   await expect(toggle(page)).toBeFocused();
@@ -43,13 +43,13 @@ test("phone: the Close button shuts the navigation in place and returns focus", 
   await expect(nav).toBeVisible();
   await page.getByRole("button", { name: "Close" }).click();
   await expect(nav).toHaveCount(0);
-  await expect(page).toHaveURL(/\/$/);
+  await expect(page).toHaveURL(/\/usage$/);
   await expect(toggle(page)).toBeFocused();
   await expect(toggle(page)).toHaveAttribute("aria-expanded", "false");
 });
 
 test("the navigation is reachable on both sides of the breakpoint, and with a larger browser font", async ({ page }) => {
-  // Below md: the toggle opens the sheet. From md up: the sidebar is there and there is no toggle.
+  // Below md: the toggle opens the sheet. From md up: the sidebar is there and the toggle collapses it instead.
   const assertPhone = async () => {
     await expect(toggle(page)).toBeVisible();
     await toggle(page).click();
@@ -70,7 +70,7 @@ test("the navigation is reachable on both sides of the breakpoint, and with a la
   await cdp.send("Page.setFontSizes", { fontSizes: { standard: 20, fixed: 16 } });
   await page.setViewportSize({ width: 800, height: 800 });
   await page.reload();
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Usage", level: 1 })).toBeVisible();
   expect(await page.evaluate(() => window.matchMedia("(min-width: 48rem)").matches)).toBe(false);
   await assertPhone();
 });
@@ -92,27 +92,45 @@ test("phone: clicking the overlay or a link closes the navigation", async ({ pag
   await expect(page.getByRole("link", { name: "Routers", exact: true })).toHaveAttribute("aria-current", "page");
 });
 
-test("desktop: the navigation is always there, 15rem wide, with no toggle", async ({ page }) => {
+test("desktop: the navigation is 15rem wide and collapses to icons, remembered across a reload", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await expect(toggle(page)).toBeHidden();
   const nav = page.getByRole("navigation", { name: "Main" });
+  const container = page.locator("[data-slot=sidebar-container]");
+  const width = async () => (await container.boundingBox())?.width ?? 0;
   await expect(nav).toBeVisible();
-  expect((await page.locator("[data-slot=sidebar-container]").boundingBox())?.width).toBeCloseTo(240, 0);
-  await expect(page.getByRole("link", { name: "Overview", exact: true })).toHaveAttribute("aria-current", "page");
+  expect(await width()).toBeCloseTo(240, 0);
+  await expect(page.getByRole("link", { name: "Usage", exact: true })).toHaveAttribute("aria-current", "page");
   await page.keyboard.press("Control+b");
   await expect(nav).toBeVisible();
   expect(await page.evaluate(() => document.cookie)).not.toContain("sidebar_state");
+
+  // Collapsed: icons only, every link still there by name, and named on hover.
+  const collapse = page.getByRole("button", { name: "Collapse navigation" });
+  await expect(collapse).toHaveAttribute("aria-expanded", "true");
+  await collapse.click();
+  const expand = page.getByRole("button", { name: "Expand navigation" });
+  await expect(expand).toHaveAttribute("aria-expanded", "false");
+  await expect.poll(width).toBeCloseTo(48, 0);
+  const routers = page.getByRole("link", { name: "Routers", exact: true });
+  await expect(routers).toBeVisible();
+  await expect(routers).toHaveAttribute("title", "Routers");
+  // Nothing in the narrow column can be scrolled sideways.
+  const sideways = await container.evaluate((root) =>
+    [root, ...root.querySelectorAll("*")]
+      .filter((el) => ["auto", "scroll"].includes(getComputedStyle(el).overflowX) && el.scrollWidth > el.clientWidth)
+      .map((el) => el.getAttribute("data-slot") ?? el.tagName),
+  );
+  expect(sideways).toEqual([]);
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Expand navigation" })).toBeVisible();
+  await expect.poll(width).toBeCloseTo(48, 0);
+  await page.getByRole("button", { name: "Expand navigation" }).click();
+  await expect.poll(width).toBeCloseTo(240, 0);
+  await expect(page.getByRole("button", { name: "Collapse navigation" })).toHaveAttribute("aria-expanded", "true");
 });
 
-test("Overview: real usage over 14 UTC days, with no sample data, and it fits 390 px", async ({ page }) => {
-  const chart = page.getByTestId("usage-chart");
-  await expect(chart).toBeVisible();
-  await expect(chart.getByTestId("usage-day")).toHaveCount(14);
-  await expect(page.getByText(/sample/i)).toHaveCount(0);
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
-});
-
-test("screenshots: shell, login and overview", async ({ page, browser }) => {
+test("screenshots: shell, login and landing", async ({ page, browser }) => {
   test.skip(!SHOTS, "set E2E_SHOTS to a directory to save screenshots");
   for (const [w, h, tag] of [[1280, 900, "desktop"], [390, 844, "phone"]] as const) {
     await page.setViewportSize({ width: w, height: h });
@@ -120,7 +138,7 @@ test("screenshots: shell, login and overview", async ({ page, browser }) => {
       await page.evaluate((t) => localStorage.setItem("lumewarp.theme", t), theme);
       await page.goto("/");
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-      await page.screenshot({ path: `${SHOTS}/s1-overview-${tag}-${theme}.png`, fullPage: true });
+      await page.screenshot({ path: `${SHOTS}/s1-landing-${tag}-${theme}.png`, fullPage: true });
       if (tag === "phone") {
         await toggle(page).click();
         await expect(page.getByRole("navigation", { name: "Main" })).toBeVisible();

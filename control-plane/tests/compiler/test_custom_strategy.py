@@ -6,7 +6,7 @@ from sqlalchemy.exc import IntegrityError
 
 from lumewarp_control_plane._proto.lumewarp.config.v1 import snapshot_pb2 as pb
 from lumewarp_control_plane.compiler import (
-    compile_scope,
+    compile_zone,
     publish_pending,
     rollback_routing,
 )
@@ -31,7 +31,7 @@ async def test_custom_strategy_compile_capability_warning_and_rollback(factory):
             s, "custom", [(a, 0)], strategy="header_pin", params={"headers": ["x-pin"]}
         )
     async with factory() as s:
-        result = await compile_scope(s, SCOPE, now=OCT, require_local_membership=True)
+        result = await compile_zone(s, SCOPE, now=OCT, require_local_membership=True)
     router = _wire_router(result.snapshot)
     assert router.strategy == "header_pin"
     assert json.loads(router.params_json) == {"headers": ["x-pin"]}
@@ -47,7 +47,7 @@ async def test_custom_strategy_compile_capability_warning_and_rollback(factory):
             capabilities=["strategy:header_pin"],
         )
     async with factory() as s:
-        assert not (await compile_scope(s, SCOPE, now=OCT, require_local_membership=True)).warnings
+        assert not (await compile_zone(s, SCOPE, now=OCT, require_local_membership=True)).warnings
     await touch(factory)
     assert await publish_pending(factory, SCOPE, require_local_membership=True) == 1
     async with factory() as s, s.begin():
@@ -60,7 +60,7 @@ async def test_custom_strategy_compile_capability_warning_and_rollback(factory):
         assert await rollback_routing(s, SCOPE, 1, require_local_membership=True) == 3
     assert _wire_router(await load_version(factory, 3)) == router
     async with factory() as s:
-        compiled = await compile_scope(s, SCOPE, now=OCT, require_local_membership=True)
+        compiled = await compile_zone(s, SCOPE, now=OCT, require_local_membership=True)
         assert _wire_router(compiled.snapshot) == router
 
 
@@ -108,7 +108,7 @@ async def test_custom_strategy_empty_params_compile_as_object(factory):
     async with factory() as s, s.begin():
         await add_router(s, "custom", [("a", None)], strategy="header_pin")
     async with factory() as s:
-        compiled = await compile_scope(s, SCOPE, require_local_membership=True)
+        compiled = await compile_zone(s, SCOPE, require_local_membership=True)
         assert json.loads(_wire_router(compiled.snapshot).params_json) == {}
 
 
@@ -161,7 +161,7 @@ async def test_a_capability_needs_every_connected_gateway(factory):
         )
         await report_plugins(s, SCOPE, "gateway-b", {}, connected=True, capabilities=[])
     async with factory() as s:
-        result = await compile_scope(s, SCOPE, now=OCT, require_local_membership=True)
+        result = await compile_zone(s, SCOPE, now=OCT, require_local_membership=True)
     assert len(result.warnings) == 1
     assert "not advertised by every connected gateway" in result.warnings[0]
     async with factory() as s:
@@ -174,4 +174,4 @@ async def test_a_capability_needs_every_connected_gateway(factory):
             capabilities=["strategy:header_pin"],
         )
     async with factory() as s:
-        assert not (await compile_scope(s, SCOPE, now=OCT, require_local_membership=True)).warnings
+        assert not (await compile_zone(s, SCOPE, now=OCT, require_local_membership=True)).warnings

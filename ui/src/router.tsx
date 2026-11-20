@@ -10,11 +10,10 @@ import { requestsSearch } from "./lib/requests";
 import { AuthzTemporary, CheckFailed, PageBoundary, PageLoading, RequireAccess, RequireOrgRead, RequireTeamRead } from "./pages/Access";
 import { Login } from "./pages/Login";
 import { MyKeys } from "./pages/MyKeys";
-import { Overview } from "./pages/Overview";
 import { Usage } from "./pages/Usage";
 
 /*
- * The screens nobody needs on arrival are their own chunks. A visitor lands on Login, Overview or My keys, so
+ * The screens nobody needs on arrival are their own chunks. A visitor lands on Login, Usage or My keys, so
  * an admin page's code is downloaded when its route is opened and not before — and a caller without the right
  * to see it never mounts the page at all, so the chunk is never requested (the guard wraps the lazy element).
  */
@@ -32,14 +31,16 @@ const UsersPage = lazy(() => import("./pages/Users").then((module) => ({ default
 const AuditPage = lazy(() => import("./pages/Audit").then((module) => ({ default: module.Audit })));
 const RequestsPage = lazy(() => import("./pages/Requests").then((module) => ({ default: module.Requests })));
 const TeamsPage = lazy(() => import("./pages/Teams").then((module) => ({ default: module.Teams })));
+const ModelGroupsPage = lazy(() => import("./pages/ModelGroups").then((module) => ({ default: module.ModelGroups })));
+const ModelGroupEditPage = lazy(() => import("./pages/ModelGroupEdit").then((module) => ({ default: module.ModelGroupEdit })));
 const OrgsPage = lazy(() => import("./pages/Orgs").then((module) => ({ default: module.Orgs })));
 const OrgDetailPage = lazy(() => import("./pages/Orgs").then((module) => ({ default: module.OrgDetail })));
 const PlaygroundPage = lazy(() => import("./pages/Playground").then((module) => ({ default: module.Playground })));
-const SettingsPage = lazy(() => import("./pages/Settings").then((module) => ({ default: module.Settings })));
 const TeamDetailPage = lazy(() => import("./pages/TeamDetail").then((module) => ({ default: module.TeamDetail })));
 const McpServersPage = lazy(() => import("./pages/McpServers").then((module) => ({ default: module.McpServers })));
 const McpServerEditPage = lazy(() => import("./pages/McpServerEdit").then((module) => ({ default: module.McpServerEdit })));
 const PluginsPage = lazy(() => import("./pages/Plugins").then((module) => ({ default: module.Plugins })));
+const ZonesPage = lazy(() => import("./pages/Zones").then((module) => ({ default: module.Zones })));
 const A2aAgentsPage = lazy(() => import("./pages/A2aAgents").then((module) => ({ default: module.A2aAgents })));
 const A2aAgentEditPage = lazy(() => import("./pages/A2aAgentEdit").then((module) => ({ default: module.A2aAgentEdit })));
 
@@ -78,7 +79,7 @@ const appRoute = createRoute({
   component: Layout,
 });
 
-/** Overview is the home of an installation admin or a team admin; everyone else's home is My keys. */
+/** Usage is the home of an installation, org or team admin; everyone else's home is My keys. */
 function Home() {
   const me = useMe();
   const perms = useCan();
@@ -99,11 +100,11 @@ function Home() {
       </>
     );
   }
-  if (!perms.isInstallationAdmin && !perms.isTeamAdmin) return <Navigate to="/my-keys" replace />;
+  // isTeamAdmin also covers installation and org admins.
   return (
     <>
       {notice}
-      <Overview />
+      <Navigate to={perms.isInstallationAdmin || perms.isOrgAdmin || perms.isTeamAdmin ? "/usage" : "/my-keys"} replace />
     </>
   );
 }
@@ -169,6 +170,13 @@ const orgDetailRoute = createRoute({
   component: OrgDetailRoute,
 });
 
+/** Manage zones: reached from the header's zone menu, no sidebar entry. */
+const zonesRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: "/zones",
+  component: guarded(() => <ZonesPage />, "installationAdmin"),
+});
+
 const routeTree = rootRoute.addChildren([
   loginRoute,
   appRoute.addChildren([
@@ -189,6 +197,9 @@ const routeTree = rootRoute.addChildren([
     page("/aliases", () => <AliasesPage />, "installationAdmin"),
     page("/aliases/new", () => <AliasEditPage />, "installationAdmin"),
     page("/aliases/$aliasId", () => <AliasEditPage />, "installationAdmin"),
+    page("/model-groups", () => <ModelGroupsPage />, "installationAdmin"),
+    page("/model-groups/new", () => <ModelGroupEditPage />, "installationAdmin"),
+    page("/model-groups/$groupId", () => <ModelGroupEditPage />, "installationAdmin"),
     page("/upstreams", () => <UpstreamsPage />, "installationAdmin"),
     page("/upstreams/new", () => <UpstreamEditPage />, "installationAdmin"),
     page("/upstreams/$upstreamId", () => <UpstreamEditPage />, "installationAdmin"),
@@ -202,9 +213,10 @@ const routeTree = rootRoute.addChildren([
     page("/usage", Usage),
     requestsRoute,
     page("/audit", () => <AuditPage />, "teamAdmin"),
+    zonesRoute,
     page("/gateways", () => <GatewaysPage />, "installationAdmin"),
     page("/config", () => <ConfigPage />, "installationAdmin"),
-    page("/settings", suspended(() => <SettingsPage />)),
+    page("/settings", () => <Navigate to="/my-keys" replace />),
   ]),
 ]);
 

@@ -3,6 +3,10 @@
 # migrations as Jobs. Nothing secret is rendered: every credential is a Secret referenced by
 # name, created first (create-secrets.sh, or the commands in docs/operations/kubernetes.md).
 global:
+  # The control plane and gateway read the per-zone tokens from this Secret;
+  # create-secrets.sh creates it with LUMEWARP_GATEWAY_ZONE_DEFAULT_TOKEN.
+  gatewayTokens:
+    secretName: lumewarp-gateway-tokens
   encryptionKey:
     secretName: lumewarp-encryption-key
     key: encryption-key
@@ -41,10 +45,6 @@ lumewarp:
       backend: openfga
   gateway:
     replicaCount: 1
-    token:
-      # Created after bootstrap (see docs/operations/kubernetes.md); the gateway waits for it.
-      secretName: lumewarp-gateway
-      key: token
     persistence:
       enabled: false
   valkey:

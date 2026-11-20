@@ -1,13 +1,15 @@
 import { useQuery } from "@tanstack/react-query";
 import { BanIcon, BotIcon, BoxesIcon, CableIcon, ChevronDownIcon, ChevronRightIcon, PauseIcon, PencilIcon, PlayIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { lazy, Suspense, useState, type ComponentProps, type ReactNode } from "react";
 
 import { api, type Key, type Me } from "../api";
 import { Badge, fmtDate, fmtUsd, InheritedBadge, KeyBadge, ModelPill, PageHeader, SuspendedReason } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
-import { IconAction } from "../components/RowActions";
+import { CreateButton, IconAction } from "../components/RowActions";
 import { FormDialog, required, SelectField, TextField, useForm } from "../components/Form";
-import { blankKeyLimits, KeyLimitFields, keyLimitsBody, type KeyLimitValues } from "../components/KeyLimits";
+import { blankKeyLimits, KeyLimitFields, keyLimitsBody, keyCreationBlock, keyRuleNotes, type KeyLimitValues } from "../components/KeyLimits";
+import { RuleViolationBadge } from "../components/KeyPill";
+import { useZone } from "../zone";
 import { DataTable } from "../components/Table";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Badge as UiBadge } from "../components/ui/badge";
@@ -17,9 +19,30 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "../components/ui/toolti
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { HelpTip } from "../components/ui/help-tip";
 import { useAction, useCan, useMe, useMut, useOwnKeys, useSecretMut } from "../hooks";
+import { runTokenSecretMutation } from "../lib/keySecret";
 import { useShowSecret } from "../components/SecretProvider";
 import { AuthzTemporary, BreakGlassNoKeys, CheckFailed, PageLoading } from "./Access";
-import { KeyEditDialog, RotateKeyDialog } from "./KeyDialogs";
+import { blankKeyModels, KeyModels, keyModelsBody, type KeyModelState } from "../components/keyModels";
+
+// The key forms and the model picker are a lazy chunk: this page ships in the entry chunk.
+const LazyKeyModelPicker = lazy(() => import("../components/PermissionPicker").then((m) => ({ default: m.KeyModelPicker })));
+const LazyKeyEditDialog = lazy(() => import("./KeyDialogs").then((m) => ({ default: m.KeyEditDialog })));
+const LazyRotateKeyDialog = lazy(() => import("./KeyDialogs").then((m) => ({ default: m.RotateKeyDialog })));
+const KeyModelPicker = (props: ComponentProps<typeof LazyKeyModelPicker>) => (
+  <Suspense fallback={null}>
+    <LazyKeyModelPicker {...props} />
+  </Suspense>
+);
+const KeyEditDialog = (props: ComponentProps<typeof LazyKeyEditDialog>) => (
+  <Suspense fallback={null}>
+    <LazyKeyEditDialog {...props} />
+  </Suspense>
+);
+const RotateKeyDialog = (props: ComponentProps<typeof LazyRotateKeyDialog>) => (
+  <Suspense fallback={null}>
+    <LazyRotateKeyDialog {...props} />
+  </Suspense>
+);
 import {
   expiryFromDay,
   fmtLifetime,
@@ -33,11 +56,31 @@ import { KeyPill } from "../components/KeyPill";
 type Team = Me["teams"][number];
 
 /**
+ * The team as the header zone sees it: limits, remaining budget and key limits come from `by_zone`, so every
+ * fact below is the zone's. A zone with no entry keeps the team-wide values.
+ */
+function inZone(team: Team, zone: string): Team {
+  const z = team.by_zone?.[zone];
+  if (!z) return team;
+  return {
+    ...team,
+    limits: z.limits,
+    budget: z.budget,
+    key_limits: {
+      key_count: z.key_count,
+      max_keys_per_member: z.key_rules.key_max_per_member,
+      max_member_key_lifetime_seconds: z.key_rules.key_max_lifetime_seconds,
+    },
+  };
+}
+
+/**
  * A self-service page: the caller's own keys in one table, then every team they may hold keys in
  * (memberships first, then teams administered by inheritance) with what a key there can do.
  */
 export function MyKeys() {
   const me = useMe();
+  const zone = useZone();
   const administered = (me.data?.teams ?? []).filter((team) => team.role === "admin");
   const keys = useOwnKeys(administered.length > 0);
   const [creating, setCreating] = useState<{ team: Team | null } | null>(null);
@@ -50,13 +93,13 @@ export function MyKeys() {
       </Alert>
     );
   }
-  const teams = orderTeams(me.data?.teams ?? []);
+  const teams = orderTeams(me.data?.teams ?? []).map((team) => inZone(team, zone.id));
   const blocked = !!me.data?.authz_unavailable || me.data?.kind === "break_glass" || teams.length === 0;
   return (
     <>
       <PageHeader
         title="My keys"
-        hint="A secret is shown only once, when a key is created or rotated."
+        hint="Keys, limits and budgets are those of the zone chosen in the header; a secret is shown only once, when a key is created or rotated."
         actions={blocked ? undefined : <Button onClick={() => setCreating({ team: teams.length === 1 ? teams[0] : null })}>New key</Button>}
       />
       {me.error && me.data && <CheckFailed onRetry={() => void me.refetch()} />}
@@ -95,6 +138,7 @@ export function MyKeys() {
           />
         </>
       )}
+      <PersonalAccessTokens />
     </>
   );
 }
@@ -341,6 +385,7 @@ function KeysTable({
                   <span>
                     <KeyBadge k={key} />
                     <SuspendedReason reason={key.suspended_reason} />
+                    <RuleViolationBadge keyRef={key} />
                   </span>
                   {note && (
                     <span className="text-xs text-muted-foreground" data-testid={note.startsWith("Old secret") ? "grace" : "rotation-note"}>
@@ -351,6 +396,7 @@ function KeysTable({
               );
             },
           },
+          { key: "models", header: "Models", hideBelow: "sm", cell: (key) => <KeyModels keyRef={key} /> },
           { key: "expires", header: "Expires", hideBelow: "sm", cell: (key) => fmtDate(key.expires_at) },
           {
             key: "actions",
@@ -577,8 +623,8 @@ function KeyLimitFact({ team, atCap }: { team: Team; atCap: boolean }) {
   );
 }
 
-type CreateValues = KeyLimitValues & { name: string; expires: string };
-const blankCreate: CreateValues = { name: "", expires: "", ...blankKeyLimits() };
+type CreateValues = KeyLimitValues & { name: string; expires: string; models: KeyModelState };
+const blankCreate: CreateValues = { name: "", expires: "", models: blankKeyModels(), ...blankKeyLimits() };
 
 function CreateKeyDialog({
   teams,
@@ -595,18 +641,27 @@ function CreateKeyDialog({
   onCreated: (secret: string) => void;
 }) {
   const form = useForm<CreateValues>(blankCreate, { name: required("Name") });
+  const zone = useZone();
+  const zoneLabel = zone.zone?.name || zone.id;
   const [picked, setPicked] = useState("");
   const [teamError, setTeamError] = useState<string>();
   const team = given ?? teams.find((item) => item.team_id === picked) ?? null;
   const create = useSecretMut(
-    (values: CreateValues) =>
-      api.createKey(team!.team_id, {
+    (values: CreateValues) => {
+      const { models, ...rest } = values;
+      return api.createKey(team!.team_id, {
         name: values.name.trim(),
+        zone: zone.id,
         expires_at: expiryFromDay(values.expires),
-        ...keyLimitsBody(values),
-      }),
+        ...keyLimitsBody(rest),
+        ...keyModelsBody(models),
+      });
+    },
     (secret) => onCreated(secret),
   );
+  const rules = team?.by_zone?.[zone.id]?.key_rules;
+  const blocked = team ? keyCreationBlock(rules, zoneLabel, { role: team.role === "admin" ? "admin" : "member", inherited: team.inherited_from, serviceAccount: false }) : null;
+  const notes = keyRuleNotes(rules, zoneLabel);
   const lifetime = team?.key_limits.max_member_key_lifetime_seconds ?? null;
   const max = lifetime === null ? undefined : lastExpiryDay(lifetime);
   const close = () => {
@@ -620,7 +675,7 @@ function CreateKeyDialog({
     if (!team) setTeamError("Choose a team");
     if (!team || !valid) return false;
     try {
-      return await form.run(() => create.mutateAsync(form.values), { expires_at: "expires" });
+      return await form.run(() => create.mutateAsync(form.values), { expires_at: "expires", model_access: "models", allowed_models: "models", allowed_groups: "models" });
     } catch (e) {
       // A 409 (the cap) or a 429 (with its wait) is the server's own message, kept in the dialog.
       throw new Error(refusalText(e));
@@ -629,11 +684,24 @@ function CreateKeyDialog({
   return (
     <FormDialog
       open={open}
-      title={given ? `New key in ${given.team_name}` : "New key"}
+      title={given ? `New key in ${given.team_name} (${zoneLabel})` : `New key in ${zoneLabel}`}
       submitLabel="Create key"
+      submitDisabled={!!blocked}
       onClose={close}
       onSubmit={submit}
     >
+      {blocked && (
+        <Alert variant="destructive" data-testid="key-blocked">
+          <AlertDescription>{blocked}</AlertDescription>
+        </Alert>
+      )}
+      {notes.length > 0 && (
+        <ul className="m-0 list-none p-0 text-xs text-muted-foreground" data-testid="zone-key-rules">
+          {notes.map((note) => (
+            <li key={note}>{note}</li>
+          ))}
+        </ul>
+      )}
       {!given && (
         <SelectField
           label="Team"
@@ -669,6 +737,16 @@ function CreateKeyDialog({
       />
       {team && <KeyLimitFields values={form.values} errors={form.errors} set={form.set} cap={team.limits} />}
       {team && (
+        <KeyModelPicker
+          access={form.values.models.access}
+          onAccess={(access) => form.set("models", { ...form.values.models, access })}
+          grant={form.values.models.grant}
+          onGrant={(grant) => form.set("models", { ...form.values.models, grant })}
+          scope={team.all_models ? null : team.models}
+          error={form.errors.models}
+        />
+      )}
+      {team && form.values.models.access === "inherit" && (
         <div className="flex flex-col gap-1.5">
           <span className="text-sm font-semibold">This key can call</span>
           <CallableModels team={team} />
@@ -763,6 +841,7 @@ function ServiceAccountKeys({
                   <span>
                     <KeyBadge k={key} />
                     <SuspendedReason reason={key.suspended_reason} />
+                    <RuleViolationBadge keyRef={key} />
                   </span>
                   {note && <span className="text-xs text-muted-foreground">{note}</span>}
                 </span>
@@ -879,5 +958,54 @@ function MyUsage({ teams, userId }: { teams: Team[]; userId: string }) {
         ]}
       />
     </section>
+  );
+}
+
+function PersonalAccessTokens() {
+  const me = useMe();
+  const list = useQuery({ queryKey: ["tokens"], queryFn: () => api.tokens(), enabled: me.data?.kind !== "break_glass" && !!me.data?.user_id });
+  const showSecret = useShowSecret();
+  const [creating, setCreating] = useState(false);
+  const [revoking, setRevoking] = useState<string | null>(null);
+  const form = useForm({ name: "" }, { name: required("Name") });
+  const create = useMut((name: string) =>
+    runTokenSecretMutation(() => api.createToken({ name }), (value) => showSecret({ value, title: "Token created" })),
+  );
+  const revoke = useMut((id: string) => api.revokeToken(id), "Token revoked");
+
+  if (me.data && !me.data.user_id) return <><h2 className="mt-6">Personal access tokens</h2><p className="text-muted-foreground">The break-glass session is not tied to a user, so it has no personal access tokens.</p></>;
+  return (
+    <>
+      <h2 className="mt-6">Personal access tokens</h2>
+      <div className="mb-3 flex flex-wrap items-center justify-end gap-2">
+        <CreateButton
+          onClick={() => {
+            form.reset();
+            setCreating(true);
+          }}
+        >
+          New token
+        </CreateButton>
+      </div>
+      <DataTable
+        rows={list.data}
+        loading={list.isPending}
+        error={list.error}
+        onRetry={() => void list.refetch()}
+        rowKey={(r) => r.id}
+        empty="No tokens."
+        columns={[
+          { key: "name", header: "Name", cell: (r) => (<><strong>{r.name}</strong> <code className="text-muted-foreground">{r.display_prefix}…</code></>) },
+          { key: "created", header: "Created", cell: (r) => fmtDate(r.created_at) },
+          { key: "expires", header: "Expires", cell: (r) => fmtDate(r.expires_at) },
+          { key: "used", header: "Last used", cell: (r) => fmtDate(r.last_used_at) },
+          { key: "actions", header: "", cell: (r) => (r.revoked_at ? <Badge>Revoked</Badge> : <div className="flex justify-end gap-1.5 whitespace-nowrap"><Button variant="ghost" size="sm" className="text-destructive hover:bg-destructive/10 hover:text-destructive" onClick={() => setRevoking(r.id)}>Revoke</Button></div>) },
+        ]}
+      />
+      <FormDialog open={creating} title="New personal access token" submitLabel="Create token" onClose={() => setCreating(false)} onSubmit={() => (form.validate() ? form.run(() => create.mutateAsync(form.values.name)) : false)}>
+        <TextField label="Name" value={form.values.name} onChange={(v) => form.set("name", v)} error={form.errors.name} autoFocus placeholder="laptop" />
+      </FormDialog>
+      <ConfirmDialog open={!!revoking} title="Revoke token" confirmLabel="Revoke" message="Anything using this token stops working immediately." onConfirm={() => revoke.mutateAsync(revoking!)} onClose={() => setRevoking(null)} />
+    </>
   );
 }

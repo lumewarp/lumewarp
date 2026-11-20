@@ -16,14 +16,17 @@ The database migration runs as Job {{ .Release.Name }}-migrate-{{ .Release.Revis
 becomes ready once it has finished:
   kubectl -n {{ .Release.Namespace }} wait --for=condition=complete job/{{ .Release.Name }}-migrate-{{ .Release.Revision }}
 
-Next, the gateway needs a token issued by the control plane (it waits until the Secret
-{{ .Values.lumewarp.gateway.token.secretName | quote }} exists):
-  kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "stack.controlPlaneName" . }} -- \
-    python -m lumewarp_control_plane bootstrap --name {{ .Release.Name }}
-  kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.lumewarp.gateway.token.secretName }} \
-    --from-literal={{ .Values.lumewarp.gateway.token.key }}="<the printed lwg-... token>"
-  kubectl -n {{ .Release.Namespace }} rollout restart {{ ternary "statefulset" "deploy" .Values.lumewarp.gateway.persistence.enabled }}/{{ include "stack.gatewayName" . }}
+Port-forward the Admin UI and sign in (SSO through lumewarp.controlPlane.oidc.*, or the
+break-glass password; the first login matching lumewarp.controlPlane.initialAdminEmail
+becomes proxy_admin):
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "stack.controlPlaneName" . }} {{ .Values.lumewarp.controlPlane.service.httpPort }}:{{ .Values.lumewarp.controlPlane.service.httpPort }}
 
-Log in to the Admin UI over SSO (lumewarp.controlPlane.oidc.*) or the break-glass password;
-the first login matching lumewarp.controlPlane.initialAdminEmail becomes proxy_admin.
+The gateway authenticates with the fixed token of zone {{ .Values.global.zone | quote }} in Secret
+{{ include "stack.gatewayTokensSecretName" . | quote }}. The chart created it with a random
+48-character token per zone; read the gateway's token with:
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "stack.gatewayTokensSecretName" . }} \
+    -o jsonpath='{.data.LUMEWARP_GATEWAY_ZONE_{{ .Values.global.zone | upper | replace "-" "_" }}_TOKEN}' | base64 -d
+Add more zones with `global.gatewayTokens.zones`; set `global.gatewayTokens.secretName` to use
+an existing Secret with the LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN keys instead.
+
 Manual: https://lumewarp.github.io/lumewarp/operations/helm.html

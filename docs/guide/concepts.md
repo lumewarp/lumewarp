@@ -10,6 +10,14 @@ A change in the control plane becomes a new config version, normally within a se
 gateway applies it, writes it to disk and acknowledges it. A gateway that restarts while
 the control plane is down boots from the version on its disk.
 
+## Zones
+
+An installation can have several **zones**, each with its own gateways, fixed gateway token,
+upstreams, model deployments, MCP servers, A2A agents, API keys, limits, budgets and usage.
+Orgs, teams, users, roles, grants, and model/alias/router definitions are shared. A model
+may be deployed in only some zones. A key belongs to one zone, and the zone switcher in the
+Admin UI changes the zone-aware view. See [Zones](../admin/zones.md).
+
 Two consequences are worth knowing:
 
 - **Changes are eventually enforced.** A revoked key stops working when the gateways have
@@ -25,12 +33,13 @@ three share one namespace:
 
 | Kind | What it is |
 | --- | --- |
-| **Model** | One model of one upstream, with its price and model type. |
+| **Model** | A global definition with a price and model type; each zone that serves it has its own upstream deployment. |
 | **Alias** | Another name for a model or a router. |
 | **Router** | A strategy over several models, with retries, fallbacks and traffic splits. |
 
 An **upstream** is an OpenAI-compatible endpoint: its base URL and how to authenticate to
-it. Models belong to upstreams; clients never name an upstream.
+it. Upstreams belong to a zone; a model's deployment binds the global model name to an
+upstream in that same zone. Clients never name an upstream.
 
 Every name has a **model type** that decides which endpoints may call it: `llm`,
 `embedding`, `transcription` or `decision`.
@@ -50,9 +59,10 @@ installation
         └── API key      the credential a client sends
 ```
 
-- An **org** groups teams and sets the outer limits for all of them.
-- A **team** is where work happens: its policy says which names its keys may call, how
-  fast, and within what budget.
+- An **org** groups teams and sets the outer model-grant policy for all of them. Its limits
+  and budget are configured separately in each zone.
+- A **team** is where work happens: its global policy says which names its keys may call;
+  its effective limits and budget are set per zone.
 - A **member** is a user with role `admin` or `member` in a team.
 - A **service account** owns keys for an application, so they do not disappear when a
   person leaves.
@@ -72,9 +82,9 @@ effective policy; they do not see the team's full policy.
 
 Rate limits are counted in each gateway unless the gateways share a Redis and
 namespace (`--shared-limits-redis-url`); then one window is shared and the gateways may
-over-admit by about their count, plus up to five sync intervals of traffic when a gateway first
-joins the scope. A gateway that loses Redis falls back to counting for itself, which is
-the N-times behaviour again.
+over-admit by about their count, plus up to five sync intervals of traffic when a gateway
+first joins a limit bucket. A gateway that loses Redis falls back to counting for itself,
+which is the N-times behaviour again.
 
 ## Credentials
 
@@ -82,10 +92,13 @@ the N-times behaviour again.
 | --- | --- | --- |
 | API key | `lw-…` | Clients calling the gateway. |
 | Personal access token | `lwp-…` | A person or script calling the management API. |
-| Gateway token | `lwg-…` | A gateway connecting to the control plane. |
+| Gateway zone token | `LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN` | A fixed environment secret shared by gateways in one zone; `<ID>` is the uppercase zone ID with `-` replaced by `_`. |
 | Session | cookie | The Admin UI after signing in. |
 
-Each secret is shown once, when it is created or rotated. Only its SHA-256 hash is stored.
+PAT and API key secrets are shown once, when created or rotated, and only their SHA-256
+hashes are stored in Postgres. The control plane reads each gateway zone token at startup
+and keeps only its SHA-256 hash in memory; the same secret is supplied to the gateway
+through the variable named by `--gateway-token-env`.
 
 ## Roles
 

@@ -90,7 +90,7 @@ function steps(row: RequestRow): Step[] {
       detail: (
         <>
           {row.upstream_model || "—"}
-          {row.attempts > 1 ? ` · ${row.attempts} attempts` : ""}
+          {(row.attempts ?? 0) > 1 ? ` · ${row.attempts} attempts` : ""}
         </>
       ),
     });

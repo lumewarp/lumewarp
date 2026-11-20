@@ -39,7 +39,7 @@ use usage_cp::FakeCp;
 
 const SECRET: &str = "sk-otel-secret-key-do-not-leak";
 const PROMPT: &str = "the-prompt-must-not-be-exported";
-const SCOPE: &str = "otel-test";
+const ZONE: &str = "otel-test";
 const TOKEN_ENV: &str = "LUMEWARP_OTEL_TEST_TOKEN";
 
 #[derive(Debug, Default, Clone)]
@@ -279,7 +279,7 @@ keys:
             .args(["--gateway-token-env", TOKEN_ENV])
             .arg("--state-dir")
             .arg(state)
-            .args(["--scope", SCOPE])
+            .args(["--zone", ZONE])
             .arg("--local-config")
             .arg(local)
             .env(TOKEN_ENV, "gw-secret");
@@ -682,7 +682,7 @@ fn catalog(good: SocketAddr, held: SocketAddr, dead: SocketAddr) -> Snapshot {
             "retry".into(),
             "fallbacks".into(),
         ],
-        scope: SCOPE.into(),
+        zone: ZONE.into(),
     }
 }
 

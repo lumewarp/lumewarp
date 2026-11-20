@@ -36,7 +36,9 @@ def secret_scan_run() -> None:
 def binaries() -> None:
     for binary in (GATEWAY_BIN, MOCK_BIN):
         if not binary.exists():
-            pytest.exit(f"missing {binary}; build it first (scripts/e2e-core.sh does)", returncode=2)
+            pytest.exit(
+                f"missing {binary}; build it first (scripts/e2e-core.sh does)", returncode=2
+            )
 
 
 @pytest.fixture(scope="session")

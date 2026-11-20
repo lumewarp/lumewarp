@@ -3,7 +3,7 @@ import { join } from "node:path";
 
 import { deleteTeams, ensureOrg, pick } from "./helpers";
 
-/* Audit, Gateways, Settings, Users and Config after the move to shadcn components. */
+/* Audit, Gateways, Users and Config after the move to shadcn components. */
 
 const BREAK_GLASS = "e2e-break-glass-password";
 const SHOTS = process.env.E2E_SHOTS;
@@ -58,13 +58,12 @@ test("audit: the Team filter is a combobox that sends team_id, and the log narro
   await expect(all).toContainText("s2-audit-other");
 });
 
-test("settings and users: description list, buttons and pager render and work", async ({ page }) => {
+test("account menu roles, the old settings URL, and users: buttons and pager render and work", async ({ page }) => {
   await signIn(page, "/settings");
-  await expect(page.getByRole("heading", { name: "Session" })).toBeVisible();
-  const theme = page.getByRole("main").getByRole("button", { name: /^Theme:/ });
-  const before = await page.locator("html").getAttribute("data-theme");
-  await theme.click();
-  await expect(page.locator("html")).not.toHaveAttribute("data-theme", before ?? "");
+  await expect(page).toHaveURL(/\/my-keys$/);
+  await page.getByTestId("principal").click();
+  await expect(page.getByTestId("session-roles")).toBeVisible();
+  await page.keyboard.press("Escape");
   await page.goto("/users");
   await expect(page.getByRole("heading", { name: "Users" })).toBeVisible();
   const pager = page.getByTestId("table-pagination");
@@ -86,7 +85,7 @@ test("screenshots: s2 pages, desktop and phone, light and dark", async ({ page, 
   for (const [label, width, height, theme] of modes) {
     await page.setViewportSize({ width, height });
     await page.evaluate((t) => localStorage.setItem("lumewarp.theme", t), theme);
-    for (const name of ["audit", "gateways", "settings", "users", "config"]) {
+    for (const name of ["audit", "gateways", "users", "config"]) {
       await page.goto(`/${name}`);
       await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
       await page.waitForTimeout(400);

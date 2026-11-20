@@ -18,7 +18,7 @@ uv sync
 (cd ../ui && pnpm install && pnpm check && pnpm build:cp)
 
 uv run lumewarp-control-plane migrate
-uv run lumewarp-control-plane bootstrap --name quickstart   # prints the lwg-... token once
+export LUMEWARP_GATEWAY_ZONE_DEFAULT_TOKEN='replace-with-a-random-secret-at-least-32-characters'
 LUMEWARP_DEV_MODE=true LUMEWARP_BREAK_GLASS_PASSWORD=dev-break-glass \
   LUMEWARP_SESSION_COOKIE_SECURE=false \
   uv run lumewarp-control-plane serve
@@ -28,26 +28,32 @@ The HTTP API/UI listens on `127.0.0.1:8091`; gateway-facing gRPC listens on
 `127.0.0.1:50051`. The dev Postgres from `scripts/dev-db.sh` listens on
 `127.0.0.1:55432`, so it does not collide with a local 5432.
 
-Start the gateway in another terminal:
+Open <http://127.0.0.1:8091/> and use the emergency login with the password
+`dev-break-glass` (a plaintext password needs `LUMEWARP_DEV_MODE=true`; production uses an
+argon2id hash and OIDC, see [Sign-in and authorization](../operations/identity.md)). The
+control plane creates the default zone and reads its fixed gateway token from
+`LUMEWARP_GATEWAY_ZONE_DEFAULT_TOKEN` at startup. The token must be at least 32 characters;
+the control plane keeps only its SHA-256 hash in memory. There is no token-creation UI, API
+or CLI.
+
+Start the gateway in another terminal with that token:
 
 ```sh
 cd gateway
-export LUMEWARP_GATEWAY_TOKEN='lwg-...'
+# Use exactly the value configured as LUMEWARP_GATEWAY_ZONE_DEFAULT_TOKEN above.
+export LUMEWARP_GATEWAY_TOKEN='replace-with-a-random-secret-at-least-32-characters'
 cargo run --release -- --control-plane http://127.0.0.1:50051 \
   --gateway-token-env LUMEWARP_GATEWAY_TOKEN \
-  --state-dir /tmp/lumewarp-state --scope default
+  --state-dir /tmp/lumewarp-state --zone default
 ```
 
 The gateway is not ready until it has a first config version (`/v1/*` and the admin
 `/readyz` return 503), and the process never falls back to an open router. The control
 plane publishes an empty version when it starts, so here the gateway is ready at once
-and answers 401 until a key exists. Open <http://127.0.0.1:8091/>, use the emergency login with the
-password `dev-break-glass` (a plaintext password needs `LUMEWARP_DEV_MODE=true`; production
-uses an argon2id hash and OIDC, see the
-[Sign-in and authorization](../operations/identity.md)), then create:
+and answers 401 until a key exists. In the UI, create:
 
-- an upstream for `http://127.0.0.1:9100/v1` (kind `openai_compatible`),
-- a model named `mock-local` using upstream model `mock`,
+- an upstream in the default zone for `http://127.0.0.1:9100/v1` (kind `openai_compatible`),
+- a global model named `mock-local` deployed in the default zone using upstream model `mock`,
 - a router named `demo` with that model as its member (`mock-local` is callable by
   itself too; a router adds strategy, retries and fallbacks, and an alias is one more name),
 - a team and an API key for a service account of that team (the `lw-...` secret is
@@ -63,7 +69,8 @@ curl -sS -H "Authorization: Bearer lw-..." -H 'Content-Type: application/json' \
 ```
 
 Usage lands in the UI after the next report batch (about one second); budgets are
-enforced eventually. See [Control plane](../operations/control-plane.md) for
+enforced eventually. The default zone is ready for a first install; use the header switcher
+to view other zones. See [Zones](../admin/zones.md). See [Control plane](../operations/control-plane.md) for
 settings, SSO, authorization backends, the catalog, plugins and operations, and
 [`docs/config-protocol.md`](../config-protocol.md) for the stream contract.
 
@@ -84,7 +91,12 @@ settings, SSO, authorization backends, the catalog, plugins and operations, and
 The seeded demo API key is in `.dev/demo-key`. Postgres is at `127.0.0.1:55432`, with
 database, user and password all `lumewarp`.
 
-The stack runs two gateways sharing one token, each with an id generated at startup:
+The stack runs two gateways sharing the default zone's fixed token. The control plane
+assigns each stream's gateway id in its first `Welcome`; a reconnect gets a new id and row:
 <http://127.0.0.1:4000/> (admin `127.0.0.1:9464`) and <http://127.0.0.1:4001/> (admin
 `127.0.0.1:9466`). They share rate limits through a Valkey at `127.0.0.1:56379`, without
 persistence ([shared limits](../operations/gateway.md#shared-rate-limits)).
+
+Authorization uses the built-in backend, and OpenFGA is not started. Use
+`DEV_AUTHZ=openfga make dev` to also start an OpenFGA at `127.0.0.1:18081`, create its store
+and make it the authorization backend.

@@ -2,14 +2,14 @@
 
 Router validation mirrors the gateway (snapshot.rs::validate / validate_split and
 router.rs::RoutingTable::compile) so a write the API accepts never makes the gateway NACK.
-Every catalog write holds the scope lock, so the name and reference checks are exact.
+Every catalog write holds the hierarchy lock, so the name and reference checks are exact.
 """
 
 from __future__ import annotations
 
 import os
 import uuid
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -24,8 +24,9 @@ from lumewarp_control_plane.api.common import (
     SessionDep,
     SettingsDep,
     conflict,
+    default_zone,
     enqueue_recompile,
-    lock_scope,
+    lock_hierarchy,
     mutation,
     uuid_page,
     validation_error,
@@ -36,15 +37,21 @@ from lumewarp_control_plane.api.schemas import (
     AliasOut,
     AliasUpdate,
     CatalogEntryOut,
+    ChatCheckIn,
+    ChatCheckOut,
     CircuitBreakerIn,
     HealthCheckIn,
+    HealthState,
     ModelCreate,
+    ModelDeploymentIn,
+    ModelDeploymentOut,
     ModelOut,
     ModelTestIn,
     ModelTestOut,
     ModelUpdate,
     Page,
     ProbeOut,
+    ProbeResultOut,
     RetryPolicyIn,
     RetryPolicyOut,
     RouterCreate,
@@ -62,6 +69,7 @@ from lumewarp_control_plane.api.schemas import (
     UpstreamTestIn,
     UpstreamTestOut,
     UpstreamUpdate,
+    ZoneId,
     validate_model_settings,
 )
 from lumewarp_control_plane.authz import Action, Authz
@@ -75,6 +83,10 @@ from lumewarp_control_plane.compiler.plugins import (
     params_problem,
     router_problem,
     validate_plugin_params,
+)
+from lumewarp_control_plane.compiler.validate import (
+    accepted_reasoning_levels,
+    router_reasoning_problem,
 )
 from lumewarp_control_plane.errors import ApiError, not_found
 from lumewarp_control_plane.grpc import (
@@ -91,6 +103,7 @@ from lumewarp_control_plane.models import (
     CatalogName,
     GatewaySession,
     Model,
+    ModelDeployment,
     PluginKind,
     Router,
     RouterFallback,
@@ -99,6 +112,7 @@ from lumewarp_control_plane.models import (
     RouterSplitMember,
     StickyBy,
     Upstream,
+    Zone,
 )
 from lumewarp_control_plane.settings import Settings
 
@@ -177,9 +191,9 @@ def _upstream_auth_columns(auth: UpstreamAuthIn | None) -> dict[str, Any]:
 
 
 async def _validate_upstream_auth(
-    session: AsyncSession, settings: Settings, auth: UpstreamAuthIn, *, force: bool
+    session: AsyncSession, auth: UpstreamAuthIn, *, zone: str, force: bool
 ) -> list[str]:
-    """422 unless connected gateways can serve the plugin; returns what `force` saved past."""
+    """422 unless the zone's gateways can serve the plugin; returns what `force` saved past."""
     try:
         return await validate_plugin_params(
             session,
@@ -187,7 +201,7 @@ async def _validate_upstream_auth(
             auth.plugin,
             auth.params,
             force=force,
-            scope=settings.scope,
+            zone=zone,
         )
     except PluginRejected as exc:
         raise validation_error(f"auth.{exc.field}", exc.message) from exc
@@ -220,23 +234,143 @@ def _one_upstream_credential(row: Upstream) -> None:
         )
 
 
-async def _reports(session: AsyncSession, settings: Settings, column) -> list[dict]:
-    """The latest health reports of the connected gateways (one column of them)."""
+async def _reports(session: AsyncSession, zone: str, column) -> list[dict]:
+    """The latest health reports of the connected gateways of one zone (one column)."""
     return list(
         (
             await session.scalars(
                 select(column).where(
-                    GatewaySession.scope == settings.scope, GatewaySession.connected.is_(True)
+                    GatewaySession.zone == zone,
+                    GatewaySession.connected.is_(True),
                 )
             )
         ).all()
     )
 
 
+async def _reports_by_zone(session: AsyncSession, column) -> dict[str, list[dict]]:
+    """The latest health reports per zone; a zone with no connected gateway is absent."""
+    rows = await session.execute(
+        select(GatewaySession.zone, column).where(GatewaySession.connected.is_(True))
+    )
+    out: dict[str, list[dict]] = {}
+    for zone, reports in rows:
+        out.setdefault(zone, []).append(reports)
+    return out
+
+
 def _health(reports: list[dict], name: str) -> str:
     """Unhealthy if any connected gateway says so; unknown before any has reported."""
     seen = [r[name] for r in reports if isinstance(r.get(name), bool)]
     return "unhealthy" if False in seen else "healthy" if seen else "unknown"
+
+
+@dataclass(frozen=True)
+class _Availability:
+    """The zones a model is deployed in, for the per-zone availability of routers/aliases."""
+
+    zones: tuple[str, ...]
+    deployed: dict[uuid.UUID, set[str]]
+
+    def unavailable(self, available: set[str]) -> list[str]:
+        return [zone for zone in self.zones if zone not in available]
+
+
+async def _availability(session: AsyncSession) -> _Availability:
+    zones = tuple(
+        await session.scalars(select(Zone.id).where(Zone.archived_at.is_(None)).order_by(Zone.id))
+    )
+    deployed: dict[uuid.UUID, set[str]] = {}
+    for name_id, zone in await session.execute(
+        select(ModelDeployment.name_id, ModelDeployment.zone)
+    ):
+        deployed.setdefault(name_id, set()).add(zone)
+    return _Availability(zones=zones, deployed=deployed)
+
+
+def _router_available_zones(
+    strategy: str,
+    members: Sequence[RouterMemberOut],
+    splits: Sequence[TrafficSplitOut],
+    availability: _Availability,
+) -> set[str]:
+    """The zones whose snapshot holds the router: every pool keeps a member there.
+
+    Mirrors compiler/compile.py: a member without a deployment in the zone is dropped, a
+    split with no models left drops the router, and under `weighted` a pool whose
+    remaining members all weigh 0 is refused.
+    """
+    pools = [split.members for split in splits] if splits else ([list(members)] if members else [])
+    available: set[str] = set()
+    for zone in availability.zones:
+        if not pools:
+            continue
+        weights: list[int] = []
+        for pool in pools:
+            kept = [m.weight for m in pool if zone in availability.deployed.get(m.model_id, ())]
+            if not kept:
+                break
+            weights.append(sum(kept))
+        else:
+            if strategy == "weighted" and not all(weights):
+                continue
+            available.add(zone)
+    return available
+
+
+async def _target_available_zones(
+    session: AsyncSession,
+    rows: Sequence[Alias],
+    availability: _Availability,
+) -> dict[uuid.UUID, set[str]]:
+    """For each alias target id, the zones whose snapshot holds the target."""
+    model_ids = {a.target_name_id for a in rows if a.target_kind == CatalogKind.MODEL.value}
+    router_ids = {a.target_name_id for a in rows if a.target_kind == CatalogKind.ROUTER.value}
+    out: dict[uuid.UUID, set[str]] = {
+        model_id: set(availability.deployed.get(model_id, ())) for model_id in model_ids
+    }
+    if not router_ids:
+        return out
+    routers = (
+        await session.scalars(
+            select(Router).where(Router.name_id.in_(router_ids)).order_by(Router.name_id)
+        )
+    ).all()
+    members: dict[uuid.UUID, list[RouterMemberOut]] = {r.id: [] for r in routers}
+    splits: dict[uuid.UUID, list[TrafficSplitOut]] = {r.id: [] for r in routers}
+    if routers:
+        for member in await session.scalars(
+            select(RouterMember)
+            .where(RouterMember.router_id.in_(list(members)))
+            .order_by(RouterMember.router_id, RouterMember.position)
+        ):
+            members[member.router_id].append(RouterMemberOut.model_validate(member))
+        split_rows = (
+            await session.scalars(
+                select(RouterSplit)
+                .where(RouterSplit.router_id.in_(list(members)))
+                .order_by(RouterSplit.router_id, RouterSplit.position)
+            )
+        ).all()
+        split_members: dict[uuid.UUID, list[RouterMemberOut]] = {s.id: [] for s in split_rows}
+        if split_rows:
+            for member in await session.scalars(
+                select(RouterSplitMember)
+                .where(RouterSplitMember.split_id.in_(list(split_members)))
+                .order_by(RouterSplitMember.split_id, RouterSplitMember.position)
+            ):
+                split_members[member.split_id].append(RouterMemberOut.model_validate(member))
+        for split in split_rows:
+            splits[split.router_id].append(
+                TrafficSplitOut(
+                    name=split.name, weight=split.weight, members=split_members[split.id]
+                )
+            )
+    for router in routers:
+        out[router.id] = _router_available_zones(
+            router.strategy, members[router.id], splits[router.id], availability
+        )
+    return out
 
 
 _PROBE_CLEARED = {"probe_at": None, "probe_ok": None, "probe_ok_at": None}
@@ -291,7 +425,6 @@ def _model_probe_url(upstream: Upstream, model_type: str) -> str:
 
 async def _gateway_probe(
     request: Request,
-    settings: Settings,
     upstream: Upstream,
     *,
     model: str,
@@ -311,7 +444,7 @@ async def _gateway_probe(
         )
     try:
         result = await registry.probe(
-            settings.scope,
+            upstream.zone,
             upstream.auth_plugin,
             upstream.name,
             model,
@@ -347,9 +480,14 @@ def _recordable(credential: str, probe: ProbeOut) -> bool:
     return not (credential == "plugin" and probe.error in _SNAPSHOT_CLASSES)
 
 
-def _model_probed(row: Model) -> tuple:
-    """What a model's Test now depends on; a change makes its result stale."""
-    return (row.upstream_id, row.upstream_model, row.model_type, row.default_body)
+def _deployment_probed(deployment: ModelDeployment, model: Model) -> tuple:
+    """What a deployment's Test now depends on; a change makes its result stale."""
+    return (
+        deployment.upstream_id,
+        deployment.upstream_model,
+        model.model_type,
+        model.default_body,
+    )
 
 
 async def _record_probe(session: AsyncSession, entity, conditions: list, ok: bool) -> None:
@@ -368,32 +506,94 @@ async def _record_probe(session: AsyncSession, entity, conditions: list, ok: boo
     await session.commit()
 
 
-async def _upstreams_out(
-    session: AsyncSession, settings: Settings, rows: Sequence[Upstream]
-) -> list[UpstreamOut]:
-    """UpstreamOut with `health` from the connected gateways' latest reports."""
-    reports = await _reports(session, settings, GatewaySession.upstream_health)
+async def _upstreams_out(session: AsyncSession, rows: Sequence[Upstream]) -> list[UpstreamOut]:
+    """UpstreamOut with `health` from its own zone's connected gateways."""
+    reports = await _reports_by_zone(session, GatewaySession.upstream_health)
     out = []
     for row in rows:
         item = UpstreamOut.model_validate(row)
         if row.health_check_interval_ms is not None:
-            item.health = _health(reports, row.name)
+            item.health = _health(reports.get(row.zone, []), row.name)
         out.append(item)
     return out
 
 
-async def _models_out(
-    session: AsyncSession, settings: Settings, rows: Sequence[Model]
-) -> list[ModelOut]:
-    """ModelOut with `health` from the connected gateways' chat-check reports."""
-    reports = await _reports(session, settings, GatewaySession.model_health)
+async def _deployments_for(
+    session: AsyncSession, model_ids: Sequence[uuid.UUID]
+) -> dict[uuid.UUID, list[tuple[ModelDeployment, str]]]:
+    """Each model's deployments with their upstream's name, ordered by zone."""
+    out: dict[uuid.UUID, list[tuple[ModelDeployment, str]]] = {i: [] for i in model_ids}
+    if not model_ids:
+        return out
+    rows = await session.execute(
+        select(ModelDeployment, Upstream.name)
+        .join(Upstream, Upstream.id == ModelDeployment.upstream_id)
+        .where(ModelDeployment.name_id.in_(model_ids))
+        .order_by(ModelDeployment.name_id, ModelDeployment.zone)
+    )
+    for deployment, upstream_name in rows:
+        out[deployment.name_id].append((deployment, upstream_name))
+    return out
+
+
+def _deployment_out(
+    deployment: ModelDeployment, upstream_name: str, reports: list[dict], model_name: str
+) -> ModelDeploymentOut:
+    chat_check = (
+        None
+        if deployment.chat_check_interval_ms is None
+        else ChatCheckOut(
+            interval_ms=deployment.chat_check_interval_ms,
+            timeout_ms=deployment.chat_check_timeout_ms,
+            unhealthy_threshold=deployment.chat_check_unhealthy_threshold,
+            healthy_threshold=deployment.chat_check_healthy_threshold,
+        )
+    )
+    health: HealthState = "not_probed"
+    if deployment.chat_check_interval_ms is not None:
+        health = _health(reports, model_name)
+    return ModelDeploymentOut(
+        zone=deployment.zone,
+        upstream_id=deployment.upstream_id,
+        upstream_name=upstream_name,
+        upstream_model=deployment.upstream_model,
+        chat_check=chat_check,
+        health=health,
+        probe=(
+            None
+            if deployment.probe_at is None or deployment.probe_ok is None
+            else ProbeResultOut(
+                at=deployment.probe_at,
+                ok=deployment.probe_ok,
+                ok_at=deployment.probe_ok_at,
+            )
+        ),
+        created_at=deployment.created_at,
+        updated_at=deployment.updated_at,
+    )
+
+
+async def _models_out(session: AsyncSession, rows: Sequence[Model]) -> list[ModelOut]:
+    """ModelOut with its deployments (health from each zone's connected gateways)."""
+    deployments = await _deployments_for(session, [row.id for row in rows])
+    reports = await _reports_by_zone(session, GatewaySession.model_health)
     out = []
     for row in rows:
         item = ModelOut.model_validate(row)
-        if row.chat_check_interval_ms is not None:
-            item.health = _health(reports, row.name)
+        item.deployments = [
+            _deployment_out(deployment, upstream_name, reports.get(deployment.zone, []), row.name)
+            for deployment, upstream_name in deployments[row.id]
+        ]
         out.append(item)
     return out
+
+
+def _apply_chat_check(row: ModelDeployment, chat_check: ChatCheckIn | None) -> None:
+    """The deployment's periodic type-specific probe; None removes it."""
+    row.chat_check_interval_ms = chat_check.interval_ms if chat_check else None
+    row.chat_check_timeout_ms = chat_check.timeout_ms if chat_check else None
+    row.chat_check_unhealthy_threshold = chat_check.unhealthy_threshold if chat_check else None
+    row.chat_check_healthy_threshold = chat_check.healthy_threshold if chat_check else None
 
 
 def _apply_model_settings(row: Model, body: ModelCreate | ModelUpdate, *, create: bool) -> None:
@@ -407,12 +607,6 @@ def _apply_model_settings(row: Model, body: ModelCreate | ModelUpdate, *, create
         row.reasoning_mode = r.mode if r else "passthrough"
         row.reasoning_fragments = r.fragments if r else None
         row.reasoning_default_level = r.default_level if r else None
-    if create or "chat_check" in sent:
-        c = body.chat_check
-        row.chat_check_interval_ms = c.interval_ms if c else None
-        row.chat_check_timeout_ms = c.timeout_ms if c else None
-        row.chat_check_unhealthy_threshold = c.unhealthy_threshold if c else None
-        row.chat_check_healthy_threshold = c.healthy_threshold if c else None
 
 
 def _model_changes(body: ModelUpdate) -> dict[str, Any]:
@@ -439,6 +633,7 @@ def _apply_breaker(row: Upstream, breaker: CircuitBreakerIn | None) -> None:
 class RouterSpec:
     """The full desired state of a router (create body, or stored state + PATCH)."""
 
+    name: str | None
     strategy: str
     members: list[RouterMemberIn]
     params: dict[str, Any] = field(default_factory=dict)
@@ -448,11 +643,109 @@ class RouterSpec:
     sticky: StickyBy = StickyBy.NONE
     sticky_header: str | None = None
     plugin_timeout_ms: int = 0
+    reasoning_default_level: str | None = None
 
 
-async def _load_spec(session: AsyncSession, scope: str, row: Router) -> RouterSpec:
-    out = await _router_out(session, scope, row)
+async def _accepted_levels(
+    session: AsyncSession, model_ids: Iterable[uuid.UUID]
+) -> list[str] | None:
+    """The levels every one of these models accepts; None = any level."""
+    ids = set(model_ids)
+    if not ids:
+        return None
+    rows = (
+        await session.execute(
+            select(Model.reasoning_mode, Model.reasoning_fragments).where(Model.name_id.in_(ids))
+        )
+    ).all()
+    return accepted_reasoning_levels([(mode, fragments) for mode, fragments in rows])
+
+
+async def _router_model_ids(session: AsyncSession, router_id: uuid.UUID) -> list[uuid.UUID]:
+    """Models a router can call: its splits' members (or its members), plus fallbacks."""
+    has_split = await session.scalar(
+        select(func.count()).select_from(RouterSplit).where(RouterSplit.router_id == router_id)
+    )
+    if has_split:
+        member_ids = set(
+            await session.scalars(
+                select(RouterSplitMember.model_id)
+                .join(RouterSplit, RouterSplit.id == RouterSplitMember.split_id)
+                .where(RouterSplit.router_id == router_id)
+            )
+        )
+    else:
+        member_ids = set(
+            await session.scalars(
+                select(RouterMember.model_id).where(RouterMember.router_id == router_id)
+            )
+        )
+    member_ids |= set(
+        await session.scalars(
+            select(RouterFallback.model_id).where(RouterFallback.router_id == router_id)
+        )
+    )
+    return list(member_ids)
+
+
+async def _check_router_level(
+    session: AsyncSession,
+    *,
+    name: str,
+    level: str | None,
+    model_ids: Iterable[uuid.UUID],
+    field_name: str,
+) -> None:
+    """422 unless `level` is a valid level every one of `model_ids` accepts."""
+    if level is None:
+        return
+    accepted = await _accepted_levels(session, model_ids)
+    if problem := router_reasoning_problem(level, accepted):
+        raise validation_error(field_name, f"router {name!r}: {problem}")
+
+
+async def _revalidate_referencing_routers(session: AsyncSession, model_id: uuid.UUID) -> None:
+    """Refuse a model change that no longer lets a referencing router default its level."""
+    router_ids = set(
+        await session.scalars(
+            select(RouterMember.router_id).where(RouterMember.model_id == model_id)
+        )
+    )
+    router_ids |= set(
+        await session.scalars(
+            select(RouterSplit.router_id)
+            .join(RouterSplitMember, RouterSplitMember.split_id == RouterSplit.id)
+            .where(RouterSplitMember.model_id == model_id)
+        )
+    )
+    router_ids |= set(
+        await session.scalars(
+            select(RouterFallback.router_id).where(RouterFallback.model_id == model_id)
+        )
+    )
+    if not router_ids:
+        return
+    rows = (
+        await session.scalars(
+            select(Router)
+            .where(Router.name_id.in_(router_ids), Router.reasoning_default_level.is_not(None))
+            .order_by(Router.name_id)
+        )
+    ).all()
+    for row in rows:
+        await _check_router_level(
+            session,
+            name=row.name,
+            level=row.reasoning_default_level,
+            model_ids=await _router_model_ids(session, row.id),
+            field_name="reasoning",
+        )
+
+
+async def _load_spec(session: AsyncSession, zone: str, row: Router) -> RouterSpec:
+    out = await _router_out(session, zone, row)
     return RouterSpec(
+        name=row.name,
         strategy=out.strategy,
         params=out.params,
         members=[RouterMemberIn(**m.model_dump()) for m in out.members],
@@ -462,6 +755,7 @@ async def _load_spec(session: AsyncSession, scope: str, row: Router) -> RouterSp
         sticky=row.sticky,
         sticky_header=row.sticky_header,
         plugin_timeout_ms=row.plugin_timeout_ms,
+        reasoning_default_level=row.reasoning_default_level,
     )
 
 
@@ -471,7 +765,9 @@ def _members_problem(members: list[RouterMemberIn], field_name: str) -> None:
             raise validation_error(field_name, problem)
 
 
-async def _validate_spec(session: AsyncSession, spec: RouterSpec) -> None:
+async def _validate_spec(
+    session: AsyncSession, spec: RouterSpec, *, check_reasoning: bool = True
+) -> None:
     """422 for anything the gateway would reject, and for members that are not models."""
     if problem := router_problem(spec.strategy, spec.params):
         raise validation_error("strategy", problem)
@@ -522,6 +818,14 @@ async def _validate_spec(session: AsyncSession, spec: RouterSpec) -> None:
         raise validation_error(
             "members", "router members, split members and fallbacks must share one model_type"
         )
+    if check_reasoning:
+        await _check_router_level(
+            session,
+            name=spec.name or "",
+            level=spec.reasoning_default_level,
+            model_ids=all_ids,
+            field_name="reasoning_default_level",
+        )
 
 
 async def _validate_strategy(
@@ -536,7 +840,7 @@ async def _validate_strategy(
             spec.params,
             members=member_settings(spec.members, spec.traffic_split),
             force=force,
-            scope=settings.scope,
+            zone=default_zone(settings),
         )
     except PluginRejected as exc:
         raise validation_error(exc.field, exc.message) from exc
@@ -606,6 +910,7 @@ def _apply_scalars(row: Router, spec: RouterSpec) -> None:
     row.sticky = spec.sticky
     row.sticky_header = spec.sticky_header
     row.plugin_timeout_ms = spec.plugin_timeout_ms
+    row.reasoning_default_level = spec.reasoning_default_level
 
 
 def _router_out_problems(
@@ -617,9 +922,16 @@ def _router_out_problems(
     return registry.router_problems(row.strategy, row.params, member_settings(members, splits))
 
 
-async def _routers_out(session: AsyncSession, scope: str, rows: list[Router]) -> list[RouterOut]:
+async def _routers_out(
+    session: AsyncSession,
+    zone: str,
+    rows: list[Router],
+    availability: _Availability | None = None,
+) -> list[RouterOut]:
     ids = [row.id for row in rows]
-    registry = await load_plugins(session, scope)
+    registry = await load_plugins(session, zone)
+    if availability is None:
+        availability = await _availability(session)
     members: dict[uuid.UUID, list[RouterMemberOut]] = {i: [] for i in ids}
     fallbacks: dict[uuid.UUID, list[uuid.UUID]] = {i: [] for i in ids}
     splits: dict[uuid.UUID, list[TrafficSplitOut]] = {i: [] for i in ids}
@@ -658,6 +970,35 @@ async def _routers_out(session: AsyncSession, scope: str, rows: list[Router]) ->
     problems = {
         row.id: _router_out_problems(registry, row, members[row.id], splits[row.id]) for row in rows
     }
+    referencing = {
+        model_id
+        for row in rows
+        for model_id in (
+            [m.model_id for m in members[row.id]]
+            + [m.model_id for s in splits[row.id] for m in s.members]
+            + fallbacks[row.id]
+        )
+    }
+    reasoning: dict[uuid.UUID, tuple[str, dict | None]] = {
+        model_id: (mode, fragments)
+        for model_id, mode, fragments in (
+            await session.execute(
+                select(Model.name_id, Model.reasoning_mode, Model.reasoning_fragments).where(
+                    Model.name_id.in_(referencing)
+                )
+            )
+        ).all()
+    }
+    accepted: dict[uuid.UUID, list[str] | None] = {}
+    for row in rows:
+        pool = (
+            [m.model_id for s in splits[row.id] for m in s.members]
+            if splits[row.id]
+            else [m.model_id for m in members[row.id]]
+        )
+        accepted[row.id] = accepted_reasoning_levels(
+            reasoning[model_id] for model_id in pool + fallbacks[row.id] if model_id in reasoning
+        )
     types = await catalog_types(session)
     return [
         RouterOut(
@@ -679,6 +1020,11 @@ async def _routers_out(session: AsyncSession, scope: str, rows: list[Router]) ->
             sticky=row.sticky,
             sticky_header=row.sticky_header,
             plugin_timeout_ms=row.plugin_timeout_ms,
+            reasoning_default_level=row.reasoning_default_level,
+            accepted_reasoning_levels=accepted[row.id],
+            unavailable_in=availability.unavailable(
+                _router_available_zones(row.strategy, members[row.id], splits[row.id], availability)
+            ),
             config_invalid=bool(problems[row.id]),
             config_problems=problems[row.id],
             created_at=row.created_at,
@@ -688,11 +1034,29 @@ async def _routers_out(session: AsyncSession, scope: str, rows: list[Router]) ->
     ]
 
 
-async def _router_out(session: AsyncSession, scope: str, row: Router) -> RouterOut:
-    return (await _routers_out(session, scope, [row]))[0]
+async def _router_out(session: AsyncSession, zone: str, row: Router) -> RouterOut:
+    return (await _routers_out(session, zone, [row]))[0]
 
 
 # --------------------------------------------------------------------------- upstreams
+
+
+async def _existing_zone(session: AsyncSession, name: str) -> Zone:
+    """422 unless the zone exists and is live; a write into another scope is refused."""
+    row = await session.get(Zone, name)
+    if row is None or row.archived_at is not None:
+        raise validation_error("zone", f"unknown zone {name!r}")
+    return row
+
+
+async def _ensure_upstream_name_free(
+    session: AsyncSession, zone: str, name: str, *, exclude: uuid.UUID | None = None
+) -> None:
+    stmt = select(Upstream.id).where(Upstream.zone == zone, Upstream.name == name)
+    if exclude is not None:
+        stmt = stmt.where(Upstream.id != exclude)
+    if await session.scalar(stmt) is not None:
+        raise conflict(f"upstream name {name!r} is already in use in zone {zone!r}")
 
 
 @router.get("/upstreams", response_model=Page[UpstreamOut], operation_id="listUpstreams")
@@ -707,9 +1071,7 @@ async def list_upstreams(
     await authz.require(Action.ROUTING_READ)
     stmt = select(Upstream).order_by(Upstream.id)
     rows, next_cursor = await uuid_page(session, stmt, Upstream.id, limit, cursor)
-    return Page[UpstreamOut](
-        items=await _upstreams_out(session, settings, rows), next_cursor=next_cursor
-    )
+    return Page[UpstreamOut](items=await _upstreams_out(session, rows), next_cursor=next_cursor)
 
 
 @router.post(
@@ -730,12 +1092,16 @@ async def create_upstream(
     """
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
+        zone = body.zone or default_zone(settings)
+        await _existing_zone(session, zone)
+        await _ensure_upstream_name_free(session, zone, body.name)
         forced: list[str] = []
         if body.auth is not None:
-            forced = await _validate_upstream_auth(session, settings, body.auth, force=body.force)
+            forced = await _validate_upstream_auth(session, body.auth, zone=zone, force=body.force)
         row = Upstream(
             name=body.name,
+            zone=zone,
             kind=body.kind,
             base_url=body.base_url,
             api_key_ref=body.api_key_ref,
@@ -761,14 +1127,15 @@ async def create_upstream(
             principal=authz.principal,
             details={
                 "name": row.name,
+                "zone": row.zone,
                 "base_url": row.base_url,
                 "credential_stored": row.api_key_ciphertext is not None,
                 "auth_plugin": row.auth_plugin,
             },
         )
         _audit_upstream_forced(session, authz, row, forced)
-        await enqueue_recompile(session, settings, "api.upstream.create")
-    return (await _upstreams_out(session, settings, [row]))[0]
+        await enqueue_recompile(session, settings, "api.upstream.create", zone=row.zone)
+    return (await _upstreams_out(session, [row]))[0]
 
 
 @router.get("/upstreams/{upstream_id}", response_model=UpstreamOut, operation_id="getUpstream")
@@ -780,7 +1147,7 @@ async def get_upstream(
     row = await session.get(Upstream, upstream_id)
     if row is None:
         raise not_found("upstream not found")
-    return (await _upstreams_out(session, settings, [row]))[0]
+    return (await _upstreams_out(session, [row]))[0]
 
 
 @router.get(
@@ -887,7 +1254,6 @@ async def test_saved_upstream(
     if row.auth_plugin is not None:
         probe = await _gateway_probe(
             request,
-            settings,
             row,
             model="",
             url=f"{row.base_url.rstrip('/')}/models",
@@ -926,11 +1292,13 @@ async def update_upstream(
     await authz.require(Action.ROUTING_MANAGE)
     _non_null(body, "name", "kind", "base_url", "timeout_ms", "stream_usage_mode")
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         row = await session.get(Upstream, upstream_id)
         if row is None:
             raise not_found("upstream not found")
         probed = _upstream_probed(row)
+        if "name" in body.model_fields_set:
+            await _ensure_upstream_name_free(session, row.zone, body.name, exclude=row.id)
         for name in ("name", "kind", "base_url", "timeout_ms", "stream_usage_mode"):
             if name in body.model_fields_set:
                 setattr(row, name, getattr(body, name))
@@ -948,7 +1316,7 @@ async def update_upstream(
         if "auth" in body.model_fields_set:
             if body.auth is not None:
                 forced = await _validate_upstream_auth(
-                    session, settings, body.auth, force=body.force
+                    session, body.auth, zone=row.zone, force=body.force
                 )
             for name, value in _upstream_auth_columns(body.auth).items():
                 setattr(row, name, value)
@@ -964,11 +1332,11 @@ async def update_upstream(
         if _upstream_probed(row) != probed:
             for name, value in _PROBE_CLEARED.items():
                 setattr(row, name, value)
-            # Its models' results went through the old address or key.
+            # Its deployments' results went through the old address or key.
             await session.execute(
-                update(Model)
-                .where(Model.upstream_id == row.id)
-                .values(**_PROBE_CLEARED, updated_at=Model.updated_at)
+                update(ModelDeployment)
+                .where(ModelDeployment.upstream_id == row.id)
+                .values(**_PROBE_CLEARED, updated_at=ModelDeployment.updated_at)
             )
         await session.flush()
         await session.refresh(row)
@@ -988,8 +1356,8 @@ async def update_upstream(
             },
         )
         _audit_upstream_forced(session, authz, row, forced)
-        await enqueue_recompile(session, settings, "api.upstream.update")
-    return (await _upstreams_out(session, settings, [row]))[0]
+        await enqueue_recompile(session, settings, "api.upstream.update", zone=row.zone)
+    return (await _upstreams_out(session, [row]))[0]
 
 
 @router.delete(
@@ -1007,13 +1375,15 @@ async def delete_upstream(
     """Requires an installation admin. Answers 409 while the upstream still has models."""
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         row = await session.get(Upstream, upstream_id)
         if row is None:
             raise not_found("upstream not found")
-        model = await session.scalar(select(Model.id).where(Model.upstream_id == row.id).limit(1))
-        if model is not None:
-            raise conflict("upstream still has models")
+        deployment = await session.scalar(
+            select(ModelDeployment.name_id).where(ModelDeployment.upstream_id == row.id).limit(1)
+        )
+        if deployment is not None:
+            raise conflict("upstream still has deployments")
         await session.delete(row)
         audit.record(
             session,
@@ -1023,7 +1393,7 @@ async def delete_upstream(
             principal=authz.principal,
             details={"name": row.name},
         )
-        await enqueue_recompile(session, settings, "api.upstream.delete")
+        await enqueue_recompile(session, settings, "api.upstream.delete", zone=row.zone)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -1070,7 +1440,7 @@ async def list_models(
     stmt = select(Model).order_by(Model.name_id)
     rows, next_cursor = await uuid_page(session, stmt, Model.name_id, limit, cursor)
     return Page[ModelOut](
-        items=await _models_out(session, settings, rows),
+        items=await _models_out(session, rows),
         next_cursor=next_cursor,
     )
 
@@ -1087,20 +1457,16 @@ async def create_model(
     session: SessionDep,
     settings: SettingsDep,
 ) -> ModelOut:
-    """Create a model: one name served by one upstream model. Requires an installation admin. The
-    name shares one namespace with aliases and routers.
+    """Create a model definition. Requires an installation admin. The name shares one
+    namespace with aliases and routers. A model is served only where it has a deployment
+    (`PUT /models/{id}/deployments/{zone}`); creating it does not make it callable.
     """
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
-        await lock_scope(session, settings)
-        upstream = await session.get(Upstream, body.upstream_id)
-        if upstream is None:
-            raise validation_error("upstream_id", "unknown upstream")
+        await lock_hierarchy(session)
         name = await _claim(session, body.name, CatalogKind.MODEL)
         row = Model(
             name_id=name.id,
-            upstream_id=upstream.id,
-            upstream_model=body.upstream_model,
             model_type=body.model_type,
             price_nano_usd_per_audio_second=body.price_nano_usd_per_audio_second,
             price_input_nano_usd_per_mtok=body.price_input_nano_usd_per_mtok,
@@ -1116,10 +1482,10 @@ async def create_model(
             resource_type="model",
             resource_id=row.id,
             principal=authz.principal,
-            details={"name": row.name, "upstream": upstream.name, "model_type": row.model_type},
+            details={"name": row.name, "model_type": row.model_type},
         )
         await enqueue_recompile(session, settings, "api.model.create")
-    return (await _models_out(session, settings, [row]))[0]
+    return (await _models_out(session, [row]))[0]
 
 
 @router.get(
@@ -1135,7 +1501,7 @@ async def get_model(
     row = await session.get(Model, model_id)
     if row is None:
         raise not_found("model not found")
-    return (await _models_out(session, settings, [row]))[0]
+    return (await _models_out(session, [row]))[0]
 
 
 @router.post("/models/test", response_model=ModelTestOut, operation_id="testModel")
@@ -1167,52 +1533,41 @@ async def test_model(
     probe, reply = await upstream_client.chat_check(
         upstream.base_url, token, body.upstream_model, body.default_body, body.model_type
     )
-    if body.model_id is not None:
-        await _record_probe(
-            session,
-            Model,
-            [
-                Model.name_id == body.model_id,
-                Model.upstream_id == body.upstream_id,
-                Model.upstream_model == body.upstream_model,
-                Model.model_type == body.model_type,
-                Model.default_body.is_not_distinct_from(body.default_body),
-            ],
-            probe.ok,
-        )
+    if body.model_id is not None and body.zone is not None:
+        model = await session.get(Model, body.model_id)
+        if model is not None and model.model_type == body.model_type:
+            await _record_probe(
+                session,
+                ModelDeployment,
+                [
+                    ModelDeployment.name_id == body.model_id,
+                    ModelDeployment.zone == body.zone,
+                    ModelDeployment.upstream_id == body.upstream_id,
+                    ModelDeployment.upstream_model == body.upstream_model,
+                ],
+                probe.ok,
+            )
     return ModelTestOut(credential=credential, probe=ProbeOut(**vars(probe)), reply=reply)
 
 
-@router.post(
-    "/models/{model_id}/test",
-    response_model=ModelTestOut,
-    operation_id="testSavedModel",
-)
-async def test_saved_model(
-    model_id: uuid.UUID,
+async def _test_saved_deployment(
     request: Request,
-    authz: Authz,
-    session: SessionDep,
-    settings: SettingsDep,
+    session: AsyncSession,
+    settings: Settings,
+    row: Model,
+    zone: str,
 ) -> ModelTestOut:
-    """Probe a saved model now with the configuration in the database. Without a WASM auth
-    plugin on its upstream the control plane calls the typed endpoint directly; with one, a
-    gateway connected to this control-plane process that advertises `upstream_probe` and
-    reports the plugin runs it. No such gateway is 409 `no_gateway_for_plugin`, no answer in
-    time is 504 `probe_timeout`, and the reply is never returned (the gateway sends no body).
-    """
-    await authz.require(Action.ROUTING_MANAGE)
-    row = await session.get(Model, model_id)
-    if row is None:
-        raise not_found("model not found")
-    upstream = await session.get(Upstream, row.upstream_id)
+    """Probe one saved deployment and keep the result on it."""
+    deployment = await session.get(ModelDeployment, (row.id, zone))
+    if deployment is None:
+        raise not_found("deployment not found")
+    upstream = await session.get(Upstream, deployment.upstream_id)
     if upstream is None:
         raise not_found("upstream not found")
     reply: str | None = None
     if upstream.auth_plugin is not None:
         probe = await _gateway_probe(
             request,
-            settings,
             upstream,
             model=row.name,
             url=_model_probe_url(upstream, row.model_type),
@@ -1231,7 +1586,7 @@ async def test_saved_model(
         outcome, reply = await upstream_client.chat_check(
             upstream.base_url,
             token,
-            row.upstream_model,
+            deployment.upstream_model,
             row.default_body,
             row.model_type,
         )
@@ -1239,17 +1594,172 @@ async def test_saved_model(
     if _recordable(credential, probe):
         await _record_probe(
             session,
-            Model,
+            ModelDeployment,
             [
-                Model.name_id == row.id,
-                Model.upstream_id == row.upstream_id,
-                Model.upstream_model == row.upstream_model,
-                Model.model_type == row.model_type,
-                Model.default_body.is_not_distinct_from(row.default_body),
+                ModelDeployment.name_id == row.id,
+                ModelDeployment.zone == zone,
+                ModelDeployment.upstream_id == deployment.upstream_id,
+                ModelDeployment.upstream_model == deployment.upstream_model,
             ],
             probe.ok,
         )
     return ModelTestOut(credential=credential, probe=probe, reply=reply)
+
+
+@router.post(
+    "/models/{model_id}/deployments/{zone}/test",
+    response_model=ModelTestOut,
+    operation_id="testDeployment",
+)
+async def test_deployment(
+    model_id: uuid.UUID,
+    zone: ZoneId,
+    request: Request,
+    authz: Authz,
+    session: SessionDep,
+    settings: SettingsDep,
+) -> ModelTestOut:
+    """Probe a saved deployment now with the configuration in the database. Without a WASM
+    auth plugin on its upstream the control plane calls the typed endpoint directly; with
+    one, a gateway of that zone connected to this control-plane process that advertises
+    `upstream_probe` and reports the plugin runs it. No such gateway is 409
+    `no_gateway_for_plugin`, no answer in time is 504 `probe_timeout`, and the reply is
+    never returned (the gateway sends no body).
+    """
+    await authz.require(Action.ROUTING_MANAGE)
+    row = await session.get(Model, model_id)
+    if row is None:
+        raise not_found("model not found")
+    return await _test_saved_deployment(request, session, settings, row, zone)
+
+
+@router.post(
+    "/models/{model_id}/test",
+    response_model=ModelTestOut,
+    operation_id="testSavedModel",
+)
+async def test_saved_model(
+    model_id: uuid.UUID,
+    request: Request,
+    authz: Authz,
+    session: SessionDep,
+    settings: SettingsDep,
+) -> ModelTestOut:
+    """Probe the model's deployment in the default zone now. The same as
+    `POST /models/{id}/deployments/{zone}/test` for the default zone; a client that knows
+    the deployment's zone uses that endpoint.
+    """
+    await authz.require(Action.ROUTING_MANAGE)
+    row = await session.get(Model, model_id)
+    if row is None:
+        raise not_found("model not found")
+    return await _test_saved_deployment(request, session, settings, row, default_zone(settings))
+
+
+@router.put(
+    "/models/{model_id}/deployments/{zone}",
+    response_model=ModelDeploymentOut,
+    operation_id="putModelDeployment",
+)
+async def put_model_deployment(
+    model_id: uuid.UUID,
+    zone: ZoneId,
+    body: ModelDeploymentIn,
+    authz: Authz,
+    session: SessionDep,
+    settings: SettingsDep,
+) -> ModelDeploymentOut:
+    """Create or replace the model's deployment in one zone: the upstream model that serves
+    it there. Requires an installation admin. The upstream must belong to the same zone;
+    changing it clears the deployment's stored Test now result. Only that zone recompiles.
+    """
+    await authz.require(Action.ROUTING_MANAGE)
+    async with mutation(session):
+        await lock_hierarchy(session)
+        row = await session.get(Model, model_id)
+        if row is None:
+            raise not_found("model not found")
+        await _existing_zone(session, zone)
+        upstream = await session.get(Upstream, body.upstream_id)
+        if upstream is None:
+            raise validation_error("upstream_id", "unknown upstream")
+        if upstream.zone != zone:
+            raise validation_error(
+                "upstream_id",
+                f"upstream {upstream.name!r} belongs to zone {upstream.zone!r}, not {zone!r}",
+            )
+        deployment = await session.get(ModelDeployment, (model_id, zone))
+        changed = deployment is None or _deployment_probed(deployment, row) != (
+            upstream.id,
+            body.upstream_model,
+            row.model_type,
+            row.default_body,
+        )
+        if deployment is None:
+            deployment = ModelDeployment(name_id=model_id, zone=zone)
+            session.add(deployment)
+        deployment.upstream_id = upstream.id
+        deployment.upstream_model = body.upstream_model
+        _apply_chat_check(deployment, body.chat_check)
+        if changed:
+            for name, value in _PROBE_CLEARED.items():
+                setattr(deployment, name, value)
+        await session.flush()
+        await session.refresh(deployment)
+        audit.record(
+            session,
+            action="model.deployment_put",
+            resource_type="model_deployment",
+            resource_id=row.id,
+            principal=authz.principal,
+            details={
+                "name": row.name,
+                "zone": zone,
+                "upstream": upstream.name,
+                "upstream_model": deployment.upstream_model,
+            },
+        )
+        await enqueue_recompile(session, settings, "api.model.deployment_put", zone=zone)
+    return _deployment_out(deployment, upstream.name, [], row.name)
+
+
+@router.delete(
+    "/models/{model_id}/deployments/{zone}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+    operation_id="deleteModelDeployment",
+)
+async def delete_model_deployment(
+    model_id: uuid.UUID,
+    zone: ZoneId,
+    authz: Authz,
+    session: SessionDep,
+    settings: SettingsDep,
+) -> Response:
+    """Remove the model's deployment in one zone: it stops being callable there and that
+    zone recompiles. Requires an installation admin.
+    """
+    await authz.require(Action.ROUTING_MANAGE)
+    async with mutation(session):
+        await lock_hierarchy(session)
+        row = await session.get(Model, model_id)
+        if row is None:
+            raise not_found("model not found")
+        deployment = await session.get(ModelDeployment, (model_id, zone))
+        if deployment is None:
+            raise not_found("deployment not found")
+        await session.delete(deployment)
+        await session.flush()
+        audit.record(
+            session,
+            action="model.deployment_delete",
+            resource_type="model_deployment",
+            resource_id=row.id,
+            principal=authz.principal,
+            details={"name": row.name, "zone": zone},
+        )
+        await enqueue_recompile(session, settings, "api.model.deployment_delete", zone=zone)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.patch(
@@ -1270,13 +1780,13 @@ async def update_model(
     model.
     """
     await authz.require(Action.ROUTING_MANAGE)
-    _non_null(body, "name", "upstream_id", "upstream_model", "model_type")
+    _non_null(body, "name", "model_type")
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         row = await session.get(Model, model_id)
         if row is None:
             raise not_found("model not found")
-        probed = _model_probed(row)
+        probed = (row.model_type, row.default_body)
         if body.model_type is not None and body.model_type != row.model_type:
             for edge in (RouterMember, RouterSplitMember, RouterFallback):
                 if await session.scalar(
@@ -1286,13 +1796,6 @@ async def update_model(
         renaming = body.name is not None and body.name != row.name
         if body.keep_old_name_as_alias and not renaming:
             raise validation_error("keep_old_name_as_alias", "needs a new name")
-        if body.upstream_id is not None:
-            upstream = await session.get(Upstream, body.upstream_id)
-            if upstream is None:
-                raise validation_error("upstream_id", "unknown upstream")
-            row.upstream_id = upstream.id
-        if body.upstream_model is not None:
-            row.upstream_model = body.upstream_model
         # Finish all lookups before changing type-dependent fields: a query could
         # otherwise autoflush a temporarily inconsistent state during a PATCH.
         if body.model_type is not None:
@@ -1316,9 +1819,16 @@ async def update_model(
             validate_model_settings(row)
         except ValueError as exc:
             raise validation_error("model_type", str(exc)) from None
-        if _model_probed(row) != probed:
-            for name, value in _PROBE_CLEARED.items():
-                setattr(row, name, value)
+        # A reasoning change can remove a level a referencing router defaults to.
+        if "reasoning" in body.model_fields_set:
+            await _revalidate_referencing_routers(session, row.id)
+        if (row.model_type, row.default_body) != probed:
+            # Every deployment probed through the old type or defaults.
+            await session.execute(
+                update(ModelDeployment)
+                .where(ModelDeployment.name_id == row.id)
+                .values(**_PROBE_CLEARED, updated_at=ModelDeployment.updated_at)
+            )
         if renaming:
             old_name = await _rename(session, row.id, body.name)
             row.updated_at = func.now()
@@ -1365,7 +1875,7 @@ async def update_model(
             details={"name": row.name, "changes": _model_changes(body)},
         )
         await enqueue_recompile(session, settings, "api.model.update")
-    return (await _models_out(session, settings, [row]))[0]
+    return (await _models_out(session, [row]))[0]
 
 
 @router.delete(
@@ -1385,7 +1895,7 @@ async def delete_model(
     """
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         row = await session.get(Model, model_id)
         if row is None:
             raise not_found("model not found")
@@ -1414,10 +1924,31 @@ async def _alias_target(session: AsyncSession, target: uuid.UUID) -> CatalogKind
     return kind
 
 
-async def _alias_out(session: AsyncSession, row: Alias, types=None) -> AliasOut:
+async def _alias_out(
+    session: AsyncSession,
+    row: Alias,
+    types=None,
+    availability: _Availability | None = None,
+) -> AliasOut:
     item = AliasOut.model_validate(row)
     item.model_type = (await catalog_types(session) if types is None else types).get(row.id)
+    availability = availability if availability is not None else await _availability(session)
+    target = await _target_available_zones(session, [row], availability)
+    item.unavailable_in = availability.unavailable(target.get(row.target_name_id, set()))
     return item
+
+
+async def _aliases_out(session: AsyncSession, rows: Sequence[Alias], types=None) -> list[AliasOut]:
+    types = await catalog_types(session) if types is None else types
+    availability = await _availability(session)
+    targets = await _target_available_zones(session, rows, availability)
+    out = []
+    for row in rows:
+        item = AliasOut.model_validate(row)
+        item.model_type = types.get(row.id)
+        item.unavailable_in = availability.unavailable(targets.get(row.target_name_id, set()))
+        out.append(item)
+    return out
 
 
 @router.get("/aliases", response_model=Page[AliasOut], operation_id="listAliases")
@@ -1432,9 +1963,7 @@ async def list_aliases(
     stmt = select(Alias).order_by(Alias.name_id)
     rows, next_cursor = await uuid_page(session, stmt, Alias.name_id, limit, cursor)
     types = await catalog_types(session)
-    return Page[AliasOut](
-        items=[await _alias_out(session, row, types) for row in rows], next_cursor=next_cursor
-    )
+    return Page[AliasOut](items=await _aliases_out(session, rows, types), next_cursor=next_cursor)
 
 
 @router.post(
@@ -1454,7 +1983,7 @@ async def create_alias(
     """
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         kind = await _alias_target(session, body.target)
         name = await _claim(session, body.name, CatalogKind.ALIAS)
         row = Alias(name_id=name.id, target_name_id=body.target, target_kind=kind.value)
@@ -1495,7 +2024,7 @@ async def update_alias(
     await authz.require(Action.ROUTING_MANAGE)
     _non_null(body, "name", "target")
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         row = await session.get(Alias, alias_id)
         if row is None:
             raise not_found("alias not found")
@@ -1543,7 +2072,7 @@ async def delete_alias(
     """Requires an installation admin. Grants of the alias are removed with it."""
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         row = await session.get(Alias, alias_id)
         if row is None:
             raise not_found("alias not found")
@@ -1576,7 +2105,7 @@ async def list_routers(
     stmt = select(Router).order_by(Router.name_id)
     rows, next_cursor = await uuid_page(session, stmt, Router.name_id, limit, cursor)
     return Page[RouterOut](
-        items=await _routers_out(session, settings.scope, rows), next_cursor=next_cursor
+        items=await _routers_out(session, default_zone(settings), rows), next_cursor=next_cursor
     )
 
 
@@ -1599,6 +2128,7 @@ async def create_router(
     """
     await authz.require(Action.ROUTING_MANAGE)
     spec = RouterSpec(
+        name=body.name,
         strategy=body.strategy,
         params=body.params,
         members=list(body.members),
@@ -1608,9 +2138,10 @@ async def create_router(
         sticky=body.sticky,
         sticky_header=body.sticky_header,
         plugin_timeout_ms=body.plugin_timeout_ms,
+        reasoning_default_level=body.reasoning_default_level,
     )
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         await _validate_spec(session, spec)
         forced = await _validate_strategy(session, settings, spec, force=body.force)
         name = await _claim(session, body.name, CatalogKind.ROUTER)
@@ -1647,7 +2178,7 @@ async def create_router(
         )
         _audit_forced(session, authz, row, spec.strategy, forced)
         await enqueue_recompile(session, settings, "api.router.create")
-    return await _router_out(session, settings.scope, row)
+    return await _router_out(session, default_zone(settings), row)
 
 
 @router.get("/routers/{router_id}", response_model=RouterOut, operation_id="getRouter")
@@ -1659,7 +2190,7 @@ async def get_router(
     row = await session.get(Router, router_id)
     if row is None:
         raise not_found("router not found")
-    return await _router_out(session, settings.scope, row)
+    return await _router_out(session, default_zone(settings), row)
 
 
 @router.patch("/routers/{router_id}", response_model=RouterOut, operation_id="updateRouter")
@@ -1687,11 +2218,11 @@ async def update_router(
     )
     fields = body.model_fields_set
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         row = await session.get(Router, router_id)
         if row is None:
             raise not_found("router not found")
-        spec = await _load_spec(session, settings.scope, row)
+        spec = await _load_spec(session, default_zone(settings), row)
         for name in fields - {"name", "force"}:
             setattr(spec, name, getattr(body, name))
         # Params belong to one strategy: changing it drops them unless the body sends new ones.
@@ -1700,7 +2231,14 @@ async def update_router(
         # Leaving header stickiness drops the header unless the body names one.
         if spec.sticky is not StickyBy.HEADER and "sticky_header" not in fields:
             spec.sticky_header = None
-        await _validate_spec(session, spec)
+        await _validate_spec(
+            session,
+            spec,
+            check_reasoning=bool(
+                fields
+                & {"reasoning_default_level", "members", "traffic_split", "fallback_model_ids"}
+            ),
+        )
         # Settings already stored stay as they are (`config_invalid`) until they are changed:
         # an upgraded schema must not block a rename or a retry change.
         forced = []
@@ -1743,7 +2281,7 @@ async def update_router(
         )
         _audit_forced(session, authz, row, spec.strategy, forced)
         await enqueue_recompile(session, settings, "api.router.update")
-    return await _router_out(session, settings.scope, row)
+    return await _router_out(session, default_zone(settings), row)
 
 
 @router.delete(
@@ -1763,7 +2301,7 @@ async def delete_router(
     """
     await authz.require(Action.ROUTING_MANAGE)
     async with mutation(session):
-        await lock_scope(session, settings)
+        await lock_hierarchy(session)
         row = await session.get(Router, router_id)
         if row is None:
             raise not_found("router not found")

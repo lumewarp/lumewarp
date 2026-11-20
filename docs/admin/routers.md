@@ -1,7 +1,10 @@
 # Routers
 
-A router is a name that spreads requests over member models with a strategy, and adds
-retries, fallbacks and traffic splits. This page lists the settings and their rules; how
+A router is a global name that spreads requests over member models with a strategy, and adds
+retries, fallbacks and traffic splits. Each zone compiles that definition against its own
+model deployments: members without a deployment there are dropped with a warning, and a
+router with no remaining members is unavailable in that zone. The same model can therefore
+be routed differently in different zones. This page lists the settings and their rules; how
 each behaves at request time is described under [Retry and health behavior](#retry-and-health-behavior).
 
 ![Editing a router](/screenshots/router-edit.png)
@@ -36,7 +39,7 @@ drops the header.
 ## Strategies and plugins
 
 A router's `params` and member `params` are validated against the schema the
-strategy declares, as reported by gateways in `Hello.plugins`, and against the committed
+strategy declares, as reported by gateways in the selected zone's `Hello.plugins`, and against the committed
 built-in manifest `compiler/builtin_plugins.json`, so built-ins work with no gateway connected.
 An unreported strategy or a schema failure is 422. A connected gateway lacking the strategy is
 422 unless the write has `force`, audited as `router.force_save`, because that gateway will NACK
@@ -48,7 +51,9 @@ MCP server's, A2A agent's or LLM upstream's auth plugin (kinds `upstream-auth` a
 `a2a-middleware`) uses. Full rules: [gateway plugins](../plugins.md).
 
 The compiler lists a capability in `required_capabilities` exactly when a field needs it
-(the gateway's rule): `health_check`, `circuit_breaker`, `vllm_load` (a metrics URL), `retry`,
+(the gateway's rule). Strategy support is checked against the gateways in the router's zone;
+upstream health and model probes are also aggregated within each zone. Capabilities include
+`health_check`, `circuit_breaker`, `vllm_load` (a metrics URL), `retry`,
 `fallbacks`, `traffic_split` (split or sticky) and `strategy:<name>` for every strategy in use.
 `lowest_latency` is not a capability of its own any more: it is `strategy:lowest_latency`.
 

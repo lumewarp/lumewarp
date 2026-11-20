@@ -4,6 +4,8 @@
 #   scripts/dev-idp.sh up      start, wait until healthy, `openfga init` the store, print env
 #   scripts/dev-idp.sh down    stop and remove only the IdP containers
 #   scripts/dev-idp.sh status  show containers, health and `openfga check`
+# DEV_IDP_OPENFGA=0 makes `up` start Keycloak only and leave the OpenFGA variables out of
+# the printed env (scripts/dev.sh sets it unless DEV_AUTHZ=openfga).
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -17,6 +19,7 @@ store_name="lumewarp"
 oidc_client_id="lumewarp-cp"
 oidc_client_secret="lumewarp-dev-secret"
 ready_timeout=180
+with_openfga="${DEV_IDP_OPENFGA:-1}"
 
 wait_http() { # url, what
   local url=$1 what=$2 i
@@ -40,18 +43,25 @@ print_env() {
 export LUMEWARP_OIDC_ISSUER=$keycloak_url/realms/$realm
 export LUMEWARP_OIDC_CLIENT_ID=$oidc_client_id
 export LUMEWARP_OIDC_CLIENT_SECRET=$oidc_client_secret
-export LUMEWARP_OPENFGA_URL=$openfga_url
-export LUMEWARP_OPENFGA_STORE=$store_name
 EOF
+  if [[ $with_openfga == 1 ]]; then
+    echo "export LUMEWARP_OPENFGA_URL=$openfga_url"
+    echo "export LUMEWARP_OPENFGA_STORE=$store_name"
+  fi
 }
 
 case "${1:-}" in
   up)
-    dc up -d keycloak openfga
+    if [[ $with_openfga == 1 ]]; then
+      dc up -d keycloak openfga
+    else
+      dc up -d keycloak
+    fi
     wait_http "$keycloak_url/realms/$realm/.well-known/openid-configuration" keycloak
-    wait_http "$openfga_url/healthz" openfga
-
-    openfga init
+    if [[ $with_openfga == 1 ]]; then
+      wait_http "$openfga_url/healthz" openfga
+      openfga init
+    fi
     print_env
     ;;
   down)

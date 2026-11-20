@@ -102,8 +102,10 @@ def test_org_admin_administers_its_teams_and_another_org_is_404(client, world: W
     other = world.team_b.id
 
     # Quota, team admin assignment, service accounts and another member's key.
-    quota = client.patch(
-        f"/api/v1/teams/{world.team_a.id}", json={"rpm_limit": 42}, headers=headers
+    quota = client.put(
+        "/api/v1/zones/api-test/limits",
+        json={"team_id": str(world.team_a.id), "rpm_limit": 42},
+        headers=headers,
     )
     assert quota.status_code == 200, quota.text
     promoted = client.put(
@@ -128,7 +130,11 @@ def test_org_admin_administers_its_teams_and_another_org_is_404(client, world: W
     # Nothing of another org exists for this caller, including the workspace filters.
     assert client.get(f"/api/v1/teams/{other}", headers=headers).status_code == 404
     assert (
-        client.patch(f"/api/v1/teams/{other}", json={"rpm_limit": 1}, headers=headers).status_code
+        client.put(
+            "/api/v1/zones/api-test/limits",
+            json={"team_id": str(other), "rpm_limit": 1},
+            headers=headers,
+        ).status_code
         == 404
     )
     assert (
@@ -178,8 +184,10 @@ def test_org_admin_owns_keys_in_its_org_teams_only(client, world: World) -> None
 
 def test_team_admin_can_neither_set_quota_nor_assign_admins(client, world: World) -> None:
     headers = world.team_admin_pat
-    response = client.patch(
-        f"/api/v1/teams/{world.team_a.id}", json={"rpm_limit": 5}, headers=headers
+    response = client.put(
+        "/api/v1/zones/api-test/limits",
+        json={"team_id": str(world.team_a.id), "rpm_limit": 5},
+        headers=headers,
     )
     assert response.status_code == 403, response.text
     response = client.put(
@@ -201,8 +209,10 @@ def test_installation_admin_can_do_everything(client, world: World) -> None:
     for team in (world.team_a, world.team_b):
         assert client.get(f"/api/v1/teams/{team.id}", headers=ADMIN_AUTH).status_code == 200
         assert (
-            client.patch(
-                f"/api/v1/teams/{team.id}", json={"rpm_limit": 7}, headers=ADMIN_AUTH
+            client.put(
+                "/api/v1/zones/api-test/limits",
+                json={"team_id": str(team.id), "rpm_limit": 7},
+                headers=ADMIN_AUTH,
             ).status_code
             == 200
         )
@@ -256,28 +266,32 @@ def test_users_me_lists_admin_orgs_and_their_teams_as_inherited(client, world: W
 def test_org_admin_audit_covers_its_teams_only(client, world: World) -> None:
     # Produce one team-scoped row through the org admin itself.
     assert (
-        client.patch(
-            f"/api/v1/teams/{world.team_a.id}", json={"rpm_limit": 11}, headers=world.org_admin_pat
+        client.put(
+            "/api/v1/zones/api-test/limits",
+            json={"team_id": str(world.team_a.id), "rpm_limit": 11},
+            headers=world.org_admin_pat,
         ).status_code
         == 200
     )
     rows = client.get("/api/v1/audit", headers=world.org_admin_pat).json()["items"]
     assert rows and all(row["team_id"] == str(world.team_a.id) for row in rows)
-    assert {row["action"] for row in rows} >= {"team.update"}
+    assert {row["action"] for row in rows} >= {"zone.limits.update"}
     # A plain member has no audit view at all.
     assert client.get("/api/v1/audit", headers=world.member_pat).status_code == 403
 
 
 async def test_audit_rows_carry_the_team_org(client, committed, world: World) -> None:
     assert (
-        client.patch(
-            f"/api/v1/teams/{world.team_a.id}", json={"rpm_limit": 13}, headers=world.org_admin_pat
+        client.put(
+            "/api/v1/zones/api-test/limits",
+            json={"team_id": str(world.team_a.id), "rpm_limit": 13},
+            headers=world.org_admin_pat,
         ).status_code
         == 200
     )
     row = await committed.scalar(
         select(AuditLog)
-        .where(AuditLog.action == "team.update", AuditLog.team_id == world.team_a.id)
+        .where(AuditLog.action == "zone.limits.update", AuditLog.team_id == world.team_a.id)
         .order_by(AuditLog.id.desc())
     )
     assert row is not None and row.org_id == world.org_a.id

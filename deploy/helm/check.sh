@@ -81,6 +81,9 @@ expect "defaults: gateway is a Deployment" '^kind: Deployment' "$workload"
 expect "defaults: one replica" '^  replicas: 1$' "$workload"
 expect "defaults: per-pod emptyDir for the state directory" '^          emptyDir: \{\}$' "$workload"
 expect "defaults: readiness stays on /readyz" 'path: /readyz' "$workload"
+expect "defaults: gateway token Secret" 'LUMEWARP_GATEWAY_ZONE_DEFAULT_TOKEN:' "$(doc gateway-tokens-secret.yaml)"
+expect "defaults: control plane reads every zone token" 'name: lumewarp-gateway-tokens' "$(doc control-plane-deployment.yaml)"
+expect "defaults: gateway reads its zone token" 'key: LUMEWARP_GATEWAY_ZONE_DEFAULT_TOKEN' "$workload"
 refute "defaults: no StatefulSet" '^kind: StatefulSet' "$whole"
 refute "defaults: no volumeClaimTemplates" 'volumeClaimTemplates' "$whole"
 refute "defaults: no PersistentVolumeClaim" '^kind: PersistentVolumeClaim' "$whole"
@@ -200,7 +203,7 @@ render valkey-existing-secret --set valkey.enabled=true --set valkey.auth.existi
   --set gateway.replicaCount=2
 whole="$(cat "$file")"
 expect "valkey existingSecret: mounts the named Secret" '^            secretName: valkey-auth$' "$whole"
-refute "valkey existingSecret: the chart creates no Secret" '^kind: Secret' "$whole"
+refute "valkey existingSecret: the chart creates no valkey password Secret" '^  password: "' "$whole"
 
 # --- external Redis ----------------------------------------------------------------------
 render external-redis --set gateway.sharedLimits.redis.existingSecret=external-redis \
@@ -210,7 +213,7 @@ whole="$(cat "$file")"
 expect "external redis: URL from the Secret" 'name: external-redis' "$workload"
 expect "external redis: named key" '^                  key: redis-url$' "$workload"
 refute "external redis: no Valkey image" 'valkey/valkey' "$whole"
-refute "external redis: the chart creates no Secret" '^kind: Secret' "$whole"
+refute "external redis: no chart-created valkey Secret" '^  password: "' "$whole"
 refute "external redis: no requirepass anywhere" 'requirepass' "$whole"
 
 # --- disruption budget -------------------------------------------------------------------
@@ -275,15 +278,22 @@ cm="$(doc gateway-configmap.yaml)"
 expect "defaults: listen on 4000" 'listen: "0.0.0.0:4000"' "$cm"
 expect "defaults: admin listen on 9464" 'admin_listen: "0.0.0.0:9464"' "$cm"
 
-# --- global: scope, image tag, plugins ------------------------------------------------------
-render global --set global.scope=prod --set global.imageTag=9.9.9 \
+# --- global: zone, image tag, plugins -------------------------------------------------------
+render global --set global.zone=prod --set global.imageTag=9.9.9 \
   --set gateway.plugins.volume.persistentVolumeClaim.claimName=plug
 whole="$(cat "$file")"
-expect "global: scope on the control plane" '^ +value: "prod"$' "$(doc control-plane-deployment.yaml)"
-expect "global: scope on the gateway" '^ +value: "prod"$' "$(doc gateway-deployment.yaml)"
+expect "global: zone on the control plane" '^ +value: "prod"$' "$(doc control-plane-deployment.yaml)"
+expect "global: zone on the gateway" '^ +value: "prod"$' "$(doc gateway-deployment.yaml)"
 expect "global: imageTag on both components" 'lumewarp-gateway:9.9.9' "$whole"
 expect "global: imageTag on the control plane" 'lumewarp-control-plane:9.9.9' "$whole"
 expect "plugins: fixed directories" 'value: "/etc/lumewarp/plugins/a2a-middleware"' "$(doc gateway-deployment.yaml)"
+
+# --- one Secret with a token per zone -----------------------------------------------------
+render two-zones --set 'global.gatewayTokens.zones={prod}'
+tokens="$(doc gateway-tokens-secret.yaml)"
+expect "two zones: default token key" 'LUMEWARP_GATEWAY_ZONE_DEFAULT_TOKEN:' "$tokens"
+expect "two zones: prod token key" 'LUMEWARP_GATEWAY_ZONE_PROD_TOKEN:' "$tokens"
+expect "two zones: the gateway still reads the default zone key" 'key: LUMEWARP_GATEWAY_ZONE_DEFAULT_TOKEN' "$(doc gateway-deployment.yaml)"
 
 # --- rejected value sets -----------------------------------------------------------------
 reject redis-conflict 'mutually exclusive' --set valkey.enabled=true \

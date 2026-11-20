@@ -1,3 +1,5 @@
+import type { Zone } from "../api";
+import { fmtLifetime } from "../pages/keyText";
 import { NumberField } from "./Form";
 
 /** The key level of the quota hierarchy: rpm, tpm and parallelism, all optional. */
@@ -81,4 +83,38 @@ export function KeyLimitFields({
       />
     </>
   );
+}
+
+/** The rules a zone sets for keys created in it. */
+export type ZoneKeyRules = Pick<Zone, "key_min_creator_role" | "key_max_lifetime_seconds" | "key_expiry_required" | "key_max_per_member" | "user_keys_allowed" | "service_account_keys_allowed" | "playground_allowed">;
+
+const ROLE_RANK = { member: 0, team_admin: 1, org_admin: 2 } as const;
+const MIN_ROLE_TEXT = { member: "a member", team_admin: "a team admin", org_admin: "an org admin" } as const;
+
+/**
+ * Why no key can be created in the zone right now, or null when one can. `role` is the caller's role in the team,
+ * `inherited` how an inherited administration reaches it ("org" | "installation" | null for a direct role).
+ * The server enforces the same rules; this only explains a refusal before it happens.
+ */
+export function keyCreationBlock(
+  rules: ZoneKeyRules | undefined,
+  zoneLabel: string,
+  { role, inherited, serviceAccount }: { role: "admin" | "member"; inherited?: string | null; serviceAccount: boolean },
+): string | null {
+  if (!rules) return null;
+  const rank = inherited ? 2 : role === "admin" ? 1 : 0;
+  if (!serviceAccount && !rules.user_keys_allowed) return `${zoneLabel} does not allow user keys.`;
+  if (serviceAccount && !rules.service_account_keys_allowed) return `${zoneLabel} does not allow service-account keys.`;
+  if (rank < ROLE_RANK[rules.key_min_creator_role]) return `Keys in ${zoneLabel} can only be created by ${MIN_ROLE_TEXT[rules.key_min_creator_role]} or above.`;
+  return null;
+}
+
+/** The zone's key rules worth telling the creator, one short sentence each. */
+export function keyRuleNotes(rules: ZoneKeyRules | undefined, zoneLabel: string, perMemberCap: number | null | undefined = rules?.key_max_per_member): string[] {
+  if (!rules) return [];
+  return [
+    rules.key_max_lifetime_seconds != null ? `Keys in ${zoneLabel} live at most ${fmtLifetime(rules.key_max_lifetime_seconds)}.` : null,
+    rules.key_expiry_required ? `An expiry is required in ${zoneLabel}.` : null,
+    perMemberCap != null ? `At most ${perMemberCap} non-revoked keys per member in ${zoneLabel}.` : null,
+  ].filter((note): note is string => !!note);
 }

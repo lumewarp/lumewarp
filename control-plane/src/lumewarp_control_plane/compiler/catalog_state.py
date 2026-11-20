@@ -23,6 +23,7 @@ from lumewarp_control_plane.models import (
     CatalogName,
     McpServer,
     Model,
+    ModelDeployment,
     Router,
     RouterFallback,
     RouterMember,
@@ -32,7 +33,14 @@ from lumewarp_control_plane.models import (
 )
 
 _ENTITY_TYPES = (Upstream, CatalogName, Model, Router)
-_EDGE_TYPES = (Alias, RouterMember, RouterFallback, RouterSplit, RouterSplitMember)
+_EDGE_TYPES = (
+    Alias,
+    ModelDeployment,
+    RouterMember,
+    RouterFallback,
+    RouterSplit,
+    RouterSplitMember,
+)
 # MCP servers and A2A agents are restored by id like routers, but are archived rather than
 # deleted when absent from the state: their definitions (a rejected hash must stay rejected)
 # and grants must survive. Reviewed definition states are deliberately *not* captured: a
@@ -47,7 +55,10 @@ TABLES = (*ENTITY_TABLES, *EDGE_TABLES, *TARGET_TABLES)
 # set no longer matches, so it is refused explicitly rather than half-restored.
 # 5: models carry an explicit model_type and audio pricing.
 # 6: upstreams carry their WASM auth columns (auth_plugin/auth_params/auth_timeout_ms).
-FORMAT_VERSION = 6
+# 7: routers carry `reasoning_default_level`.
+# 8: model deployments live in their own table, and upstreams + MCP servers + A2A agents
+#    carry their zone.
+FORMAT_VERSION = 8
 
 
 def _encode(value: Any) -> Any:
@@ -184,7 +195,7 @@ async def set_target_revision(session: AsyncSession, revision: int) -> None:
     but the rollback version is also a new configuration: leaving the old watermark would
     re-accept a report from the configuration this rollback just replaced (a gateway still
     on the previous version could auto-approve an old upstream's definitions). The caller
-    holds the scope lock and has already restored the rows.
+    holds the hierarchy lock and has already restored the rows.
     """
     for table in TARGET_TABLES:
         await session.execute(
@@ -198,7 +209,7 @@ async def restore_catalog_state(session: AsyncSession, state: dict[str, Any]) ->
     Existing entity rows are updated, not deleted/reinserted, so grants on them survive.
     Names absent from the state are deleted and their grants (cascade) are audited; grants
     of recreated names do not come back. Names the restore changes get a history row. The
-    caller holds the scope/advisory locks and owns the transaction.
+    caller holds the hierarchy/advisory locks and owns the transaction.
     """
     rows = _decode_state(state)
     await session.flush()

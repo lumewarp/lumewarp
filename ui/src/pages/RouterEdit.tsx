@@ -4,17 +4,21 @@ import { useCallback, useMemo, useState } from "react";
 import { api, type Model, type Plugin, type Router } from "../api";
 import { PageLoading } from "./Access";
 import { EditPage, Section } from "../components/EditPage";
-import { CheckField, Field, NumberField, required, SelectField, TextField, useForm } from "../components/Form";
+import { CheckField, Field, NumberField, required, SelectControl, SelectField, TextField, useForm } from "../components/Form";
 import { JsonEditor, NumberInput, SchemaFields } from "../components/SchemaForm";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
-import { Checkbox } from "../components/ui/checkbox";
-import { Combobox, ComboboxField } from "../components/ui/combobox-field";
+import { CatalogMultiSelect, CatalogChoiceControl } from "../components/CatalogPicker";
+import { ComboboxField } from "../components/ui/combobox-field";
 import { Label } from "../components/ui/label";
 import { useById, useModels, useMut, useNames, useRouters, useStrategies } from "../hooks";
+import { useZone } from "../zone";
 import { typeOfFirst } from "../lib/modelType";
 import { parseSchema, sameJson, strategyDescription, strategyTitle, unknownKeys, validateValues, type ParsedSchema, type Values as Params } from "../lib/schema";
-import { splitShares } from "./Routers";
+import { NotAvailableWarning, splitShares, unavailableHere } from "./Routers";
+
+/** Level names the API accepts. */
+const LEVEL_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$/;
 
 type Sticky = Router["sticky"];
 
@@ -53,6 +57,7 @@ interface Values {
   retry_statuses: string;
   retry_total_timeout_ms: number | null;
   fallback_model_ids: string[];
+  reasoning_default: string;
   splits: Split[];
   sticky: Sticky;
   sticky_header: string;
@@ -69,6 +74,7 @@ const blank: Values = {
   retry_statuses: "",
   retry_total_timeout_ms: null,
   fallback_model_ids: [],
+  reasoning_default: "",
   splits: [],
   sticky: "none",
   sticky_header: "",
@@ -86,6 +92,7 @@ const fromRouter = (r: Router): Values => ({
   retry_statuses: (r.retry?.retry_on_status ?? []).join(", "),
   retry_total_timeout_ms: r.retry?.total_timeout_ms || null,
   fallback_model_ids: [...r.fallback_model_ids],
+  reasoning_default: r.reasoning_default_level ?? "",
   splits: r.traffic_split.map((s) => ({
     name: s.name,
     weight: s.weight,
@@ -153,6 +160,7 @@ const body = (v: Values, missing: boolean) => ({
       }
     : null,
   fallback_model_ids: v.fallback_model_ids,
+  reasoning_default_level: v.reasoning_default.trim() || null,
   traffic_split: v.splits.map((s) => ({
     name: s.name.trim(),
     weight: s.weight ?? 0,
@@ -163,7 +171,7 @@ const body = (v: Values, missing: boolean) => ({
   ...(v.force && missing ? { force: true } : {}),
 });
 
-const PATCHABLE = ["name", "strategy", "params", "plugin_timeout_ms", "members", "retry", "fallback_model_ids", "traffic_split", "sticky", "sticky_header"] as const;
+const PATCHABLE = ["name", "strategy", "params", "plugin_timeout_ms", "members", "retry", "fallback_model_ids", "reasoning_default_level", "traffic_split", "sticky", "sticky_header"] as const;
 
 /**
  * The PATCH of an edit: only what the form changed against the router as it was loaded. A save never
@@ -187,6 +195,7 @@ export function patchBody(original: Router, v: Values, missing: boolean): Record
 const ALIAS = {
   members: "members",
   fallback_model_ids: "fallback_model_ids",
+  reasoning_default_level: "reasoning_default",
   traffic_split: "splits",
   weight: "splits",
   sticky: "sticky",
@@ -225,7 +234,7 @@ function memberErrors(scope: string, members: MemberV[], shape: Shape): Record<s
 interface MembersProps {
   scope: string;
   label: string;
-  options: Model[];
+  modelType: Model["model_type"] | undefined;
   members: MemberV[];
   onChange: (members: MemberV[]) => void;
   shape: Shape;
@@ -238,38 +247,51 @@ interface MembersProps {
 }
 
 /** Pick models for a router (or one split) and fill in what the strategy asks of each member. */
-function MemberEditor({ scope, label, options, members, onChange, shape, errors, showErrors, onProblem, id, invalid, describedBy }: MembersProps) {
+function MemberEditor({ scope, label, modelType, members, onChange, shape, errors, showErrors, onProblem, id, invalid, describedBy }: MembersProps) {
   const patch = (model_id: string, change: Partial<MemberV>) => onChange(members.map((m) => (m.model_id === model_id ? { ...m, ...change } : m)));
+  const find = (model_id: string) => members.find((m) => m.model_id === model_id);
   return (
-    <div className="flex flex-col gap-1.5" id={id} aria-invalid={invalid} aria-describedby={describedBy} role="group" aria-label={label}>
-      {options.map((d) => {
-        const member = members.find((m) => m.model_id === d.id);
+    <CatalogMultiSelect
+      id={id}
+      invalid={invalid}
+      describedBy={describedBy}
+      label={label}
+      idPrefix={scope}
+      by="id"
+      single
+      kinds={["model"]}
+      modelType={modelType}
+      selected={members.map((m) => m.model_id)}
+      onChange={(ids) => {
+        const added = ids.filter((x) => !find(x));
+        onChange([...members.filter((m) => ids.includes(m.model_id)), ...added.map((model_id) => ({ model_id, weight: 1, params: {} }))]);
+      }}
+      emptyText="Create a model first."
+      rowClassName="rounded-md bg-secondary px-2.5 py-1.5"
+      rowTestId={(d) => `member-${d.name}`}
+      renderInline={(d) => {
+        const member = find(d.id);
+        if (!member || !shape.usesWeight) return null;
         return (
-          <div key={d.id} className="flex flex-col gap-2 rounded-md bg-secondary px-2.5 py-1.5" data-testid={`member-${d.name}`}>
-            <div className="flex items-center gap-2">
-              <Checkbox
-                id={`${scope}-${d.id}`}
-                checked={!!member}
-                onCheckedChange={(c) => onChange(c === true ? [...members, { model_id: d.id, weight: 1, params: {} }] : members.filter((m) => m.model_id !== d.id))}
-              />
-              <Label htmlFor={`${scope}-${d.id}`} className="min-w-0 flex-1 cursor-pointer font-normal [overflow-wrap:anywhere]">
-                {d.name}
-              </Label>
-              {member && shape.usesWeight && (
-                <>
-                  <Label htmlFor={`${scope}-${d.id}-w`} className="sr-only">
-                    Weight of {d.name}
-                  </Label>
-                  <span className="text-xs text-muted-foreground" aria-hidden="true">
-                    Weight
-                  </span>
-                  <div className="w-20">
-                    <NumberInput id={`${scope}-${d.id}-w`} integer min={0} value={member.weight} onChange={(n) => patch(d.id, { weight: n ?? 0 })} />
-                  </div>
-                </>
-              )}
+          <>
+            <Label htmlFor={`${scope}-${d.id}-w`} className="sr-only">
+              Weight of {d.name}
+            </Label>
+            <span className="text-xs text-muted-foreground" aria-hidden="true">
+              Weight
+            </span>
+            <div className="w-20">
+              <NumberInput id={`${scope}-${d.id}-w`} integer min={0} value={member.weight} onChange={(n) => patch(d.id, { weight: n ?? 0 })} />
             </div>
-            {member && shape.member && shape.member.fields.length > 0 && (
+          </>
+        );
+      }}
+      renderDetail={(d) => {
+        const member = find(d.id);
+        if (!member) return null;
+        return (
+          <>
+            {shape.member && shape.member.fields.length > 0 && (
               <div className="flex flex-col gap-2 border-l-2 pl-3">
                 <SchemaFields
                   fields={shape.member.fields}
@@ -288,7 +310,7 @@ function MemberEditor({ scope, label, options, members, onChange, shape, errors,
                 />
               </div>
             )}
-            {member && shape.memberJson && (
+            {shape.memberJson && (
               <JsonEditor
                 key={`${scope}-${d.id}|${shape.name}`}
                 label={`Settings for ${d.name} (JSON)`}
@@ -298,18 +320,18 @@ function MemberEditor({ scope, label, options, members, onChange, shape, errors,
                 hint="This strategy has no settings schema the form can show."
               />
             )}
-          </div>
+          </>
         );
-      })}
-      {options.length === 0 && <p className="text-muted-foreground">Create a model first.</p>}
-    </div>
+      }}
+    />
   );
 }
 
 export function RouterEdit() {
   const { routerId } = useParams({ strict: false }) as { routerId?: string };
   const list = useRouters();
-  const strategies = useStrategies();
+  const { id: zone } = useZone();
+  const strategies = useStrategies(zone);
   const models = useModels();
   const existing = routerId ? list.data?.find((r) => r.id === routerId) : undefined;
   if ((routerId && list.isPending) || strategies.isPending || models.isPending) return <PageLoading />;
@@ -326,6 +348,7 @@ export function RouterEdit() {
 
 function RouterForm({ existing, strategies, models }: { existing?: Router; strategies: Plugin[]; models: Model[] }) {
   const navigate = useNavigate();
+  const { id: zone, zone: zoneRow } = useZone();
   const modelName = useNames(models);
   const modelById = useById(models);
   const [submitted, setSubmitted] = useState(false);
@@ -354,12 +377,15 @@ function RouterForm({ existing, strategies, models }: { existing?: Router; strat
     strategy: (v) => (v ? undefined : "Pick a strategy"),
     members: (v, all) => (v.length || all.splits.length ? undefined : "Pick at least one model or add a traffic split"),
     splits: (v) => splitsError(v),
+    reasoning_default: (v) => (!v.trim() || LEVEL_NAME.test(v.trim()) ? undefined : "Letters, digits, . _ - (max 32)"),
     retry_statuses: (v, all) => (all.retry_enabled && parseStatuses(v) === undefined ? "Comma-separated HTTP statuses in 400–599" : undefined),
     retry_max_attempts: (v, all) => (all.retry_enabled && v !== null && (v < 1 || v > 5) ? "Between 1 and 5" : undefined),
     sticky_header: (v, all) => (all.splits.length && all.sticky === "header" && !HEADER_NAME.test(v.trim()) ? "Enter a header name" : undefined),
     force: (v, all) => ((strategyByName.get(all.strategy)?.missing_gateways.length ?? 0) > 0 && !v ? "Tick “Save anyway” to save while those gateways lack this strategy" : undefined),
   });
   const v = form.values;
+  // The saved router's intersection: null (any level) until the router exists.
+  const accepted = existing?.accepted_reasoning_levels ?? null;
   const dirty = JSON.stringify(v) !== JSON.stringify(initial);
   const shape = useMemo(() => shapeOf(v.strategy, strategyByName.get(v.strategy)), [strategyByName, v.strategy]);
   const missing = shape.desc?.missing_gateways ?? [];
@@ -407,8 +433,7 @@ function RouterForm({ existing, strategies, models }: { existing?: Router; strat
   const routerType = typeOfFirst(chosenIds, (id) => modelById.get(id)?.model_type);
   // A lone member does not pin the type: picking a model of another type replaces it (see `retype`).
   const memberType = chosenIds.length === 1 && memberIds.length === 1 ? undefined : routerType;
-  const depOptions = models.filter((m) => !memberType || m.model_type === memberType);
-  const fallbackOptions = models.filter((m) => (!routerType || m.model_type === routerType) && !v.fallback_model_ids.includes(m.id));
+  const noFallback = !models.some((m) => (!routerType || m.model_type === routerType) && !v.fallback_model_ids.includes(m.id));
   /** Members just picked set the type; anything chosen of another type is dropped so the router stays single-typed. */
   const retype = (prev: MemberV[], next: MemberV[]): MemberV[] => {
     const added = next.find((m) => !prev.some((p) => p.model_id === m.model_id));
@@ -468,6 +493,7 @@ function RouterForm({ existing, strategies, models }: { existing?: Router; strat
         await navigate({ to: "/routers" });
       }}
     >
+      {existing && unavailableHere(existing, zone) && <NotAvailableWarning what="router" zoneLabel={zoneRow?.name || zone} />}
       <Section title="Router">
         <TextField label="Name" value={v.name} onChange={(x) => form.set("name", x)} error={form.errors.name} autoFocus={!existing} hint="Must be unique across models, aliases and routers." />
         <ComboboxField
@@ -534,7 +560,7 @@ function RouterForm({ existing, strategies, models }: { existing?: Router; strat
                 describedBy={p["aria-describedby"]}
                 scope="m"
                 label="Models"
-                options={depOptions}
+                modelType={memberType}
                 members={v.members}
                 onChange={(next) => form.set("members", retype(v.members, next))}
                 shape={shape}
@@ -589,6 +615,32 @@ function RouterForm({ existing, strategies, models }: { existing?: Router; strat
         )}
       </Section>
 
+      <Section title="Reasoning effort" hint="Sent when the client sends no reasoning_effort; only levels every member, split member and fallback accepts can be chosen.">
+        {accepted && accepted.length === 0 ? (
+          <Field label="Default level" error={form.errors.reasoning_default} note="The members share no reasoning level, so no default can be set.">
+            {(p) => <SelectControl {...p} disabled value={undefined} options={[]} onChange={() => undefined} />}
+          </Field>
+        ) : accepted ? (
+          <SelectField
+            label="Default level"
+            value={v.reasoning_default || undefined}
+            onChange={(x) => form.set("reasoning_default", x)}
+            unset={{ label: "Not set", onSelect: () => form.set("reasoning_default", "") }}
+            options={[...new Set([...accepted, ...(v.reasoning_default ? [v.reasoning_default] : [])])].map((l) => ({ value: l, label: l }))}
+            error={form.errors.reasoning_default}
+          />
+        ) : (
+          <TextField
+            label="Default level"
+            value={v.reasoning_default}
+            onChange={(x) => form.set("reasoning_default", x)}
+            error={form.errors.reasoning_default}
+            placeholder="Not set"
+            hint={existing ? "Every member accepts any level." : "The levels the members accept are known once the router is saved."}
+          />
+        )}
+      </Section>
+
       <Section title="Fallback">
         <Field label="Fallback model (optional)" error={form.errors.fallback_model_ids} hint="Tried in order once this router's models failed, within its attempt budget (needs retries with at least 2 attempts).">
           {(p) => (
@@ -621,17 +673,17 @@ function RouterForm({ existing, strategies, models }: { existing?: Router; strat
                   </Button>
                 </div>
               ))}
-              <Combobox
+              <CatalogChoiceControl
                 {...p}
                 aria-label="Add fallback model"
                 searchLabel="Search fallback models"
-                value={undefined}
-                disabled={!fallbackOptions.length}
-                placeholder={fallbackOptions.length ? "None — add a fallback model…" : "No other models"}
-                options={fallbackOptions.map((r) => ({
-                  value: r.id,
-                  label: r.name,
-                }))}
+                kinds={["model"]}
+                modelType={routerType}
+                exclude={v.fallback_model_ids}
+                entryValue={(e) => e.id}
+                value=""
+                disabled={noFallback}
+                placeholder={noFallback ? "No other models" : "None — add a fallback model…"}
                 onChange={(id) => form.set("fallback_model_ids", [...v.fallback_model_ids, id])}
               />
             </div>
@@ -694,7 +746,7 @@ function RouterForm({ existing, strategies, models }: { existing?: Router; strat
             <MemberEditor
               scope={`s${i}`}
               label={`Models of split ${i + 1}`}
-              options={depOptions}
+              modelType={memberType}
               members={s.members}
               onChange={(next) => setSplit(i, { members: retype(s.members, next) })}
               shape={shape}

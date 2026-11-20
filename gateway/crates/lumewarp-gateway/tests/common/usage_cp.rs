@@ -17,7 +17,7 @@ use std::{
 };
 
 use lumewarp_proto::{
-    config::v1::{config_update::Update, ConfigUpdate, GatewayMessage, Snapshot},
+    config::v1::{config_update::Update, ConfigUpdate, GatewayMessage, Snapshot, Welcome},
     usage::v1::{ReportRequest, ReportResponse, UsageEvent},
 };
 use tokio::{net::TcpListener, sync::mpsc, task::JoinHandle};
@@ -33,10 +33,21 @@ pub struct CpState {
     snapshot: Option<Snapshot>,
     /// Keeps config streams open.
     streams: Mutex<Vec<mpsc::UnboundedSender<Result<ConfigUpdate, Status>>>>,
-    events: mpsc::UnboundedSender<(Option<String>, UsageEvent)>,
+    events: mpsc::UnboundedSender<Report>,
     pub reports: AtomicU64,
     /// Next Report calls answered UNAVAILABLE.
     pub fail: AtomicU32,
+}
+
+/// The id every stream is welcomed with; usage must carry it.
+pub const WELCOME_GATEWAY_ID: &str = "usage-test-0123abcd";
+
+/// One reported event with the metadata of the batch that carried it.
+pub struct Report {
+    pub authorization: Option<String>,
+    pub zone: Option<String>,
+    pub gateway_id: String,
+    pub event: UsageEvent,
 }
 
 /// Decrements `counter` if positive; whether it did.
@@ -71,6 +82,15 @@ impl tonic::server::StreamingService<GatewayMessage> for StreamImpl {
             let mut incoming = request.into_inner();
             tokio::spawn(async move { while let Ok(Some(_)) = incoming.message().await {} });
             let (tx, rx) = mpsc::unbounded_channel();
+            // Welcome is always the first message of a stream, even when no
+            // snapshot follows; it is never ACKed.
+            tx.send(Ok(ConfigUpdate {
+                update: Some(Update::Welcome(Welcome {
+                    gateway_id: WELCOME_GATEWAY_ID.into(),
+                })),
+                target_digest: Vec::new(),
+            }))
+            .unwrap();
             if let Some(snapshot) = &state.snapshot {
                 tx.send(Ok(ConfigUpdate {
                     update: Some(Update::Full(snapshot.clone())),
@@ -100,11 +120,22 @@ impl tonic::server::UnaryService<ReportRequest> for ReportImpl {
                 .get("authorization")
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_owned);
+            let zone = request
+                .metadata()
+                .get("x-lumewarp-zone")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
             let request = request.into_inner();
             state.reports.fetch_add(1, Ordering::SeqCst);
             let accepted = request.events.len() as u32;
+            let gateway_id = request.gateway_id;
             for event in request.events {
-                let _ = state.events.send((authorization.clone(), event));
+                let _ = state.events.send(Report {
+                    authorization: authorization.clone(),
+                    zone: zone.clone(),
+                    gateway_id: gateway_id.clone(),
+                    event,
+                });
             }
             Ok(tonic::Response::new(ReportResponse { accepted }))
         })
@@ -158,7 +189,7 @@ grpc_service!(
 pub struct FakeCp {
     pub addr: SocketAddr,
     pub state: Arc<CpState>,
-    pub events: mpsc::UnboundedReceiver<(Option<String>, UsageEvent)>,
+    pub events: mpsc::UnboundedReceiver<Report>,
     task: JoinHandle<()>,
 }
 
@@ -199,23 +230,28 @@ impl FakeCp {
         }
     }
 
-    /// The next reported event (reports are batched up to 1 s apart).
+    /// The next reported event with its batch metadata (reports are batched up
+    /// to 1 s apart).
+    pub async fn report(&mut self) -> Report {
+        tokio::time::timeout(Duration::from_secs(10), self.events.recv())
+            .await
+            .expect("usage event within 10 s")
+            .expect("fake control plane stopped")
+    }
+
+    /// The next reported event; the batch metadata is discarded.
     pub async fn event(&mut self) -> UsageEvent {
-        let (authorization, event) =
-            tokio::time::timeout(Duration::from_secs(10), self.events.recv())
-                .await
-                .expect("usage event within 10 s")
-                .expect("fake control plane stopped");
-        assert_eq!(authorization.as_deref(), Some("Bearer gw-secret"));
-        event
+        let report = self.report().await;
+        assert_eq!(report.authorization.as_deref(), Some("Bearer gw-secret"));
+        report.event
     }
 
     /// No further event arrives within two flush intervals.
     pub async fn no_more_events(&mut self) {
-        if let Ok(Some((_, event))) =
+        if let Ok(Some(report)) =
             tokio::time::timeout(Duration::from_millis(2200), self.events.recv()).await
         {
-            panic!("unexpected extra usage event: {event:?}");
+            panic!("unexpected extra usage event: {:?}", report.event);
         }
     }
 }

@@ -6,7 +6,7 @@ Behaviour is specified by docs/config-protocol.md ("Control plane: publishing").
 from lumewarp_control_plane.compiler.compile import (
     CompiledSnapshot,
     CompileError,
-    compile_scope,
+    compile_zone,
     narrow,
 )
 from lumewarp_control_plane.compiler.delta import diff
@@ -25,7 +25,7 @@ __all__ = [
     "CompileError",
     "CompiledSnapshot",
     "compact_versions",
-    "compile_scope",
+    "compile_zone",
     "diff",
     "lock_key",
     "narrow",

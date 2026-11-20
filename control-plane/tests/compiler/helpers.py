@@ -14,10 +14,10 @@ from lumewarp_control_plane.models import (
     ConfigVersion,
     Model,
     Router,
-    Scope,
     ServiceAccount,
     Team,
     User,
+    Zone,
 )
 from tests import factories
 
@@ -27,13 +27,13 @@ OCT = datetime(2026, 10, 15, tzinfo=UTC)
 
 async def seed_scope(factory: SessionFactory, name: str = SCOPE) -> None:
     async with factory() as s, s.begin():
-        s.add(Scope(name=name))
+        s.add(Zone(id=name, name=name))
 
 
 async def touch(factory: SessionFactory, reason: str = "test") -> int:
     """Commit an outbox row (a "mutation") and return its revision."""
     async with factory() as s, s.begin():
-        return await outbox.enqueue_recompile(s, SCOPE, reason)
+        return await outbox.enqueue_recompile(s, reason, SCOPE)
 
 
 async def add_hierarchy(

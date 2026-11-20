@@ -1,4 +1,4 @@
-"""CLI: `python -m lumewarp_control_plane {serve,migrate,openapi,bootstrap,openfga}`."""
+"""CLI: `python -m lumewarp_control_plane {serve,migrate,openapi,openfga}`."""
 
 import argparse
 import asyncio
@@ -66,48 +66,6 @@ def _openapi(settings: Settings, args: argparse.Namespace) -> None:
         sys.stdout.write(spec)
 
 
-def _bootstrap(settings: Settings, args: argparse.Namespace) -> None:
-    from sqlalchemy.dialects.postgresql import insert
-
-    from lumewarp_control_plane import audit
-    from lumewarp_control_plane.db import create_engine, create_session_factory
-    from lumewarp_control_plane.models import ActorType, GatewayToken, Scope
-    from lumewarp_control_plane.security import SecretKind, generate_secret
-
-    scope = args.scope or settings.scope
-
-    async def run() -> str:
-        engine = create_engine(settings)
-        try:
-            async with create_session_factory(engine)() as session, session.begin():
-                await session.execute(insert(Scope).values(name=scope).on_conflict_do_nothing())
-                new = generate_secret(SecretKind.GATEWAY_TOKEN)
-                token = GatewayToken(
-                    scope=scope,
-                    name=args.name or "",
-                    token_hash=new.hash,
-                    display_prefix=new.display_prefix,
-                )
-                session.add(token)
-                await session.flush()
-                audit.record(
-                    session,
-                    action="gateway_token.create",
-                    resource_type="gateway_token",
-                    resource_id=token.id,
-                    actor_type=ActorType.SYSTEM,
-                    actor_id="bootstrap",
-                    details={"name": token.name},
-                )
-            return new.secret
-        finally:
-            await engine.dispose()
-
-    secret = asyncio.run(run())
-    print(f"scope {scope!r} ready; gateway token {args.name or ''!r}:", file=sys.stderr)
-    print(secret)
-
-
 def _openfga(settings: Settings, args: argparse.Namespace) -> None:
     import httpx
 
@@ -145,16 +103,6 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("openapi", help="print the OpenAPI document (no database needed)")
     p.add_argument("-o", "--output", help="write to a file instead of stdout")
 
-    p = sub.add_parser(
-        "bootstrap",
-        help=(
-            "create the config scope and print a new gateway token (once); any number of"
-            " gateways may use it"
-        ),
-    )
-    p.add_argument("--name", default="", help="label for the token")
-    p.add_argument("--scope", help="default: LUMEWARP_SCOPE")
-
     p = sub.add_parser("openfga", help="prepare or check the OpenFGA store (LUMEWARP_OPENFGA_*)")
     actions = p.add_subparsers(dest="openfga_command", required=True)
     actions.add_parser(
@@ -185,7 +133,6 @@ COMMANDS = {
     "serve": _serve,
     "migrate": _migrate,
     "openapi": _openapi,
-    "bootstrap": _bootstrap,
     "hash-password": _hash_password,
     "openfga": _openfga,
 }

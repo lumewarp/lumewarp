@@ -20,28 +20,29 @@ kubectl -n lumewarp create secret generic lumewarp-encryption \
   --from-literal=encryption-key="$(openssl rand -base64 48)"
 ```
 
-A fresh install has no gateway token, and the control plane creates it. Install with the
-gateway off, bootstrap a token, then turn the gateway on:
+Both components start from one install. The chart creates the gateway credential Secret
+`<fullname>-gateway-tokens` with a random 48-character token for `global.zone` (and every
+zone in `global.gatewayTokens.zones`), keyed `LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN`; the
+control plane reads every key and the gateway reads its own zone's key. Read the token with:
+
+```sh
+kubectl -n lumewarp get secret lumewarp-gateway-tokens \
+  -o jsonpath='{.data.LUMEWARP_GATEWAY_ZONE_DEFAULT_TOKEN}' | base64 -d
+```
 
 ```sh
 CHART=oci://ghcr.io/lumewarp/charts/lumewarp
 VERSION=0.2.0   # a release; from a checkout use deploy/helm/lumewarp and drop --version
 
 helm install lumewarp "$CHART" --version "$VERSION" -n lumewarp \
-  --set global.encryptionKey.secretName=lumewarp-encryption \
-  --set gateway.enabled=false
-
-kubectl -n lumewarp exec deploy/lumewarp-control-plane -- \
-  python -m lumewarp_control_plane bootstrap --name lumewarp-gateway
-kubectl -n lumewarp create secret generic lumewarp-gateway \
-  --from-literal=token='lwg-...'
-
-helm upgrade lumewarp "$CHART" --version "$VERSION" -n lumewarp \
-  --reuse-values --set gateway.enabled=true
+  --set global.encryptionKey.secretName=lumewarp-encryption
 ```
 
-Reach the UI with `kubectl -n lumewarp port-forward svc/lumewarp-control-plane 8091:8091`
-and probe the gateway with `kubectl -n lumewarp port-forward svc/lumewarp-gateway 4000:4000`
+Set `global.gatewayTokens.secretName` to an existing Secret with those keys instead of the
+chart-created one. More zones go in `global.gatewayTokens.zones`; each zone's gateway is its
+own release with `global.zone` set.
+
+Probe the gateway with `kubectl -n lumewarp port-forward svc/lumewarp-gateway 4000:4000`
 and `curl localhost:4000/healthz`.
 
 ## More

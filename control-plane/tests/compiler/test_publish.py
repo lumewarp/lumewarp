@@ -20,14 +20,12 @@ from lumewarp_control_plane.models import (
     ConfigVersion,
     ConfigVersionKind,
     GatewaySession,
-    GatewayToken,
     KeyLifecycle,
-    Model,
+    ModelDeployment,
     OutboxStatus,
     Router,
-    Team,
+    ZoneLimit,
 )
-from lumewarp_control_plane.security import SecretKind, generate_secret
 from tests.compiler.helpers import (
     SCOPE,
     add_hierarchy,
@@ -39,19 +37,6 @@ from tests.compiler.helpers import (
     touch,
 )
 from tests.factories import make_key, make_team, make_user
-
-
-async def _gateway_token(session) -> GatewayToken:
-    secret = generate_secret(SecretKind.GATEWAY_TOKEN)
-    token = GatewayToken(
-        scope=SCOPE,
-        name="test",
-        token_hash=secret.hash,
-        display_prefix=secret.display_prefix,
-    )
-    session.add(token)
-    await session.flush()
-    return token
 
 
 async def publish(factory, **kw):
@@ -90,11 +75,11 @@ async def test_publish_basic(factory) -> None:
     assert (v1.source_revision, v1.kind, v1.key_count) == (r1, ConfigVersionKind.COMPILE, 1)
     assert v1.digest == hashlib.sha256(v1.payload).digest() and v1.size_bytes == len(v1.payload)
     snap = pb.Snapshot.FromString(v1.payload)
-    assert (snap.version, snap.scope) == (1, SCOPE) and snap.created_at_unix_ms > 0
+    assert (snap.version, snap.zone) == (1, SCOPE) and snap.created_at_unix_ms > 0
 
     r2 = await touch(factory)
     async with factory() as s, s.begin():
-        await s.execute(update(Team).values(rpm_limit=17))
+        s.add(ZoneLimit(zone=SCOPE, team_id=t.id, rpm_limit=17))
     r3 = await touch(factory)
     assert await publish(factory) == 2
     assert [r[:2] for r in await outbox_rows(factory)] == [
@@ -131,7 +116,7 @@ async def test_concurrent_writes_and_publishes(factory) -> None:
                 await add_router(s, f"m{i}", [(f"d{i}", None)])
                 from lumewarp_control_plane import outbox
 
-                await outbox.enqueue_recompile(s, SCOPE, "router.create")
+                await outbox.enqueue_recompile(s, "router.create", SCOPE)
             await asyncio.sleep(0)
 
     async def publisher() -> None:
@@ -158,7 +143,7 @@ async def test_stale_compile_is_not_published(factory) -> None:
     rev = await touch(factory)
     # A newer publisher (e.g. a rollback) already published this source revision.
     async with factory() as s, s.begin():
-        snap = pb.Snapshot(scope=SCOPE)
+        snap = pb.Snapshot(zone=SCOPE)
         await store_version(s, SCOPE, snap, version=1, source_revision=rev)
     assert await publish(factory) is None
     assert await outbox_rows(factory) == [(rev, "done", 1)]
@@ -209,7 +194,7 @@ async def test_rollback_restores_routing_not_security(factory) -> None:
 
     # Change routing and revoke k1.
     async with factory() as s, s.begin():
-        await s.execute(update(Model).values(upstream_model="llama-new"))
+        await s.execute(update(ModelDeployment).values(upstream_model="llama-new"))
         await add_router(s, "qwen", [("qwen-a", None)])
         await s.execute(
             update(ApiKey)
@@ -280,7 +265,7 @@ async def test_diff_roundtrip_over_published_versions(factory) -> None:
             .where(ApiKey.id == k1.id)
             .values(lifecycle=KeyLifecycle.REVOKED, revoked_at=datetime.now(UTC))
         )
-        await s.execute(update(Team).where(Team.id == t.id).values(rpm_limit=5))
+        s.add(ZoneLimit(zone=SCOPE, team_id=t.id, rpm_limit=5))
         await add_router(s, "qwen", [("qwen-a", None)], upstream="openai")
         t2, u2 = await add_hierarchy(s, name="beta")
         await add_key(s, t2, u2)
@@ -306,7 +291,7 @@ async def test_diff_roundtrip_over_published_versions(factory) -> None:
 def test_diff_unit_roundtrip() -> None:
     old = pb.Snapshot(
         version=4,
-        scope="s",
+        zone="s",
         upstreams=[pb.Upstream(name="u1"), pb.Upstream(name="u2")],
         models=[pb.Model(name="d1", upstream="u1", type=pb.MODEL_TYPE_LLM)],
         routers=[pb.Router(name="m1", members=[pb.RouterMember(model="d1", weight=1)])],
@@ -317,7 +302,7 @@ def test_diff_unit_roundtrip() -> None:
     )
     new = pb.Snapshot(
         version=7,
-        scope="s",
+        zone="s",
         created_at_unix_ms=123,
         upstreams=[pb.Upstream(name="u2", base_url="changed")],
         models=[
@@ -337,7 +322,7 @@ def test_diff_unit_roundtrip() -> None:
     assert list(d.required_capabilities) == []
     assert apply_delta(old, d) == new
     with pytest.raises(ValueError):
-        diff(old, pb.Snapshot(scope="other"))
+        diff(old, pb.Snapshot(zone="other"))
 
 
 # --------------------------------------------------------------------------- compaction
@@ -347,11 +332,10 @@ async def test_compaction(factory) -> None:
     await seed_scope(factory)
     async with factory() as s, s.begin():
         for v in range(1, 61):
-            await store_version(s, SCOPE, pb.Snapshot(scope=SCOPE), version=v, source_revision=v)
-        token = await _gateway_token(s)
-        s.add(GatewaySession(scope=SCOPE, gateway_id="a", token_id=token.id, connected=True,
+            await store_version(s, SCOPE, pb.Snapshot(zone=SCOPE), version=v, source_revision=v)
+        s.add(GatewaySession(zone=SCOPE, gateway_id="a", connected=True,
                              acked_version=3, pending_version=5))  # fmt: skip
-        s.add(GatewaySession(scope=SCOPE, gateway_id="b", token_id=token.id, connected=True,
+        s.add(GatewaySession(zone=SCOPE, gateway_id="b", connected=True,
                              hello_have_version=7))  # fmt: skip
     async with factory() as s, s.begin():
         assert await compact_versions(s, SCOPE, retain=50) == 10 - 3
@@ -376,13 +360,11 @@ async def test_compaction_releases_disconnected_or_removed_gateway(factory, remo
     await seed_scope(factory)
     async with factory() as s, s.begin():
         for v in range(1, 5):
-            await store_version(s, SCOPE, pb.Snapshot(scope=SCOPE), version=v, source_revision=v)
-        token = await _gateway_token(s)
+            await store_version(s, SCOPE, pb.Snapshot(zone=SCOPE), version=v, source_revision=v)
         s.add(
             GatewaySession(
-                scope=SCOPE,
+                zone=SCOPE,
                 gateway_id="gone",
-                token_id=token.id,
                 connected=True,
                 hello_have_version=1,
                 acked_version=2,
@@ -423,7 +405,6 @@ async def test_compiler_loop(factory, require_local_membership) -> None:
         run_compiler_loop(
             factory,
             stop,
-            scope=SCOPE,
             interval_seconds=0.05,
             on_published=on_published,
             require_local_membership=require_local_membership,
@@ -464,19 +445,19 @@ async def test_compile_metrics(factory, monkeypatch) -> None:
         t, u = await add_hierarchy(s)
         await add_key(s, t, u, name="k1")
     await touch(factory)
-    await refresh_db_gauges(metrics, factory, SCOPE)
-    assert metrics.value("lumewarp_cp_outbox_pending") == 1
+    await refresh_db_gauges(metrics, factory)
+    assert metrics.value("lumewarp_cp_outbox_pending", {"zone": SCOPE}) == 1
     assert await publish(factory, metrics=metrics) == 1
     assert metrics.value("lumewarp_cp_compile_duration_seconds_count") == 1
     assert metrics.value("lumewarp_cp_compile_duration_seconds_sum") > 0
     assert metrics.value("lumewarp_cp_compile_failures_total") == 0
-    assert metrics.value("lumewarp_cp_config_version") == 1
+    assert metrics.value("lumewarp_cp_config_version", {"zone": SCOPE}) == 1
 
     # Unchanged content is still a compile, but publishes nothing new.
     await touch(factory)
     assert await publish(factory, metrics=metrics) is None
     assert metrics.value("lumewarp_cp_compile_duration_seconds_count") == 2
-    assert metrics.value("lumewarp_cp_config_version") == 1
+    assert metrics.value("lumewarp_cp_config_version", {"zone": SCOPE}) == 1
 
     monkeypatch.setattr(get_settings(), "max_snapshot_keys", 1)
     async with factory() as s, s.begin():
@@ -486,14 +467,14 @@ async def test_compile_metrics(factory, monkeypatch) -> None:
     assert await publish(factory, metrics=metrics) is None
     assert metrics.value("lumewarp_cp_compile_failures_total") == 1
     assert metrics.value("lumewarp_cp_compile_duration_seconds_count") == 3
-    assert metrics.value("lumewarp_cp_config_version") == 1
+    assert metrics.value("lumewarp_cp_config_version", {"zone": SCOPE}) == 1
 
-    await refresh_db_gauges(metrics, factory, SCOPE)
-    assert metrics.value("lumewarp_cp_outbox_pending") == 0
+    await refresh_db_gauges(metrics, factory)
+    assert metrics.value("lumewarp_cp_outbox_pending", {"zone": SCOPE}) == 0
     # The refresher also tracks versions published elsewhere (rollback via the API).
-    metrics.config_version.set(0)
-    await refresh_db_gauges(metrics, factory, SCOPE)
-    assert metrics.value("lumewarp_cp_config_version") == 1
+    metrics.config_version.labels(zone=SCOPE).set(0)
+    await refresh_db_gauges(metrics, factory)
+    assert metrics.value("lumewarp_cp_config_version", {"zone": SCOPE}) == 1
 
 
 async def test_compiler_loop_publishes_metrics(factory) -> None:
@@ -510,7 +491,6 @@ async def test_compiler_loop_publishes_metrics(factory) -> None:
         run_compiler_loop(
             factory,
             stop,
-            scope=SCOPE,
             interval_seconds=0.01,
             require_local_membership=True,
             metrics=metrics,
@@ -518,7 +498,7 @@ async def test_compiler_loop_publishes_metrics(factory) -> None:
     )
     try:
         async with asyncio.timeout(5):
-            while metrics.value("lumewarp_cp_config_version") != 1:
+            while metrics.value("lumewarp_cp_config_version", {"zone": SCOPE}) != 1:
                 await asyncio.sleep(0.01)
     finally:
         stop.set()

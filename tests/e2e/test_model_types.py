@@ -80,7 +80,7 @@ def test_model_types_endpoints_usage_and_probes(stack):
         }
         if kind == "transcription":
             body["price_nano_usd_per_audio_second"] = 6_000_000
-        models[kind] = stack.ok("POST", "/models", json=body)
+        models[kind] = stack.create_model(body)
         router = stack.ok(
             "POST",
             "/routers",
@@ -91,10 +91,7 @@ def test_model_types_endpoints_usage_and_probes(stack):
         assert alias["model_type"] == kind
 
     # The same transcription type can report either duration or tokens.
-    token_model = stack.ok(
-        "POST",
-        "/models",
-        json={
+    token_model = stack.create_model({
             "name": "audio-tokens",
             "upstream_id": upstream["id"],
             "upstream_model": "transcription-tokens",
@@ -180,7 +177,7 @@ def test_model_types_endpoints_usage_and_probes(stack):
                 "/models/test",
                 json={
                     "upstream_id": upstream["id"],
-                    "upstream_model": models[kind]["upstream_model"],
+                    "upstream_model": models[kind]["deployment"]["upstream_model"],
                     "model_type": kind,
                 },
             )

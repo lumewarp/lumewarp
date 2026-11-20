@@ -21,6 +21,23 @@ Fully qualified release name.
 {{- end }}
 {{- end }}
 
+{{/*
+Gateway credentials. The control plane reads every LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN in
+one Secret; each gateway pod reads the key of the zone it serves. `global.zone` is always
+included, and `global.gatewayTokens.zones` adds more zones.
+*/}}
+{{- define "lumewarp.gatewayTokenZones" -}}
+{{- join "," (uniq (concat (list .Values.global.zone) .Values.global.gatewayTokens.zones)) -}}
+{{- end -}}
+
+{{- define "lumewarp.gatewayTokenKey" -}}
+LUMEWARP_GATEWAY_ZONE_{{ .zone | upper | replace "-" "_" }}_TOKEN
+{{- end -}}
+
+{{- define "lumewarp.gatewayTokens.secretName" -}}
+{{- default (printf "%s-gateway-tokens" (include "lumewarp.fullname" .)) .Values.global.gatewayTokens.secretName -}}
+{{- end -}}
+
 {{- define "lumewarp.chart" -}}
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
 {{- end }}
