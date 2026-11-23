@@ -5,12 +5,12 @@
 #   scripts/dev-idp.sh down    stop and remove only the IdP containers
 #   scripts/dev-idp.sh status  show containers, health and `openfga check`
 # DEV_IDP_OPENFGA=0 makes `up` start Keycloak only and leave the OpenFGA variables out of
-# the printed env (scripts/dev.sh sets it unless DEV_AUTHZ=openfga).
+# the printed env (`make dev` starts OpenFGA only with DEV_AUTHZ=openfga).
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 compose_file="$repo_root/deploy/dev/compose.yaml"
-dc() { docker compose -f "$compose_file" --profile idp "$@"; }
+dc() { docker compose -f "$compose_file" --profile idp --profile openfga "$@"; }
 
 keycloak_url="http://127.0.0.1:18080"
 openfga_url="http://127.0.0.1:18081"

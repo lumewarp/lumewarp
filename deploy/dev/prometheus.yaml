@@ -1,0 +1,19 @@
+# Dev-only Prometheus (`DEV_EXTRAS=1 make dev`): scrapes the dev stack and loads the shipped
+# rules. The `namespace` label stands in for the Kubernetes namespace the rules and
+# dashboards group by.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+rule_files:
+  - /etc/prometheus/rules.yaml
+scrape_configs:
+  - job_name: lumewarp-gateway
+    static_configs:
+      - targets: ["127.0.0.1:9464", "127.0.0.1:9466", "127.0.0.1:9468", "127.0.0.1:9470"]
+        labels:
+          namespace: dev
+  - job_name: lumewarp-control-plane
+    static_configs:
+      - targets: ["127.0.0.1:9465"]
+        labels:
+          namespace: dev

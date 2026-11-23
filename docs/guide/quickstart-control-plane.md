@@ -76,8 +76,18 @@ settings, SSO, authorization backends, the catalog, plugins and operations, and
 
 ## The full development stack
 
-`make dev` starts the stack with these development-only accounts, defined in
-`deploy/dev/keycloak/realm.json`, `deploy/dev/compose.yaml` and `scripts/dev.sh`.
+`make dev` starts the stack: inside herdr as a `lumewarp-dev` tab with one pane per service,
+elsewhere in the terminal with prefixed logs (`make dev-all`). Ctrl+C or `make dev-stop` (for
+the tab) stops it and removes the containers; Postgres data and Open WebUI chats stay in
+their volumes, and `make dev-reset` removes those too. `make dev-down` removes the containers
+alone and `make dev-run-<service>` runs one service in the foreground; the `Makefile` header
+lists the services, ports and settings. `DEV_EXTRAS=1 make dev` also starts Open WebUI, a
+Prometheus at `127.0.0.1:19090` that scrapes the gateways and the control plane with the
+shipped rules (`deploy/prometheus/rules.yaml`, label `namespace="dev"`), and a Grafana with
+the dashboards from `deploy/grafana/dashboards`.
+
+The stack has these development-only accounts, defined in `deploy/dev/keycloak/realm.json`,
+`deploy/dev/compose.yaml` and the `Makefile`.
 
 | Login | Where | Username | Password | Access |
 | --- | --- | --- | --- | --- |
@@ -86,13 +96,16 @@ settings, SSO, authorization backends, the catalog, plugins and operations, and
 | SSO | <http://127.0.0.1:5173/> | `carol@example.com` | `lumewarp` | Plain user: no team and no grants until an admin adds them |
 | Emergency | <http://127.0.0.1:5173/> | none | `dev-break-glass` | Emergency admin session; `LUMEWARP_BREAK_GLASS_PASSWORD` overrides the password |
 | Keycloak console | <http://127.0.0.1:18080/> | `admin` | `lumewarp` | Administers the IdP, not Lumewarp |
-| Open WebUI | <http://127.0.0.1:3000/> | none | none | Chat client with the demo key: the gateway's models, and its MCP tools as the `Lumewarp` tool server; `DEV_OPENWEBUI=0` skips it |
+| Open WebUI | <http://127.0.0.1:3000/> | none | none | Chat client with the demo key: the gateway's models, and its MCP tools as the `Lumewarp` tool server; only with `DEV_EXTRAS=1` |
+| Grafana | <http://127.0.0.1:13000/> | none | none | Anonymous admin with the shipped dashboards in the `Lumewarp` folder; only with `DEV_EXTRAS=1` |
 
-The seeded demo API key is in `.dev/demo-key`. Postgres is at `127.0.0.1:55432`, with
+Every start runs `uv run lumewarp-control-plane seed-dev` against the running control plane.
+It keeps a small demo: the model `mock-local` deployed in both zones, a router `demo` over it,
+an alias `demo-latest` to the router, and a team `demo` with one key per zone, whose secrets
+are in `.dev/demo-key` (zone `default`) and `.dev/demo-key-prod`. Postgres is at `127.0.0.1:55432`, with
 database, user and password all `lumewarp`.
 
-Every start also runs `uv run lumewarp-control-plane seed-dev` against the running control
-plane, so the pages and dashboards are populated without using the UI first. That seed adds
+The same seed populates the pages and dashboards without using the UI first. It adds
 the orgs `acme` and `research` (the existing `default` stays), the teams `search`,
 `platform` and `ml-research`, six users as members or team admins (one of them an org
 admin), a service account with one key per zone in every team, five priced models
@@ -109,11 +122,13 @@ teams' history is untouched. `seed-dev --days N --seed N --no-usage` changes the
 seeds the catalog only; it refuses to run unless `LUMEWARP_DEV_MODE` is on and the database
 is loopback.
 
-The stack runs two gateways sharing the default zone's fixed token. The control plane
-assigns each stream's gateway id in its first `Welcome`; a reconnect gets a new id and row:
-<http://127.0.0.1:4000/> (admin `127.0.0.1:9464`) and <http://127.0.0.1:4001/> (admin
-`127.0.0.1:9466`). They share rate limits through a Valkey at `127.0.0.1:56379`, without
-persistence ([shared limits](../operations/gateway.md#shared-rate-limits)).
+The stack runs four gateways, two per zone, each pair sharing its zone's fixed development
+token: zone `default` on <http://127.0.0.1:4000/> and <http://127.0.0.1:4001/> (admin
+`127.0.0.1:9464` and `9466`), zone `prod` on <http://127.0.0.1:4002/> and
+<http://127.0.0.1:4003/> (admin `9468` and `9470`). The control plane assigns each stream's
+gateway id in its first `Welcome`; a reconnect gets a new id and row. Each pair shares rate
+limits through a Valkey at `127.0.0.1:56379`, without persistence
+([shared limits](../operations/gateway.md#shared-rate-limits)).
 
 Authorization uses the built-in backend, and OpenFGA is not started. Use
 `DEV_AUTHZ=openfga make dev` to also start an OpenFGA at `127.0.0.1:18081`, create its store

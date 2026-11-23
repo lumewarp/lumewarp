@@ -1,4 +1,4 @@
-"""Seed a development control plane with a realistic catalog and 30 days of usage.
+"""Seed a development control plane with the demo, a realistic catalog and 30 days of usage.
 
 `lumewarp-control-plane seed-dev` is development-only: it refuses to run unless
 `LUMEWARP_DEV_MODE` is on and the database URL points at loopback. The catalog is written
@@ -609,6 +609,53 @@ def ensure_catalog(api: Api, secrets: dict[str, str]) -> SeedPlan:
     )
 
 
+DEMO_KEYS = {"default": "demo", "prod": "demo-prod"}
+
+
+def _demo_key_path(zone: str) -> Path:
+    return _secrets_path().parent / ("demo-key" if zone == "default" else f"demo-key-{zone}")
+
+
+def ensure_demo(api: Api, secrets: dict[str, str]) -> None:
+    """The small demo the dev stack starts with: `mock-local` deployed in both zones, a
+    router `demo` over it, an alias `demo-latest` to the router, and a team `demo` with one
+    key per zone whose secret is in `.dev/demo-key` (default) and `.dev/demo-key-prod`."""
+    org_id = _ensure_org(api, "default")
+    api.patch(
+        "/zones/prod",
+        {"name": "Production", "color": "blue", "playground_gateway_url": "http://127.0.0.1:4002"},
+    )
+    found = _find(api.get_items("/models"), name="mock-local")
+    model_id = (
+        found["id"]
+        if found
+        else api.post("/models", {"name": "mock-local", "model_type": "llm"})["id"]
+    )
+    for zone in ZONES:
+        api.put(
+            f"/models/{model_id}/deployments/{zone}",
+            {"upstream_id": str(_ensure_upstream(api, zone)), "upstream_model": "mock"},
+        )
+    router_id = _ensure_router(api, {"name": "demo", "members": [{"model_id": model_id}]})
+    _ensure_alias(api, "demo-latest", router_id)
+    found = _find(api.get_items("/teams"), name="demo", org_id=str(org_id))
+    team_id = uuid.UUID(
+        found["id"]
+        if found
+        else api.post("/teams", {"name": "demo", "org_id": str(org_id), "model_access": "all"})[
+            "id"
+        ]
+    )
+    account_id = _ensure_service_account(api, team_id, "chat")
+    for zone, name in DEMO_KEYS.items():
+        path = _demo_key_path(zone)
+        secret_key = f"demo/chat/{zone}"
+        if not secrets.get(secret_key) and path.exists():
+            secrets[secret_key] = path.read_text().strip()
+        _ensure_key(api, team_id, account_id, name, zone, secrets, secret_key)
+        _write_private(path, secrets[secret_key] + "\n")
+
+
 # --------------------------------------------------------------------------- history
 
 HOUR_WEIGHTS = (
@@ -1073,15 +1120,19 @@ def _read_secrets(path: Path) -> dict[str, str]:
         return {}
 
 
-def _write_secrets(path: Path, secrets: dict[str, str]) -> None:
+def _write_private(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     tmp.unlink(missing_ok=True)
     # Created 0600: the secrets are never readable by others, not even briefly.
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w") as handle:
-        handle.write(json.dumps(secrets, indent=2, sort_keys=True) + "\n")
+        handle.write(content)
     tmp.replace(path)
+
+
+def _write_secrets(path: Path, secrets: dict[str, str]) -> None:
+    _write_private(path, json.dumps(secrets, indent=2, sort_keys=True) + "\n")
 
 
 # --------------------------------------------------------------------------- entry
@@ -1098,6 +1149,7 @@ def run(settings: Settings, args: Any) -> None:
     path = _secrets_path()
     secrets = _read_secrets(path)
     try:
+        ensure_demo(api, secrets)
         plan = ensure_catalog(api, secrets)
     finally:
         api.close()
