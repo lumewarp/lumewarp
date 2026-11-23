@@ -129,7 +129,7 @@
           "unit": "short",
           "min": 0,
           "color": {
-            "mode": "none"
+            "mode": "palette-classic"
           },
           "thresholds": {
             "mode": "absolute",
@@ -214,7 +214,7 @@
           "unit": "currencyUSD",
           "min": 0,
           "color": {
-            "mode": "none"
+            "mode": "palette-classic"
           },
           "thresholds": {
             "mode": "absolute",
@@ -299,7 +299,7 @@
           "unit": "short",
           "min": 0,
           "color": {
-            "mode": "none"
+            "mode": "palette-classic"
           },
           "thresholds": {
             "mode": "absolute",

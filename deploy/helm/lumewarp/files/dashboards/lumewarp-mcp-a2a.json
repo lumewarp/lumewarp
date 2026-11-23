@@ -130,7 +130,7 @@
           "unit": "reqps",
           "min": 0,
           "color": {
-            "mode": "none"
+            "mode": "palette-classic"
           },
           "thresholds": {
             "mode": "absolute",
@@ -262,7 +262,7 @@
           "unit": "reqps",
           "min": 0,
           "color": {
-            "mode": "none"
+            "mode": "palette-classic"
           },
           "thresholds": {
             "mode": "absolute",
