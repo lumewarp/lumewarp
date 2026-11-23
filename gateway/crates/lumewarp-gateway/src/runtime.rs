@@ -7,7 +7,8 @@ use std::{
 };
 
 use crate::{
-    a2a_ids, balance, catalog, health, metrics::Metrics, proxy, ratelimit, usage::UsageSink,
+    a2a_ids, affinity, balance, catalog, health, metrics::Metrics, proxy, ratelimit,
+    usage::UsageSink,
 };
 
 /// Process-wide settings an operator gives the gateway through the environment
@@ -24,6 +25,9 @@ pub struct EnvOptions {
     /// taken from the `Host` header. (The control plane's own
     /// `LUMEWARP_PUBLIC_URL` is its OIDC redirect base, a different setting.)
     pub public_url: Option<Arc<str>>,
+    /// `LUMEWARP_SESSION_AFFINITY_MAX_ENTRIES` and
+    /// `LUMEWARP_SESSION_AFFINITY_TTL_SECONDS`, with defaults when unset.
+    pub affinity: affinity::Config,
 }
 
 impl EnvOptions {
@@ -48,7 +52,11 @@ impl EnvOptions {
             },
             Err(_) => None,
         };
-        Self { id_key, public_url }
+        Self {
+            id_key,
+            public_url,
+            affinity: affinity::Config::from_env(),
+        }
     }
 }
 
@@ -109,6 +117,9 @@ pub struct Runtime {
     /// rewritten Agent Card points at (L6). Trailing slashes are stripped; the
     /// value is never taken from the `Host` header.
     pub public_url: Option<Arc<str>>,
+    /// Session-affinity overrides, process-lifetime so snapshot swaps keep
+    /// a moved session where it is.
+    pub affinity: affinity::Overrides,
 }
 
 impl Runtime {
@@ -165,6 +176,7 @@ impl Runtime {
             observed: catalog::Observed::new(),
             id_key: env.id_key,
             public_url: env.public_url,
+            affinity: affinity::Overrides::new(env.affinity),
             metrics,
             inflight: InFlightRegistry::default(),
             limiters: ratelimit::Registry::new(),
@@ -178,6 +190,8 @@ impl Runtime {
 
     pub fn encode_metrics(&self) -> Result<String, std::fmt::Error> {
         self.metrics.export_latency(self.balance.latencies());
+        let overrides = self.affinity.prune(affinity::now_ms());
+        self.metrics.session_affinity_overrides(overrides);
         self.metrics.encode(&self.inflight)
     }
 }

@@ -44,6 +44,7 @@ GROUPS = [
     "traffic_split",
     "sticky",
     "sticky_header",
+    "session_affinity",
     "members",
     "member_weights",
     "alias",
@@ -178,6 +179,9 @@ async def _set_group(session, group, configured):
                             position=dep_position,
                         )
                     )
+    elif group == "session_affinity":
+        router.session_affinity = configured
+        router.session_affinity_header = "x-conversation-id" if configured else None
     elif group == "members":
         await session.execute(delete(RouterMember).where(RouterMember.router_id == router.id))
         for position, name in enumerate(("b", "a") if configured else ("a", "b")):

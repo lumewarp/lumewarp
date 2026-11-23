@@ -33,6 +33,7 @@ from lumewarp_control_plane.api.common import (
 )
 from lumewarp_control_plane.api.policy import ensure_unique_ids
 from lumewarp_control_plane.api.schemas import (
+    SESSION_AFFINITY_HEADER,
     AliasCreate,
     AliasOut,
     AliasUpdate,
@@ -642,6 +643,8 @@ class RouterSpec:
     traffic_split: list[TrafficSplitIn] = field(default_factory=list)
     sticky: StickyBy = StickyBy.NONE
     sticky_header: str | None = None
+    session_affinity: bool = False
+    session_affinity_header: str | None = None
     plugin_timeout_ms: int = 0
     reasoning_default_level: str | None = None
 
@@ -754,6 +757,8 @@ async def _load_spec(session: AsyncSession, zone: str, row: Router) -> RouterSpe
         traffic_split=[TrafficSplitIn(**s.model_dump()) for s in out.traffic_split],
         sticky=row.sticky,
         sticky_header=row.sticky_header,
+        session_affinity=row.session_affinity,
+        session_affinity_header=row.session_affinity_header,
         plugin_timeout_ms=row.plugin_timeout_ms,
         reasoning_default_level=row.reasoning_default_level,
     )
@@ -789,6 +794,13 @@ async def _validate_spec(
         raise validation_error("sticky_header", "only used when sticky is 'header'")
     if spec.sticky is not StickyBy.NONE and not spec.traffic_split:
         raise validation_error("sticky", "sticky needs a traffic_split")
+    # Session affinity (snapshot.rs::validate).
+    if spec.session_affinity_header and not spec.session_affinity:
+        raise validation_error("session_affinity_header", "only used when session_affinity is on")
+    if spec.session_affinity_header and not SESSION_AFFINITY_HEADER.fullmatch(
+        spec.session_affinity_header
+    ):
+        raise validation_error("session_affinity_header", "must look like x-<name>-id (lower-case)")
     # A weighted pool whose members all have weight 0 makes the gateway NACK.
     if spec.strategy == "weighted":
         for split in spec.traffic_split:
@@ -909,6 +921,8 @@ def _apply_scalars(row: Router, spec: RouterSpec) -> None:
     row.retry_total_timeout_ms = spec.retry.total_timeout_ms if spec.retry else 0
     row.sticky = spec.sticky
     row.sticky_header = spec.sticky_header
+    row.session_affinity = spec.session_affinity
+    row.session_affinity_header = spec.session_affinity_header
     row.plugin_timeout_ms = spec.plugin_timeout_ms
     row.reasoning_default_level = spec.reasoning_default_level
 
@@ -1019,6 +1033,8 @@ async def _routers_out(
             traffic_split=splits[row.id],
             sticky=row.sticky,
             sticky_header=row.sticky_header,
+            session_affinity=row.session_affinity,
+            session_affinity_header=row.session_affinity_header,
             plugin_timeout_ms=row.plugin_timeout_ms,
             reasoning_default_level=row.reasoning_default_level,
             accepted_reasoning_levels=accepted[row.id],
@@ -2137,6 +2153,8 @@ async def create_router(
         traffic_split=list(body.traffic_split),
         sticky=body.sticky,
         sticky_header=body.sticky_header,
+        session_affinity=body.session_affinity,
+        session_affinity_header=body.session_affinity_header,
         plugin_timeout_ms=body.plugin_timeout_ms,
         reasoning_default_level=body.reasoning_default_level,
     )
@@ -2214,6 +2232,7 @@ async def update_router(
         "fallback_model_ids",
         "traffic_split",
         "sticky",
+        "session_affinity",
         "params",
     )
     fields = body.model_fields_set
@@ -2231,6 +2250,9 @@ async def update_router(
         # Leaving header stickiness drops the header unless the body names one.
         if spec.sticky is not StickyBy.HEADER and "sticky_header" not in fields:
             spec.sticky_header = None
+        # Turning affinity off drops its header unless the body names one.
+        if not spec.session_affinity and "session_affinity_header" not in fields:
+            spec.session_affinity_header = None
         await _validate_spec(
             session,
             spec,

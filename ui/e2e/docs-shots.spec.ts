@@ -85,6 +85,10 @@ test("manual screenshots", async ({ page, request, browser }) => {
   await page.getByLabel("Zone", { exact: true }).click();
   await page.getByRole("option", { name: "All zones", exact: true }).click();
   await shot(page, "usage");
+  await page.getByTestId("usage-lens").getByRole("button", { name: "Cost", exact: true }).click();
+  await expect(page.getByTestId("insight-spend")).toBeVisible();
+  await shot(page, "usage-cost");
+  await page.getByTestId("usage-lens").getByRole("button", { name: "Usage", exact: true }).click();
   // The seeded traffic spans two weeks; the page defaults to 24 hours, which may be an empty window.
   const to = new Date().toISOString().slice(0, 10);
   const from = new Date(Date.now() - 14 * 86_400_000).toISOString().slice(0, 10);

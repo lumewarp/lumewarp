@@ -72,6 +72,8 @@ upstreams, routers, teams and keys (including `server.api_keys`) are ignored in 
 | `--shared-limits-redis-url URL` | `LUMEWARP_SHARED_LIMITS_REDIS_URL` | unset | `redis://` or `rediss://` endpoint used to share rate-limit counters between gateways. Empty/unset keeps the limits per gateway. The value is never logged. |
 | `--shared-limits-sync-ms MS` | `LUMEWARP_SHARED_LIMITS_SYNC_MS` | `100` | Background sync interval, 10–1000 ms; it doubles up to 1 s while a sync takes more than half of it. |
 | `--shared-limits-namespace NAME` | `LUMEWARP_SHARED_LIMITS_NAMESPACE` | `--zone` in control-plane mode | Redis key namespace. Required with a URL in standalone mode; gateways share counters only when both the Redis endpoint and the namespace match. |
+| none | `LUMEWARP_SESSION_AFFINITY_MAX_ENTRIES` | `100000` | Upper bound on remembered session-affinity moves per process; the oldest entries are evicted first. A malformed value keeps the default. |
+| none | `LUMEWARP_SESSION_AFFINITY_TTL_SECONDS` | `3600` | Idle time after which a remembered session-affinity move is forgotten. A malformed value keeps the default. |
 | none | `LUMEWARP_ENCRYPTION_KEY` | unset | Opens upstream API keys the control plane stores sealed (`api_key_ciphertext`). Must equal the control plane's value; a snapshot with a sealed key is NACKed without it. Read when a snapshot is applied, never per request. |
 
 A minimal local config only needs the listeners:
@@ -187,6 +189,11 @@ reach Redis is harmless: the retry sends the same absolute counts and overwrites
 An idle gateway still sends a `PING`, so it leaves fallback and does not page. The
 `lumewarp_shared_limits_*` metrics and the `LumewarpSharedLimitsFallback` alert show
 the state ([Observability](./observability.md)).
+
+The same endpoint and namespace also exchange session-affinity moves for routers with
+`session_affinity` (hash `{lw:<namespace>}:affinity:<router>`). That exchange runs in its
+own background task on the same tick and never delays a request; without a URL each
+gateway keeps its own moves and the rendezvous hash still agrees on a first pick.
 
 The URL may carry a password: set `LUMEWARP_SHARED_LIMITS_REDIS_URL` rather than passing
 `--shared-limits-redis-url`, because command-line arguments are visible in `ps`. The value

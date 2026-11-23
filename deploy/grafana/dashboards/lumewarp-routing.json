@@ -1,9 +1,9 @@
 {
   "uid": "lumewarp-routing",
   "title": "Lumewarp / Routing",
-  "description": "Requested-name filters apply to attempts, fallbacks, splits and exhausted retries. Model/upstream gauges intentionally cover all requested names. Routing metrics arrive with the parallel routing implementation.",
+  "description": "Per-model health at a glance, fallback and retry pressure, traffic split shares, session affinity and the routing trends. Model and upstream gauges intentionally cover all requested names.",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 3,
   "editable": true,
   "tags": [
     "lumewarp",
@@ -66,6 +66,48 @@
           "text": "All",
           "value": "$__all"
         }
+      },
+      {
+        "name": "router",
+        "label": "Router",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "query": {
+          "query": "label_values(lumewarp_fallbacks_total{namespace=~\"${namespace:regex}\"}, router)",
+          "refId": "router"
+        },
+        "refresh": 1,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "model",
+        "label": "Model",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "query": {
+          "query": "label_values(lumewarp_requests_total{namespace=~\"${namespace:regex}\"}, model)",
+          "refId": "model"
+        },
+        "refresh": 1,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
       }
     ]
   },
@@ -75,33 +117,44 @@
   "panels": [
     {
       "id": 1,
-      "title": "Attempts by model and outcome",
-      "description": "",
-      "type": "timeseries",
+      "type": "row",
+      "title": "Fleet health",
+      "description": "One row per model with instant values, so a bad member is visible without reading a line chart.",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "targets": []
+    },
+    {
+      "id": 2,
+      "title": "Per-model health",
+      "description": "Instant values per model. Health is the type-specific probe, circuit is the breaker state, queue and KV cache come from the vLLM scrape, p99 and 5xx come from the request metrics. Empty cells mean the metric does not exist for that model.",
+      "type": "table",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
-        "y": 0,
-        "w": 12,
-        "h": 8
+        "y": 1,
+        "w": 24,
+        "h": 9
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "ops",
-          "min": 0,
-          "color": {
-            "mode": "palette-classic"
-          },
+          "unit": "short",
           "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false,
+            "filterable": false
           },
           "thresholds": {
             "mode": "absolute",
@@ -113,48 +166,394 @@
             ]
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Health"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "Unhealthy",
+                        "color": "red",
+                        "index": 0
+                      },
+                      "1": {
+                        "text": "Healthy",
+                        "color": "green",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Circuit"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "Closed",
+                        "color": "green",
+                        "index": 0
+                      },
+                      "1": {
+                        "text": "Half-open",
+                        "color": "yellow",
+                        "index": 1
+                      },
+                      "2": {
+                        "text": "Open",
+                        "color": "red",
+                        "index": 2
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "In flight"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "vLLM queue"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "KV cache"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percentunit"
+              },
+              {
+                "id": "min",
+                "value": 0
+              },
+              {
+                "id": "max",
+                "value": 1
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 0.7
+                    },
+                    {
+                      "color": "red",
+                      "value": 0.9
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p99"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 5
+                    },
+                    {
+                      "color": "red",
+                      "value": 10
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "5xx"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percentunit"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 0.01
+                    },
+                    {
+                      "color": "red",
+                      "value": 0.05
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
       },
       "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "fields": "",
+          "countRows": false
         }
       },
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "model",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Time 1": true,
+              "Time 2": true,
+              "Time 3": true,
+              "Time 4": true,
+              "Time 5": true,
+              "Time 6": true,
+              "Time 7": true,
+              "Time 8": true
+            },
+            "renameByName": {
+              "model": "Model",
+              "Value #A": "Health",
+              "Value #B": "Circuit",
+              "Value #C": "In flight",
+              "Value #D": "vLLM queue",
+              "Value #E": "KV cache",
+              "Value #F": "p99",
+              "Value #G": "5xx",
+              "Value 1": "Health",
+              "Value 2": "Circuit",
+              "Value 3": "In flight",
+              "Value 4": "vLLM queue",
+              "Value 5": "KV cache",
+              "Value 6": "p99",
+              "Value 7": "5xx"
+            }
+          }
+        }
+      ],
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (model, outcome) (rate(lumewarp_upstream_attempts_total{namespace=~\"${namespace:regex}\",requested=~\"${requested:regex}\"}[$__rate_interval]))",
+          "expr": "max by (model) (lumewarp_model_healthy{namespace=~\"${namespace:regex}\",model=~\"${model:regex}\"})",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "{{model}} {{outcome}}",
-          "range": true
+          "legendFormat": "{{model}}",
+          "format": "table",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "B",
+          "expr": "max by (model) (lumewarp_upstream_circuit_state{namespace=~\"${namespace:regex}\",model=~\"${model:regex}\"})",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{model}}",
+          "format": "table",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "C",
+          "expr": "sum by (model) (lumewarp_in_flight_requests{namespace=~\"${namespace:regex}\",model=~\"${model:regex}\"})",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{model}}",
+          "format": "table",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "D",
+          "expr": "max by (model) (lumewarp_vllm_queue_depth{namespace=~\"${namespace:regex}\",model=~\"${model:regex}\"})",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{model}}",
+          "format": "table",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "E",
+          "expr": "max by (model) (lumewarp_vllm_kv_cache_usage{namespace=~\"${namespace:regex}\",model=~\"${model:regex}\"})",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{model}}",
+          "format": "table",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "F",
+          "expr": "histogram_quantile(0.99, sum by (model, le) (rate(lumewarp_request_duration_seconds_bucket{namespace=~\"${namespace:regex}\",model=~\"${model:regex}\"}[5m])))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{model}}",
+          "format": "table",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "G",
+          "expr": "sum by (model) (rate(lumewarp_requests_total{namespace=~\"${namespace:regex}\",model=~\"${model:regex}\",status=~\"5..\"}[5m])) / sum by (model) (rate(lumewarp_requests_total{namespace=~\"${namespace:regex}\",model=~\"${model:regex}\"}[5m]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{model}}",
+          "format": "table",
+          "instant": true,
+          "range": false
         }
       ]
     },
     {
-      "id": 2,
-      "title": "Fallbacks / second",
-      "description": "",
-      "type": "timeseries",
+      "id": 3,
+      "type": "row",
+      "title": "Failures and retries",
+      "description": "Where requests leave the chosen path.",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 10,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "targets": []
+    },
+    {
+      "id": 4,
+      "title": "Fallbacks per second",
+      "description": "Fallback transitions per router and fallback model; only routers with a fallback produce series.",
+      "type": "bargauge",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
-        "x": 12,
-        "y": 0,
-        "w": 12,
-        "h": 8
+        "x": 0,
+        "y": 11,
+        "w": 8,
+        "h": 7
       },
       "fieldConfig": {
         "defaults": {
@@ -162,14 +561,6 @@
           "min": 0,
           "color": {
             "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false
           },
           "thresholds": {
             "mode": "absolute",
@@ -184,22 +575,26 @@
         "overrides": []
       },
       "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
+        "reduceOptions": {
           "calcs": [
             "lastNotNull"
-          ]
+          ],
+          "fields": "",
+          "values": false
         },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "valueMode": "color",
+        "namePlacement": "auto",
+        "showUnfilled": true,
+        "sizing": "auto",
+        "minVizWidth": 8,
+        "minVizHeight": 16
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (router, model) (rate(lumewarp_fallbacks_total{namespace=~\"${namespace:regex}\",router=~\"${requested:regex}\"}[$__rate_interval]))",
+          "expr": "topk(10, sum by (router, model) (rate(lumewarp_fallbacks_total{namespace=~\"${namespace:regex}\",router=~\"${router:regex}\"}[$__rate_interval])))",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -210,9 +605,607 @@
       ]
     },
     {
-      "id": 3,
-      "title": "Circuit state",
-      "description": "0 closed, 1 half-open, 2 open. Maximum across gateways. All models.",
+      "id": 5,
+      "title": "Retry budgets exhausted",
+      "description": "Requests that used up the router's retry budget; a sustained value means upstreams keep failing retryable attempts.",
+      "type": "bargauge",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 11,
+        "w": 8,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "valueMode": "color",
+        "namePlacement": "auto",
+        "showUnfilled": true,
+        "sizing": "auto",
+        "minVizWidth": 8,
+        "minVizHeight": 16
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(10, sum by (router) (rate(lumewarp_retries_budget_exhausted_total{namespace=~\"${namespace:regex}\",router=~\"${router:regex}\"}[$__rate_interval])))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{router}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Upstream attempt outcomes",
+      "description": "Attempt outcomes across all models; `circuit_open` means the attempt was refused locally.",
+      "type": "piechart",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 11,
+        "w": 8,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "pieType": "donut",
+        "displayLabels": [
+          "percent"
+        ],
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "values": [
+            "value",
+            "percent"
+          ]
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (outcome) (rate(lumewarp_upstream_attempts_total{namespace=~\"${namespace:regex}\",requested=~\"${requested:regex}\",model=~\"${model:regex}\"}[$__rate_interval]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{outcome}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "row",
+      "title": "Traffic splits",
+      "description": "Canary and weighted split assignment.",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 18,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "targets": []
+    },
+    {
+      "id": 8,
+      "title": "Traffic split share",
+      "description": "Requests assigned to each split, per router; `sticky` hashes a header, team or key to a split.",
+      "type": "piechart",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 19,
+        "w": 12,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "pieType": "donut",
+        "displayLabels": [
+          "percent"
+        ],
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "values": [
+            "value",
+            "percent"
+          ]
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (router, split) (rate(lumewarp_split_requests_total{namespace=~\"${namespace:regex}\",router=~\"${router:regex}\"}[$__rate_interval]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{router}} {{split}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Traffic splits / second",
+      "description": "Split assignment rate per router and split.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 19,
+        "w": 12,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (router, split) (rate(lumewarp_split_requests_total{namespace=~\"${namespace:regex}\",router=~\"${router:regex}\"}[$__rate_interval]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{router}} {{split}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "row",
+      "title": "Session affinity",
+      "description": "Routers with session affinity: how often a session stuck, how often it moved and how many overrides are live.",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 26,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "targets": []
+    },
+    {
+      "id": 11,
+      "title": "Affinity hit share",
+      "description": "Share of session-bearing requests that landed on the affinity choice (hash, override or moved). `none` counts requests without a session id.",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 27,
+        "w": 6,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.2
+              },
+              {
+                "color": "green",
+                "value": 0.5
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(lumewarp_session_affinity_total{namespace=~\"${namespace:regex}\",router=~\"${router:regex}\",result=~\"hash|override|moved\"}[$__rate_interval])) / sum(rate(lumewarp_session_affinity_total{namespace=~\"${namespace:regex}\",router=~\"${router:regex}\",result=~\"hash|override|moved|none\"}[$__rate_interval]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "hit share",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "title": "Affinity moved rate",
+      "description": "Share of session requests whose top member was ineligible and were moved to the next choice; the override keeps them there after recovery.",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 27,
+        "w": 6,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.01
+              },
+              {
+                "color": "red",
+                "value": 0.05
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(lumewarp_session_affinity_total{namespace=~\"${namespace:regex}\",router=~\"${router:regex}\",result=~\"moved\"}[$__rate_interval])) / sum(rate(lumewarp_session_affinity_total{namespace=~\"${namespace:regex}\",router=~\"${router:regex}\",result=~\"hash|override|moved\"}[$__rate_interval]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "moved",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "title": "Live affinity overrides",
+      "description": "Session-to-member overrides held by the selected gateways, all routers together: the gauge is per gateway process, not per router (bounded LRU, idle TTL 1 h).",
+      "type": "gauge",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 27,
+        "w": 6,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "max": 100000,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 50000
+              },
+              {
+                "color": "red",
+                "value": 90000
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "sizing": "auto",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(lumewarp_session_affinity_overrides{namespace=~\"${namespace:regex}\"})",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "overrides",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "title": "Affinity decisions / second",
+      "description": "Decision class per router: `hash` (stateless rendezvous pick), `override` (stored move reused), `moved` (a new move) and `none` (no session id).",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 27,
+        "w": 6,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (result) (rate(lumewarp_session_affinity_total{namespace=~\"${namespace:regex}\",router=~\"${router:regex}\"}[$__rate_interval]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{result}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "type": "row",
+      "title": "Routing internals",
+      "description": "The remaining trends: attempts, breaker state, load and response rewriting.",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 34,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "targets": []
+    },
+    {
+      "id": 16,
+      "title": "Attempts by model and outcome",
+      "description": "Each upstream attempt, including retries and fallbacks.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -220,7 +1213,75 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 8,
+        "y": 35,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (model, outcome) (rate(lumewarp_upstream_attempts_total{namespace=~\"${namespace:regex}\",requested=~\"${requested:regex}\",model=~\"${model:regex}\"}[$__rate_interval]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{model}} {{outcome}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "title": "Circuit state",
+      "description": "0 closed, 1 half-open, 2 open. Maximum across gateways.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 35,
         "w": 12,
         "h": 8
       },
@@ -231,6 +1292,23 @@
           "color": {
             "mode": "palette-classic"
           },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 2
+              }
+            ]
+          },
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "linear",
@@ -238,15 +1316,6 @@
             "fillOpacity": 8,
             "showPoints": "never",
             "spanNulls": false
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
           }
         },
         "overrides": []
@@ -278,17 +1347,17 @@
       ]
     },
     {
-      "id": 4,
+      "id": 18,
       "title": "Upstream health",
-      "description": "0 unhealthy, 1 healthy. Minimum across gateways. All models.",
+      "description": "0 unhealthy, 1 healthy. Minimum across gateways.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
-        "x": 12,
-        "y": 8,
+        "x": 0,
+        "y": 43,
         "w": 12,
         "h": 8
       },
@@ -299,6 +1368,19 @@
           "color": {
             "mode": "palette-classic"
           },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "linear",
@@ -306,15 +1388,6 @@
             "fillOpacity": 8,
             "showPoints": "never",
             "spanNulls": false
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
           }
         },
         "overrides": []
@@ -346,17 +1419,17 @@
       ]
     },
     {
-      "id": 5,
+      "id": 19,
       "title": "vLLM waiting requests",
-      "description": "Maximum, not sum: gateways may observe the same upstream queue. All models.",
+      "description": "Maximum, not sum: gateways may observe the same upstream queue.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
-        "x": 0,
-        "y": 16,
+        "x": 12,
+        "y": 43,
         "w": 12,
         "h": 8
       },
@@ -367,14 +1440,6 @@
           "color": {
             "mode": "palette-classic"
           },
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false
-          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -383,6 +1448,14 @@
                 "value": null
               }
             ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
           }
         },
         "overrides": []
@@ -414,17 +1487,17 @@
       ]
     },
     {
-      "id": 6,
+      "id": 20,
       "title": "vLLM KV cache usage",
-      "description": "Ratio 0..1; maximum observation across gateways. All models.",
+      "description": "Ratio 0..1, maximum observation across gateways.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
-        "x": 12,
-        "y": 16,
+        "x": 0,
+        "y": 51,
         "w": 12,
         "h": 8
       },
@@ -435,6 +1508,23 @@
           "color": {
             "mode": "palette-classic"
           },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.7
+              },
+              {
+                "color": "red",
+                "value": 0.9
+              }
+            ]
+          },
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "linear",
@@ -442,15 +1532,6 @@
             "fillOpacity": 8,
             "showPoints": "never",
             "spanNulls": false
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
           }
         },
         "overrides": []
@@ -482,77 +1563,9 @@
       ]
     },
     {
-      "id": 7,
-      "title": "Traffic splits / second",
-      "description": "",
-      "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 24,
-        "w": 12,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "reqps",
-          "min": 0,
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (router, split) (rate(lumewarp_split_requests_total{namespace=~\"${namespace:regex}\",router=~\"${requested:regex}\"}[$__rate_interval]))",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "legendFormat": "{{router}} {{split}}",
-          "range": true
-        }
-      ]
-    },
-    {
-      "id": 8,
+      "id": 21,
       "title": "In-flight requests",
-      "description": "All models: gauge only has model label.",
+      "description": "In-flight model counters across gateways.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -560,7 +1573,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 24,
+        "y": 51,
         "w": 12,
         "h": 8
       },
@@ -571,14 +1584,6 @@
           "color": {
             "mode": "palette-classic"
           },
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false
-          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -587,6 +1592,14 @@
                 "value": null
               }
             ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
           }
         },
         "overrides": []
@@ -618,75 +1631,7 @@
       ]
     },
     {
-      "id": 9,
-      "title": "Retry budgets exhausted / second",
-      "description": "",
-      "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 32,
-        "w": 12,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "ops",
-          "min": 0,
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (router) (rate(lumewarp_retries_budget_exhausted_total{namespace=~\"${namespace:regex}\",router=~\"${requested:regex}\"}[$__rate_interval]))",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "legendFormat": "{{router}}",
-          "range": true
-        }
-      ]
-    },
-    {
-      "id": 10,
+      "id": 22,
       "title": "Responses kept upstream model name / second",
       "description": "The upstream compressed a response that needed its model rewritten: forwarded as is, usage invalid.",
       "type": "timeseries",
@@ -695,9 +1640,9 @@
         "uid": "${datasource}"
       },
       "gridPos": {
-        "x": 12,
-        "y": 32,
-        "w": 12,
+        "x": 0,
+        "y": 59,
+        "w": 24,
         "h": 8
       },
       "fieldConfig": {
@@ -707,14 +1652,6 @@
           "color": {
             "mode": "palette-classic"
           },
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false
-          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -723,6 +1660,14 @@
                 "value": null
               }
             ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
           }
         },
         "overrides": []

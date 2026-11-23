@@ -1,7 +1,7 @@
 """Usage aggregation: monthly `usage_totals` fast path plus recent `usage_events`.
 
 `from`/`to` are a half-open UTC range. `group_by` is a comma-separated subset of
-`day,kind,target,method,tool,requested,model,upstream_model,alias,router,team,owner,key`;
+`zone,day,kind,target,method,tool,requested,called,model,upstream_model,alias,router,status_class,outcome,fallback,team,owner,key`;
 the default is `day,requested`. `owner` groups by the key owner
 (`owner_kind`, `owner_id`: a user or a service account). `kind` is the gateway protocol
 (`llm`, `mcp`, `a2a`); `target`, `method` and `tool` are an MCP server or A2A agent, its
@@ -10,10 +10,19 @@ over whole UTC months is served from the pre-aggregated `usage_totals` table, wh
 requests only: every other shape is aggregated from `usage_events`, limited to the caller's
 readable teams.
 
-Only an installation admin sees routing internals: the `model`, `upstream_model`, `alias`
-and `router` dimensions and filters, plus their `served_by`/`via_*`/`upstream_model(s)`
-provenance. Every other caller sees the called name (`requested`); asking for one of those
-dimensions or filters answers 403 `routing_detail_forbidden`.
+`called` is the catalog identity of what the client called (`alias_id`, else `router_id`,
+else `model_id`, else the literal `requested`), labelled with its current name; it merges a
+rename that `requested` splits, and it is visible to members. `status_class` buckets the
+HTTP status (`2xx`/`4xx`/`5xx`/`other`) and `outcome` is the gateway outcome. Every row also
+carries fallback/retry counts and p50/p95/p99 request durations; the percentiles are null on
+the monthly totals fast path, which stores no durations. `compare=previous` adds the
+equal-length range immediately before `from` as ungrouped `previous` totals.
+
+Only an installation admin sees routing internals: the `model`, `upstream_model`, `alias`,
+`router` and `fallback` dimensions and filters, plus their
+`served_by`/`via_*`/`upstream_model(s)` provenance. Every other caller sees the called name
+(`requested` or `called`); asking for one of those dimensions or filters answers 403
+`routing_detail_forbidden`.
 
 A plain member sees the totals of every readable team (the whole team) when the request
 neither groups nor filters by `owner` or `key`. Grouping by `owner`/`key`, or filtering by
@@ -52,7 +61,13 @@ from lumewarp_control_plane.api.common import (
     validation_error,
 )
 from lumewarp_control_plane.api.key_refs import key_refs
-from lumewarp_control_plane.api.schemas import Page, UsageLeaderboardRowOut, UsageRowOut
+from lumewarp_control_plane.api.schemas import (
+    Page,
+    UsageLeaderboardRowOut,
+    UsagePage,
+    UsageRowOut,
+    UsageTotalsOut,
+)
 from lumewarp_control_plane.authz import Authz
 from lumewarp_control_plane.errors import not_found, routing_detail_forbidden
 from lumewarp_control_plane.models import (
@@ -74,6 +89,7 @@ from lumewarp_control_plane.models import (
 router = APIRouter(tags=["usage"])
 
 DIMENSIONS = (
+    "zone",
     "day",
     "endpoint",
     "model_type",
@@ -82,10 +98,14 @@ DIMENSIONS = (
     "method",
     "tool",
     "requested",
+    "called",
     "model",
     "upstream_model",
     "alias",
     "router",
+    "status_class",
+    "outcome",
+    "fallback",
     "team",
     "owner",
     "key",
@@ -101,10 +121,14 @@ COLUMNS = {
     "method": ("method",),
     "tool": ("tool",),
     "requested": ("requested",),
+    "called": ("called",),
     "model": ("model",),
     "upstream_model": ("upstream_model",),
     "alias": ("alias",),
     "router": ("router",),
+    "status_class": ("status_class",),
+    "outcome": ("outcome",),
+    "fallback": ("fallback",),
     "team": ("team",),
     "owner": ("owner_kind", "owner_id"),
     "key": ("key",),
@@ -112,9 +136,22 @@ COLUMNS = {
 UUID_COLUMNS = {"team", "owner_id", "key"}
 # Dimensions that name where a request was served. Only an installation admin may ask for
 # them; everyone else groups by `requested`, the name the client actually called.
-ROUTING_DIMENSIONS = frozenset({"model", "upstream_model", "alias", "router"})
+ROUTING_DIMENSIONS = frozenset({"model", "upstream_model", "alias", "router", "fallback"})
 # Dimensions that are plain columns of the event: no catalog name to resolve.
-PLAIN_DIMENSIONS = frozenset({"zone", "kind", "target", "method", "tool", "endpoint", "model_type"})
+PLAIN_DIMENSIONS = frozenset(
+    {
+        "zone",
+        "kind",
+        "target",
+        "method",
+        "tool",
+        "endpoint",
+        "model_type",
+        "status_class",
+        "outcome",
+        "fallback",
+    }
+)
 
 ENDPOINT_TYPES = {
     "chat_completions": "llm",
@@ -127,6 +164,26 @@ ENDPOINT_TYPES = {
     "systemone": "decision",
 }
 MODEL_TYPE_COLUMN = case(ENDPOINT_TYPES, value=UsageEvent.endpoint, else_=None)
+# `called` is the catalog identity of what the client typed: an alias wins over the router
+# behind it, and an unknown/rejected name has no id and keeps its literal spelling.
+CALLED_ID = func.coalesce(UsageEvent.alias_id, UsageEvent.router_id, UsageEvent.model_id)
+CALLED_LITERAL = func.coalesce(
+    func.nullif(UsageEvent.alias, ""),
+    func.nullif(UsageEvent.router, ""),
+    UsageEvent.requested,
+)
+CALLED_KIND = case(
+    (UsageEvent.alias_id.is_not(None), "alias"),
+    (UsageEvent.router_id.is_not(None), "router"),
+    (UsageEvent.model_id.is_not(None), "model"),
+    else_="unknown",
+)
+STATUS_CLASS = case(
+    (UsageEvent.status.between(200, 299), "2xx"),
+    (UsageEvent.status.between(400, 499), "4xx"),
+    (UsageEvent.status.between(500, 599), "5xx"),
+    else_="other",
+)
 
 FromQuery = Annotated[datetime | None, Query(alias="from")]
 ToQuery = Annotated[datetime | None, Query(alias="to")]
@@ -179,6 +236,14 @@ def _decode_cursor(cursor: str, columns: list[str]) -> list[Any]:
             if value not in {kind.value for kind in KeyOwnerKind}:
                 raise validation_error("cursor", "invalid cursor")
             converted.append(value)
+        elif name == "outcome":
+            if value not in {outcome.value for outcome in RequestOutcome}:
+                raise validation_error("cursor", "invalid cursor")
+            converted.append(value)
+        elif name == "fallback":
+            if value not in ("True", "False"):
+                raise validation_error("cursor", "invalid cursor")
+            converted.append(value == "True")
         else:
             converted.append(value)
     return converted
@@ -289,7 +354,10 @@ _AMOUNTS = (
     "unknown_cost_count",
     "error_count",
     "total_duration_ms",
+    "fallback_count",
+    "retried_count",
 )
+_PERCENTILES = ("p50_duration_ms", "p95_duration_ms", "p99_duration_ms")
 
 
 def _events_query(
@@ -303,7 +371,11 @@ def _events_query(
 
     The default day/requested (and scope-only) load needs no catalog joins or
     distinct ref aggregates. Model groups need all provenance; alias/router groups
-    need their own refs plus Served by. Upstream-model groups need Served by.
+    need their own refs plus Served by. Upstream-model groups need Served by. A
+    catalog dimension groups on its id (the literal spelling when there is none), so
+    a rename merges into one row before the percentile is computed; the name and
+    refs are resolved afterwards, which is also why a deleted id keeps the
+    last/min spelling it was recorded under.
     """
     names = [column for group in groups for column in COLUMNS[group]]
     kinds = [kind.value for kind in CatalogKind if kind.value in groups]
@@ -314,6 +386,7 @@ def _events_query(
             else list(dict.fromkeys(["model", *kinds]))
         )
     upstream = "model" in groups or "upstream_model" in groups
+    called = "called" in groups
     fields = {
         "zone": UsageEvent.zone,
         "day": func.date_trunc("day", func.timezone("UTC", UsageEvent.ts)),
@@ -330,15 +403,35 @@ def _events_query(
         "owner_id": UsageEvent.owner_id,
         "key": UsageEvent.key_id,
         "upstream_model": UsageEvent.upstream_model,
+        "status_class": STATUS_CLASS,
+        "outcome": UsageEvent.outcome,
+        "fallback": UsageEvent.fallback,
     }
-    raw_names = [name for name in names if name not in {kind.value for kind in CatalogKind}]
+    group_exprs: list[Any] = [
+        fields[name].label(name)
+        for name in names
+        if name not in {kind.value for kind in CatalogKind} and name != "called"
+    ]
+    aggregates: list[Any] = []
     for kind in kinds:
-        fields[kind] = getattr(UsageEvent, kind)
-        fields[f"{kind}_id"] = getattr(UsageEvent, f"{kind}_id")
-        raw_names.extend([f"{kind}_id", kind])
-    if upstream and "upstream_model" not in raw_names:
-        raw_names.append("upstream_model")
-    columns = [fields[name].label(name) for name in raw_names]
+        id_column = getattr(UsageEvent, f"{kind}_id")
+        raw_column = getattr(UsageEvent, kind)
+        identity = func.coalesce(cast(id_column, String), raw_column)
+        group_exprs.append(identity.label(f"{kind}_identity"))
+        group_exprs.append(id_column.label(f"{kind}_id"))
+        aggregates.append(func.min(raw_column).label(f"{kind}_name"))
+    if called:
+        group_exprs.append(
+            func.coalesce(cast(CALLED_ID, String), CALLED_LITERAL).label("called_identity")
+        )
+        group_exprs.append(CALLED_ID.label("called_id"))
+        group_exprs.append(CALLED_KIND.label("called_kind"))
+        aggregates.append(func.min(CALLED_LITERAL).label("called_literal"))
+        aggregates.append(func.array_agg(distinct(CALLED_LITERAL)).label("called_names"))
+    if upstream:
+        aggregates.append(
+            func.array_agg(distinct(UsageEvent.upstream_model)).label("upstream_values")
+        )
     # An error is an error outcome (the gateway reports one for a JSON-RPC error in a 200 too),
     # or a 4xx/5xx status that is not a client cancellation (499).
     failed = case(
@@ -365,17 +458,34 @@ def _events_query(
         ),
         func.coalesce(func.sum(failed), 0).label("error_count"),
         func.coalesce(func.sum(UsageEvent.duration_ms), 0).label("total_duration_ms"),
+        func.coalesce(func.sum(case((UsageEvent.fallback.is_(True), 1), else_=0)), 0).label(
+            "fallback_count"
+        ),
+        func.coalesce(func.sum(case((UsageEvent.attempts > 1, 1), else_=0)), 0).label(
+            "retried_count"
+        ),
+        func.percentile_cont(0.5)
+        .within_group(UsageEvent.duration_ms.asc())
+        .label("p50_duration_ms"),
+        func.percentile_cont(0.95)
+        .within_group(UsageEvent.duration_ms.asc())
+        .label("p95_duration_ms"),
+        func.percentile_cont(0.99)
+        .within_group(UsageEvent.duration_ms.asc())
+        .label("p99_duration_ms"),
     ]
-    raw = select(*columns, *amounts).where(UsageEvent.ts >= from_, UsageEvent.ts < to_, *filters)
+    raw = select(*group_exprs, *aggregates, *amounts).where(
+        UsageEvent.ts >= from_, UsageEvent.ts < to_, *filters
+    )
     if readable is not None:
         raw = raw.where(UsageEvent.team_id.in_(readable))
-    if columns:
-        raw = raw.group_by(*columns)
-    if not kinds:
+    if group_exprs:
+        raw = raw.group_by(*group_exprs)
+    if not kinds and not called:
         return raw, {name: fields[name] for name in names}, kinds, upstream
 
     reduced = raw.subquery("usage_reduced")
-    fields = {name: reduced.c[name] for name in names if name not in kinds}
+    fields = {name: reduced.c[name] for name in names if name not in kinds and name != "called"}
     joins = []
     refs = []
     for kind in kinds:
@@ -383,19 +493,48 @@ def _events_query(
         joins.append((catalog, (catalog.id == reduced.c[f"{kind}_id"]) & (catalog.kind == kind)))
         fields[kind] = case(
             (catalog.id.is_not(None), "id:" + cast(catalog.id, String)),
-            else_="name:" + reduced.c[kind],
+            else_="name:" + reduced.c[f"{kind}_name"],
         )
         ref = func.jsonb_build_object(
-            "id", catalog.id, "name", func.coalesce(catalog.name, reduced.c[kind])
+            "id", catalog.id, "name", func.coalesce(catalog.name, reduced.c[f"{kind}_name"])
         )
         refs.append(cast(func.jsonb_agg(distinct(ref)), JSONB).label(f"{kind}_refs"))
+    if called:
+        catalog = aliased(CatalogName)
+        joins.append((catalog, catalog.id == reduced.c["called_id"]))
+        fields["called"] = case(
+            (catalog.id.is_not(None), "id:" + cast(catalog.id, String)),
+            else_="name:" + reduced.c["called_literal"],
+        )
+        ref = func.jsonb_build_object(
+            "id",
+            catalog.id,
+            "name",
+            func.coalesce(catalog.name, reduced.c["called_literal"]),
+        )
+        refs.append(cast(func.jsonb_agg(distinct(ref)), JSONB).label("called_refs"))
+        # jsonb, not array_agg: Postgres cannot stack arrays of different lengths.
+        refs.append(
+            func.jsonb_agg(distinct(func.to_jsonb(reduced.c["called_names"]))).label(
+                "called_name_arrays"
+            )
+        )
+        refs.append(func.min(reduced.c["called_kind"]).label("called_kind"))
     if upstream:
-        refs.append(func.array_agg(distinct(reduced.c.upstream_model)).label("upstream_values"))
+        refs.append(
+            func.jsonb_agg(distinct(func.to_jsonb(reduced.c.upstream_values))).label(
+                "upstream_arrays"
+            )
+        )
     # Keep caller's dimension order; ids unify historic spellings after rename.
     group_columns = [fields[name].label(name) for name in names]
     stmt = select(
         *group_columns,
         *(func.coalesce(func.sum(reduced.c[name]), 0).label(name) for name in _AMOUNTS),
+        # Exact only while each outer group is one reduced row, which holds for every
+        # grouping except merged deleted spellings; there it reports the smallest
+        # per-row percentile. Re-check this if the inner grouping changes.
+        *(func.min(reduced.c[name]).label(name) for name in _PERCENTILES),
         *refs,
     ).select_from(reduced)
     for catalog, condition in joins:
@@ -458,9 +597,21 @@ async def _events_page(
                 {"model": "served_by", "alias": "via_aliases", "router": "via_routers"}[name]
             ] = [entry for entry in entries if entry["name"]]
         if upstream:
-            values = row["upstream_values"] or []
-            provenance["upstream_model"] = values[0] if len(values) == 1 else None
-            provenance["upstream_models"] = sorted(value for value in values if value)
+            arrays = row["upstream_arrays"] or []
+            raw_values = {value for array in arrays for value in (array or [])}
+            provenance["upstream_model"] = next(iter(raw_values)) if len(raw_values) == 1 else None
+            provenance["upstream_models"] = sorted(value for value in raw_values if value)
+        called = None
+        called_kind = None
+        called_names: list[str] = []
+        if "called" in names:
+            entries = row["called_refs"] or []
+            if entries:
+                entry = next((item for item in entries if item["id"]), entries[0])
+                called = entry["name"]
+            called_kind = row["called_kind"]
+            arrays = row["called_name_arrays"] or []
+            called_names = sorted({value for array in arrays for value in (array or []) if value})
         # `kind`, `target`, `method` and `tool` are plain dimensions: no catalog refs.
         plain = {name: row[name] for name in names if name in PLAIN_DIMENSIONS}
         if plain.get("model_type") == "":
@@ -471,6 +622,9 @@ async def _events_page(
                 **plain,
                 date=row["day"].date() if "day" in row else None,
                 requested=row.get("requested"),
+                called=called,
+                called_kind=called_kind,
+                called_names=called_names,
                 team_id=row.get("team"),
                 owner_kind=row.get("owner_kind"),
                 owner_id=row.get("owner_id"),
@@ -478,6 +632,10 @@ async def _events_page(
                 key=refs.get(row.get("key")),
                 **{name: int(row[name]) for name in _AMOUNTS},
                 total_tokens=int(row["prompt_tokens"]) + int(row["completion_tokens"]),
+                **{
+                    name: None if row.get(name) is None else float(row[name])
+                    for name in _PERCENTILES
+                },
             )
         )
     return Page[UsageRowOut](items=items, next_cursor=next_cursor)
@@ -493,7 +651,7 @@ def _month_aligned(from_: datetime, to_: datetime) -> bool:
     )
 
 
-@router.get("/usage", response_model=Page[UsageRowOut], operation_id="getUsage")
+@router.get("/usage", response_model=UsagePage, operation_id="getUsage")
 async def get_usage(
     authz: Authz,
     session: SessionDep,
@@ -514,6 +672,15 @@ async def get_usage(
         str | None, Query(description="Only this zone; omitted reads every zone.")
     ] = None,
     requested: str | None = None,
+    called: Annotated[
+        str | None,
+        Query(
+            description=(
+                "Only rows whose called catalog item (or literal spelling) has this name;"
+                " resolved like the `model` filter."
+            )
+        ),
+    ] = None,
     model: str | None = None,
     upstream_model: str | None = None,
     alias: str | None = None,
@@ -541,14 +708,30 @@ async def get_usage(
     ] = None,
     limit: LimitDep = 50,
     cursor: str | None = None,
-) -> Page[UsageRowOut]:
+    compare: Annotated[
+        Literal["previous"] | None,
+        Query(
+            description=(
+                "`previous` adds the equal-length range immediately before `from` as"
+                " ungrouped `previous` totals; omitted leaves it null."
+            )
+        ),
+    ] = None,
+) -> UsagePage:
     """Aggregate usage within the caller's existing team/key permission scope.
 
-    `day,requested` is the default; `requested` is the name the client called, so a renamed
-    model, alias or router appears as separate before/after called names. Only an
-    installation admin may group or filter by `model`, `upstream_model`, `alias` or `router`
-    and their ids/`_missing` variants; any other caller gets 403 `routing_detail_forbidden`
-    and never receives `served_by`, `via_aliases`, `via_routers` or `upstream_model(s)`.
+    `day,requested` is the default; `requested` is the literal name the client called, so a
+    renamed model, alias or router appears as separate before/after names. `called` groups
+    by the catalog item instead (the alias, else the router, else the model, else the
+    literal), so a rename merges; it is visible to every caller, as are `status_class` and
+    `outcome`. Only an installation admin may group or filter by `model`, `upstream_model`,
+    `alias`, `router` or `fallback` and their ids/`_missing` variants; any other caller gets
+    403 `routing_detail_forbidden` and never receives `served_by`, `via_aliases`,
+    `via_routers` or `upstream_model(s)`.
+
+    Every row carries fallback/retry counts and p50/p95/p99 durations. The percentiles are
+    null on the monthly totals fast path, which stores no durations. `compare=previous`
+    adds the equal-length range immediately before `from` as ungrouped totals.
 
     A plain member gets whole-team totals when neither `owner` nor `key` is grouped and no
     `user_id`/`service_account_id`/`key_id` filter is set. Grouping or filtering by owner or
@@ -611,6 +794,8 @@ async def get_usage(
         is_admin
         and groups == ["team"]
         and requested is None
+        and called is None
+        and compare is None
         # The totals table counts LLM requests only, so both of these ask the same question.
         and kind in (None, TrafficKind.LLM)
         and all(
@@ -639,92 +824,131 @@ async def get_usage(
         and _month_aligned(start, end)
     )
     if use_totals:
-        return await _totals_page(session, start, end, team_id, zone, limit, cursor)
-    ensure_range(start, end)
-    filters: list[Any] = []
-    if zone is not None:
-        filters.append(UsageEvent.zone == zone)
-    for catalog_kind, name, name_id in (
-        (CatalogKind.MODEL, model, model_id),
-        (CatalogKind.ALIAS, alias, alias_id),
-        (CatalogKind.ROUTER, router, router_id),
-    ):
-        column = getattr(UsageEvent, catalog_kind.value)
-        id_column = getattr(UsageEvent, f"{catalog_kind.value}_id")
-        if name_id is not None:
-            filters.append(id_column == name_id)
-        if name is not None:
-            current_id = await session.scalar(
-                select(CatalogName.id).where(
-                    CatalogName.kind == catalog_kind, CatalogName.name == name
+        page = await _totals_page(session, start, end, team_id, zone, limit, cursor)
+        previous = None
+    else:
+        ensure_range(start, end)
+        filters: list[Any] = []
+        if zone is not None:
+            filters.append(UsageEvent.zone == zone)
+        for catalog_kind, name, name_id in (
+            (CatalogKind.MODEL, model, model_id),
+            (CatalogKind.ALIAS, alias, alias_id),
+            (CatalogKind.ROUTER, router, router_id),
+        ):
+            column = getattr(UsageEvent, catalog_kind.value)
+            id_column = getattr(UsageEvent, f"{catalog_kind.value}_id")
+            if name_id is not None:
+                filters.append(id_column == name_id)
+            if name is not None:
+                current_id = await session.scalar(
+                    select(CatalogName.id).where(
+                        CatalogName.kind == catalog_kind, CatalogName.name == name
+                    )
                 )
+                if current_id is not None:
+                    filters.append(id_column == current_id)
+                else:
+                    # Do not mix a renamed, still-live item into a deleted item's
+                    # historical spelling. Clients select the live item by current name/id.
+                    live_ids = select(CatalogName.id).where(CatalogName.kind == catalog_kind)
+                    filters.append(
+                        (column == name) & or_(id_column.is_(None), id_column.not_in(live_ids))
+                    )
+        if called is not None:
+            called_id = await session.scalar(
+                select(CatalogName.id).where(CatalogName.name == called)
             )
-            if current_id is not None:
-                filters.append(id_column == current_id)
+            if called_id is not None:
+                filters.append(CALLED_ID == called_id)
             else:
-                # Do not mix a renamed, still-live item into a deleted item's
-                # historical spelling. Clients select the live item by current name/id.
-                live_ids = select(CatalogName.id).where(CatalogName.kind == catalog_kind)
+                live_ids = select(CatalogName.id)
                 filters.append(
-                    (column == name) & or_(id_column.is_(None), id_column.not_in(live_ids))
-                )
-    for column, value in (
-        (UsageEvent.kind, kind),
-        (UsageEvent.endpoint, endpoint),
-        (MODEL_TYPE_COLUMN, model_type),
-        (UsageEvent.target, target),
-        (UsageEvent.method, method),
-        (UsageEvent.tool, tool),
-    ):
-        if value is not None:
-            filters.append(column == value)
-    if upstream_model is not None:
-        filters.append(UsageEvent.upstream_model == upstream_model)
-    for name, missing in (("alias", alias_missing), ("router", router_missing)):
-        if missing is not None:
-            column = getattr(UsageEvent, name)
-            filters.append(column == "" if missing else column != "")
-    if requested is not None:
-        filters.append(UsageEvent.requested == requested)
-    if scoped_team is not None:
-        filters.append(UsageEvent.team_id == scoped_team)
-    if user_id is not None:
-        filters.append(UsageEvent.owner_kind == KeyOwnerKind.USER)
-        filters.append(UsageEvent.owner_id == user_id)
-    if service_account_id is not None:
-        filters.append(UsageEvent.owner_kind == KeyOwnerKind.SERVICE_ACCOUNT)
-        filters.append(UsageEvent.owner_id == service_account_id)
-    if key_id is not None:
-        filters.append(UsageEvent.key_id == key_id)
-    if admin_teams is not None:
-        # A team admin keeps the whole-team view. A plain member sees whole-team totals only
-        # when the result cannot identify another member: no `owner`/`key` dimension and no
-        # owner/key filter. `requested`, `day`, `team`, `endpoint` and the rest are team
-        # totals, so widening them to every readable team (the `readable` filter above, or
-        # `scoped_team`) reveals no other member's keys. Any per-owner or per-key shape keeps
-        # today's predicate: in a team the caller does not administer, only their own
-        # user-owned keys. This is applied server-side and cannot be widened by a filter.
-        splits_owner = (
-            "owner" in groups
-            or "key" in groups
-            or user_id is not None
-            or service_account_id is not None
-            or key_id is not None
-        )
-        if splits_owner:
-            filters.append(
-                or_(
-                    UsageEvent.team_id.in_(admin_teams),
                     and_(
-                        UsageEvent.owner_kind == KeyOwnerKind.USER,
-                        UsageEvent.owner_id == authz.user_id,
-                    ),
+                        CALLED_LITERAL == called,
+                        or_(CALLED_ID.is_(None), CALLED_ID.not_in(live_ids)),
+                    )
                 )
+        for column, value in (
+            (UsageEvent.kind, kind),
+            (UsageEvent.endpoint, endpoint),
+            (MODEL_TYPE_COLUMN, model_type),
+            (UsageEvent.target, target),
+            (UsageEvent.method, method),
+            (UsageEvent.tool, tool),
+        ):
+            if value is not None:
+                filters.append(column == value)
+        if upstream_model is not None:
+            filters.append(UsageEvent.upstream_model == upstream_model)
+        for name, missing in (("alias", alias_missing), ("router", router_missing)):
+            if missing is not None:
+                column = getattr(UsageEvent, name)
+                filters.append(column == "" if missing else column != "")
+        if requested is not None:
+            filters.append(UsageEvent.requested == requested)
+        if scoped_team is not None:
+            filters.append(UsageEvent.team_id == scoped_team)
+        if user_id is not None:
+            filters.append(UsageEvent.owner_kind == KeyOwnerKind.USER)
+            filters.append(UsageEvent.owner_id == user_id)
+        if service_account_id is not None:
+            filters.append(UsageEvent.owner_kind == KeyOwnerKind.SERVICE_ACCOUNT)
+            filters.append(UsageEvent.owner_id == service_account_id)
+        if key_id is not None:
+            filters.append(UsageEvent.key_id == key_id)
+        if admin_teams is not None:
+            # A team admin keeps the whole-team view. A plain member sees whole-team totals only
+            # when the result cannot identify another member: no `owner`/`key` dimension and no
+            # owner/key filter. `requested`, `called`, `day`, `team`, `endpoint` and the rest are
+            # team totals, so widening them to every readable team (the `readable` filter above,
+            # or `scoped_team`) reveals no other member's keys. Any per-owner or per-key shape
+            # keeps today's predicate: in a team the caller does not administer, only their own
+            # user-owned keys. This is applied server-side and cannot be widened by a filter.
+            splits_owner = (
+                "owner" in groups
+                or "key" in groups
+                or user_id is not None
+                or service_account_id is not None
+                or key_id is not None
             )
-    return await _events_page(session, groups, readable, start, end, filters, limit, cursor)
+            if splits_owner:
+                filters.append(
+                    or_(
+                        UsageEvent.team_id.in_(admin_teams),
+                        and_(
+                            UsageEvent.owner_kind == KeyOwnerKind.USER,
+                            UsageEvent.owner_id == authz.user_id,
+                        ),
+                    )
+                )
+        page = await _events_page(session, groups, readable, start, end, filters, limit, cursor)
+        previous = None
+        if compare == "previous":
+            span = end - start
+            prior = await _events_page(session, [], readable, start - span, start, filters, 1, None)
+            if prior.items:
+                row = prior.items[0]
+                previous = UsageTotalsOut(
+                    requests=row.requests,
+                    prompt_tokens=row.prompt_tokens,
+                    completion_tokens=row.completion_tokens,
+                    total_tokens=row.total_tokens,
+                    audio_ms=row.audio_ms,
+                    cost_nano_usd=row.cost_nano_usd,
+                    unknown_cost_count=row.unknown_cost_count,
+                    error_count=row.error_count,
+                    total_duration_ms=row.total_duration_ms,
+                    fallback_count=row.fallback_count,
+                    retried_count=row.retried_count,
+                    p50_duration_ms=row.p50_duration_ms,
+                    p95_duration_ms=row.p95_duration_ms,
+                    p99_duration_ms=row.p99_duration_ms,
+                )
+    return UsagePage(items=page.items, next_cursor=page.next_cursor, previous=previous)
 
 
-LeaderboardBy = Literal["requested", "key", "owner"]
+LeaderboardBy = Literal["requested", "called", "key", "owner"]
 
 
 @router.get(
@@ -739,8 +963,9 @@ async def get_usage_leaderboard(
         LeaderboardBy,
         Query(
             description=(
-                "Board to rank: `requested` (called name), `key` (API key) or `owner` (user"
-                " or service account)."
+                "Board to rank: `requested` (literal called spelling), `called` (called"
+                " catalog item, renames merged), `key` (API key) or `owner` (user or"
+                " service account)."
             )
         ),
     ],
@@ -772,13 +997,25 @@ async def get_usage_leaderboard(
         int,
         Query(ge=1, le=50, description="How many rows to return, 1 to 50; default 10."),
     ] = 10,
+    order: Annotated[
+        Literal["tokens", "cost"],
+        Query(
+            description=(
+                "What ranks the rows: `tokens` (total tokens, then spend; the default) or"
+                " `cost` (spend, then total tokens)."
+            )
+        ),
+    ] = "tokens",
 ) -> Page[UsageLeaderboardRowOut]:
     """Rank called names, keys or owners inside the caller's readable teams.
 
-    Rows are ordered by total tokens (input plus output) descending, then by spend; `rank`
-    restarts at 1 on each page. `by=requested` aggregates the name the client called across
-    the readable teams (a renamed model, alias or router shows as separate called names).
-    `by=key` and `by=owner` group within the team and return `team_id`.
+    Rows are ordered by total tokens (input plus output) descending, then by spend, or with
+    `order=cost` by spend, then by total tokens; `rank`
+    restarts at 1 on each page. `by=requested` aggregates the literal name the client called
+    across the readable teams (a renamed model, alias or router shows as separate names).
+    `by=called` groups the called catalog item instead (the alias, else the router, else the
+    model, else the literal), so a rename merges; it is visible to every caller. `by=key`
+    and `by=owner` group within the team and return `team_id`.
 
     An installation admin ranks every team. Everyone else ranks only their readable teams;
     a plain member therefore sees another member in the ranking but not their identity:
@@ -804,8 +1041,19 @@ async def get_usage_leaderboard(
     if readable is not None and not readable:
         return Page[UsageLeaderboardRowOut](items=[], next_cursor=None)
 
+    extra_columns: list[Any] = []
     if by == "requested":
         group_columns = [UsageEvent.zone, UsageEvent.requested]
+    elif by == "called":
+        group_columns = [
+            UsageEvent.zone,
+            func.coalesce(cast(CALLED_ID, String), CALLED_LITERAL).label("called_identity"),
+            CALLED_ID.label("called_id"),
+        ]
+        extra_columns = [
+            func.min(CALLED_LITERAL).label("called_literal"),
+            func.min(CALLED_KIND).label("called_kind"),
+        ]
     elif by == "key":
         group_columns = [UsageEvent.zone, UsageEvent.team_id, UsageEvent.key_id]
     else:
@@ -822,6 +1070,7 @@ async def get_usage_leaderboard(
     stmt = (
         select(
             *group_columns,
+            *extra_columns,
             func.count().label("requests"),
             func.coalesce(func.sum(UsageEvent.prompt_tokens), 0).label("prompt_tokens"),
             func.coalesce(func.sum(UsageEvent.completion_tokens), 0).label("completion_tokens"),
@@ -833,7 +1082,14 @@ async def get_usage_leaderboard(
         )
         .where(UsageEvent.ts >= start, UsageEvent.ts < end, UsageEvent.kind == kind)
         .group_by(*group_columns)
-        .order_by(total_tokens.desc(), spend.desc(), *group_columns)
+        .order_by(
+            *(
+                (spend.desc(), total_tokens.desc())
+                if order == "cost"
+                else (total_tokens.desc(), spend.desc())
+            ),
+            *group_columns,
+        )
         .limit(limit)
     )
     if scoped_team is not None:
@@ -852,6 +1108,14 @@ async def get_usage_leaderboard(
         return owner_kind is KeyOwnerKind.USER and owner_id == authz.user_id
 
     refs = await key_refs(session, [row["key_id"] for row in rows]) if by == "key" else {}
+    called_names: dict[uuid.UUID, str] = {}
+    if by == "called":
+        called_ids = {row["called_id"] for row in rows if row["called_id"] is not None}
+        if called_ids:
+            for name_id, name in await session.execute(
+                select(CatalogName.id, CatalogName.name).where(CatalogName.id.in_(called_ids))
+            ):
+                called_names[name_id] = name
     # Resolve the names of visible owners only: a hidden row keeps no id and no name.
     wanted_users: set[uuid.UUID] = set()
     wanted_accounts: set[uuid.UUID] = set()
@@ -890,6 +1154,11 @@ async def get_usage_leaderboard(
         if by == "requested":
             values["requested"] = row["requested"]
             values["label"] = row["requested"] or ""
+        elif by == "called":
+            label = called_names.get(row["called_id"]) or row["called_literal"] or ""
+            values["called"] = label
+            values["called_kind"] = row["called_kind"]
+            values["label"] = label
         elif by == "key":
             values["team_id"] = row["team_id"]
             ref = refs.get(row["key_id"])

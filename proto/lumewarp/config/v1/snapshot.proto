@@ -273,6 +273,22 @@ message Router {
   // The control plane only accepts a level every member, split member and fallback
   // accepts. Capability "router_reasoning_default".
   string reasoning_default_level = 15;
+  // Route every request carrying a session id to the same member model by
+  // weighted rendezvous hashing over the eligible members of its split
+  // (health, breaker and tried-exclusion applied), so any gateway picks the
+  // same model for the same session. A session that had to move off its
+  // best-scored member stays on the model it moved to once that model is
+  // healthy again. With traffic splits and sticky = STICKY_BY_NONE the session
+  // id also pins the split. The session id is the first of the header
+  // "x-lumewarp-id", `session_affinity_header`, and the top-level JSON string
+  // field `session_id` (JSON endpoints only; empty or over 256 bytes is none).
+  // Capability "session_affinity".
+  bool session_affinity = 16;
+  // Extra request header read for a session id after "x-lumewarp-id"; must
+  // match ^x-[a-z0-9-]+-id$ (for example "x-conversation-id"). Empty means only
+  // "x-lumewarp-id" and the body field. Only valid with session_affinity.
+  // Capability "session_affinity".
+  string session_affinity_header = 17;
 }
 
 // Retries happen only before any response byte is sent to the client: on

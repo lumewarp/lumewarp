@@ -597,9 +597,12 @@ test("My keys shows what a new key can call; a member cannot open admin pages", 
   await context.close();
 });
 
-test("usage: grouped by model by default, with how each request was reached, and filters", async ({ page, request }) => {
+test("usage: grouped by called name by default, served model with how each request was reached, and filters", async ({ page, request }) => {
   await signIn(page, request, "/usage");
-  await expect(page.getByLabel("Group by")).toHaveText("Model");
+  await expect(page.getByLabel("Group by")).toHaveText("Called name");
+  await expect(page.getByRole("columnheader", { name: "Called name", exact: true })).toBeVisible();
+  await pick(page, "Group by", "Served model");
+  await expect(page.getByLabel("Group by")).toHaveText("Served model");
   const headers = page.getByRole("columnheader");
   await expect(headers.filter({ hasText: "Upstream model" })).toBeVisible();
   await expect(headers.filter({ hasText: "Via alias" })).toBeVisible();
@@ -629,7 +632,7 @@ test("usage: grouped by model by default, with how each request was reached, and
   await pick(page, "Group by", "Upstream model");
   await expect(row(page, "Qwen/UseA")).toContainText("use/a");
   await expect(row(page, "Qwen/UseA")).toContainText("use/b");
-  await pick(page, "Group by", "Model");
+  await pick(page, "Group by", "Served model");
 
   // Filters: model, upstream model, alias (including none), router (including none).
   await pick(page, "Model", "use/b");
@@ -677,8 +680,10 @@ test("usage: loading, then a refusal (no permission) with a way to retry", async
   await expect(page.locator("[aria-busy=true]").first()).toBeVisible();
   await expect(page.getByTestId("state-error")).toContainText("not allowed to read usage");
   refuse = false;
-  await page.getByRole("button", { name: "Retry" }).click();
-  await expect(row(page, "use/a")).toBeVisible();
+  await page.getByTestId("state-error").getByRole("button", { name: "Retry" }).click();
+  await expect(page.getByTestId("state-error")).toHaveCount(0);
+  await expect(page.getByText("No usage in this period.")).toHaveCount(0);
+  await expect(page.getByRole("columnheader", { name: "Called name", exact: true })).toBeVisible();
 });
 
 test("rollback: a 422 about missing strategies offers a forced confirm, other 422s show the error", async ({ page, request }) => {
@@ -1093,6 +1098,7 @@ test("usage filters: a catalog name is never a mode, whatever it is called", asy
 
 test("usage: the upstream model is a text filter, so a name nothing maps to any more still filters", async ({ page, request }) => {
   await signIn(page, request, "/usage");
+  await pick(page, "Group by", "Served model");
   await moreFilters(page);
   const box = page.getByLabel("Upstream model", { exact: true });
   // The catalog only suggests.

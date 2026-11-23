@@ -11,6 +11,7 @@ from lumewarp_control_plane.models import (
     ScopeType,
     TeamRole,
     TrafficKind,
+    UsageEvent,
     UsageTotal,
 )
 from lumewarp_control_plane.usage import ingest
@@ -39,6 +40,30 @@ def query(client, headers=ADMIN_AUTH, **params):
         params={"from": START.isoformat(), "to": END.isoformat(), **params},
         headers=headers,
     )
+
+
+def called_event(
+    key,
+    *,
+    requested: str,
+    ts: datetime = TS,
+    alias: str = "",
+    router: str = "",
+    model: str = "served",
+    alias_id: uuid.UUID | None = None,
+    router_id: uuid.UUID | None = None,
+    model_id: uuid.UUID | None = None,
+    **kwargs,
+) -> UsageEvent:
+    """A stored row that names what the client called and its resolved catalog ids."""
+    event = usage_event(key, ts=ts, requested=requested, **kwargs)
+    event.alias = alias
+    event.router = router
+    event.model = model
+    event.alias_id = alias_id
+    event.router_id = router_id
+    event.model_id = model_id
+    return event
 
 
 async def test_grouping_filters_and_cursor_pagination(client, committed) -> None:
@@ -171,6 +196,11 @@ async def test_monthly_team_totals_fast_path(client, committed, api_scope) -> No
     assert row["cost_nano_usd"] == 7000
     assert row["unknown_cost_count"] == 1
     assert row["audio_ms"] == 9876
+    # The totals table stores no durations or attempt detail: those amounts are 0/null.
+    assert row["fallback_count"] == 0 and row["retried_count"] == 0
+    assert row["p50_duration_ms"] is None
+    assert row["p95_duration_ms"] is None
+    assert row["p99_duration_ms"] is None
     events = query(client, group_by="team", team_id=str(team.id), requested="mock")
     assert events.json()["items"][0]["requests"] == 1
 
@@ -423,7 +453,7 @@ async def test_routing_detail_is_installation_admin_only(client, committed) -> N
     await make_org_admin(committed, org, org_admin)
     await committed.commit()
 
-    routing_groups = ("model", "upstream_model", "alias", "router")
+    routing_groups = ("model", "upstream_model", "alias", "router", "fallback")
     routing_filters = (
         {"model": "some-model"},
         {"upstream_model": "served-name"},
@@ -580,3 +610,264 @@ async def test_errors_and_duration_are_aggregated_per_group(client, committed) -
 )
 def test_usage_query_validation(client, params) -> None:
     assert query(client, **params).status_code == 422
+
+
+async def test_called_dimension_and_zone_grouping(client, committed) -> None:
+    team = await make_team(committed)
+    key = await make_key(committed, team, await make_service_account(committed, team))
+    model_name = f"m-{uuid.uuid4().hex}"
+    pool_name = f"pool-{uuid.uuid4().hex}"
+    alias_name = f"nick-{uuid.uuid4().hex}"
+    unknown = f"missing-{uuid.uuid4().hex}"
+    model = await make_model(committed, model_name)
+    pool = await make_router(committed, pool_name, members=[model])
+    alias = await make_alias(committed, alias_name, pool)
+    committed.add_all(
+        [
+            called_event(key, requested=model_name, model=model_name, model_id=model.id),
+            called_event(
+                key,
+                requested=alias_name,
+                alias=alias_name,
+                router=pool_name,
+                model=model_name,
+                alias_id=alias.id,
+                router_id=pool.id,
+                model_id=model.id,
+            ),
+            called_event(
+                key,
+                requested=pool_name,
+                router=pool_name,
+                model=model_name,
+                router_id=pool.id,
+                model_id=model.id,
+            ),
+            called_event(key, requested=unknown, model=""),
+        ]
+    )
+    await committed.commit()
+
+    response = query(client, group_by="zone,called", team_id=str(team.id))
+    assert response.status_code == 200, response.text
+    rows = response.json()["items"]
+    # One row per called item: the server does not add a second zone column.
+    assert len(rows) == 4
+    assert {row["zone"] for row in rows} == {key.zone}
+    by_called = {row["called"]: row for row in rows}
+    assert (
+        by_called[model_name]["called_kind"],
+        by_called[model_name]["called_names"],
+    ) == ("model", [model_name])
+    assert by_called[alias_name]["called_kind"] == "alias"
+    assert by_called[pool_name]["called_kind"] == "router"
+    assert (
+        by_called[unknown]["called_kind"],
+        by_called[unknown]["called_names"],
+    ) == ("unknown", [unknown])
+
+    # `called` is not routing detail: a plain member groups by it and sees the team totals.
+    member, member_token = await user_with_token(committed)
+    await make_member(committed, team, member)
+    await committed.commit()
+    member_rows = query(client, auth(member_token), group_by="called", team_id=str(team.id))
+    assert member_rows.status_code == 200, member_rows.text
+    assert {row["called"] for row in member_rows.json()["items"]} == {
+        model_name,
+        alias_name,
+        pool_name,
+        unknown,
+    }
+
+
+async def test_called_merges_a_rename_but_requested_splits(client, committed) -> None:
+    team = await make_team(committed)
+    key = await make_key(committed, team, await make_service_account(committed, team))
+    model_name = f"m-{uuid.uuid4().hex}"
+    old_name = f"old-{uuid.uuid4().hex}"
+    new_name = f"new-{uuid.uuid4().hex}"
+    model = await make_model(committed, model_name)
+    alias = await make_alias(committed, old_name, model)
+    committed.add(
+        called_event(
+            key,
+            requested=old_name,
+            alias=old_name,
+            model=model_name,
+            alias_id=alias.id,
+            model_id=model.id,
+        )
+    )
+    await rename_at(committed, alias, new_name)
+    committed.add(
+        called_event(
+            key,
+            requested=new_name,
+            alias=new_name,
+            model=model_name,
+            alias_id=alias.id,
+            model_id=model.id,
+        )
+    )
+    await committed.commit()
+
+    called_rows = query(client, group_by="called", team_id=str(team.id)).json()["items"]
+    assert len(called_rows) == 1
+    row = called_rows[0]
+    assert (row["called"], row["called_kind"], row["requests"]) == (new_name, "alias", 2)
+    assert row["called_names"] == sorted([old_name, new_name])
+
+    requested_rows = query(client, group_by="requested", team_id=str(team.id)).json()["items"]
+    assert {item["requested"]: item["requests"] for item in requested_rows} == {
+        old_name: 1,
+        new_name: 1,
+    }
+    # The current name selects both spellings; the old spelling no longer names a live item.
+    assert (
+        query(client, group_by="called", called=new_name, team_id=str(team.id)).json()["items"][0][
+            "requests"
+        ]
+        == 2
+    )
+    assert (
+        query(client, group_by="called", called=old_name, team_id=str(team.id)).json()["items"]
+        == []
+    )
+
+
+async def test_status_class_and_outcome_buckets(client, committed) -> None:
+    team = await make_team(committed)
+    key = await make_key(committed, team, await make_service_account(committed, team))
+    for status, outcome in (
+        (200, RequestOutcome.COMPLETED),
+        (201, RequestOutcome.COMPLETED),
+        (404, RequestOutcome.REJECTED),
+        (429, RequestOutcome.REJECTED),
+        (502, RequestOutcome.UPSTREAM_ERROR),
+        (302, RequestOutcome.COMPLETED),
+    ):
+        event = usage_event(key, ts=TS, requested=f"s{status}")
+        event.status = status
+        event.outcome = outcome
+        committed.add(event)
+    await committed.commit()
+
+    by_status = query(client, group_by="status_class", team_id=str(team.id)).json()["items"]
+    assert {row["status_class"]: row["requests"] for row in by_status} == {
+        "2xx": 2,
+        "4xx": 2,
+        "5xx": 1,
+        "other": 1,
+    }
+    by_outcome = query(client, group_by="outcome", team_id=str(team.id)).json()["items"]
+    assert {row["outcome"]: row["requests"] for row in by_outcome} == {
+        "completed": 3,
+        "rejected": 2,
+        "upstream_error": 1,
+    }
+
+
+async def test_percentiles_fallback_and_retry_amounts(client, committed) -> None:
+    team = await make_team(committed)
+    key = await make_key(committed, team, await make_service_account(committed, team))
+    for index, duration in enumerate((10, 20, 30, 40, 100)):
+        event = usage_event(key, ts=TS, requested="p")
+        event.duration_ms = duration
+        event.fallback = index == 4
+        event.attempts = 3 if index == 4 else 1
+        committed.add(event)
+    await committed.commit()
+
+    row = query(client, group_by="requested", team_id=str(team.id)).json()["items"][0]
+    assert row["requests"] == 5
+    assert row["total_duration_ms"] == 200
+    assert row["fallback_count"] == 1
+    assert row["retried_count"] == 1
+    assert row["p50_duration_ms"] == pytest.approx(30)
+    assert row["p95_duration_ms"] == pytest.approx(88)
+    assert row["p99_duration_ms"] == pytest.approx(97.6)
+
+
+async def test_new_dimension_cursors(client, committed) -> None:
+    team = await make_team(committed)
+    key = await make_key(committed, team, await make_service_account(committed, team))
+    for status, outcome, fallback in (
+        (200, RequestOutcome.COMPLETED, False),
+        (404, RequestOutcome.REJECTED, True),
+        (502, RequestOutcome.UPSTREAM_ERROR, True),
+    ):
+        event = usage_event(key, ts=TS, requested=f"s{status}")
+        event.status = status
+        event.outcome = outcome
+        event.fallback = fallback
+        committed.add(event)
+    await committed.commit()
+    for groups in ("status_class", "outcome", "fallback"):
+        whole = query(client, group_by=groups, team_id=str(team.id)).json()["items"]
+        first = query(client, group_by=groups, team_id=str(team.id), limit=1).json()
+        assert first["next_cursor"] is not None, groups
+        rest = query(
+            client,
+            group_by=groups,
+            team_id=str(team.id),
+            limit=50,
+            cursor=first["next_cursor"],
+        ).json()
+        assert first["items"] + rest["items"] == whole, groups
+
+
+async def test_compare_previous_returns_the_prior_range_totals(client, committed) -> None:
+    team = await make_team(committed)
+    key = await make_key(committed, team, await make_service_account(committed, team))
+    march = usage_event(
+        key, ts=TS, requested="march", prompt_tokens=10, completion_tokens=5, cost_nano_usd=1000
+    )
+    march.duration_ms = 20
+    february = usage_event(
+        key,
+        ts=datetime(2026, 2, 15, tzinfo=UTC),
+        requested="february",
+        prompt_tokens=7,
+        completion_tokens=3,
+        cost_nano_usd=700,
+    )
+    february.duration_ms = 40
+    committed.add_all([march, february])
+    await committed.commit()
+
+    body = query(client, group_by="requested", compare="previous", team_id=str(team.id)).json()
+    assert [row["requested"] for row in body["items"]] == ["march"]
+    previous = body["previous"]
+    assert previous["requests"] == 1
+    assert previous["prompt_tokens"] == 7
+    assert previous["completion_tokens"] == 3
+    assert previous["total_tokens"] == 10
+    assert previous["cost_nano_usd"] == 700
+    assert previous["fallback_count"] == 0
+    assert previous["retried_count"] == 0
+    assert previous["p50_duration_ms"] == pytest.approx(40)
+    assert query(client, group_by="requested", team_id=str(team.id)).json()["previous"] is None
+
+
+async def test_merged_groups_with_unequal_upstream_lists_do_not_fail(client, committed) -> None:
+    """A deleted id and a name-only row share a label; their upstream lists differ in length."""
+    team = await make_team(committed)
+    key = await make_key(committed, team, await make_service_account(committed, team))
+    name = f"ghost-{uuid.uuid4().hex}"
+    rows = [
+        (uuid.uuid4(), "up-a"),  # an id no longer in the catalog
+        (None, "up-a"),
+        (None, "up-b"),
+    ]
+    for model_id, upstream in rows:
+        event = called_event(key, requested=name, model=name, model_id=model_id)
+        event.upstream_model = upstream
+        committed.add(event)
+    await committed.commit()
+
+    for group_by in ("model", "day,model"):
+        response = query(client, group_by=group_by, team_id=str(team.id))
+        assert response.status_code == 200, response.text
+        items = response.json()["items"]
+        assert sum(item["requests"] for item in items) == 3
+        assert sorted({u for item in items for u in item["upstream_models"]}) == ["up-a", "up-b"]

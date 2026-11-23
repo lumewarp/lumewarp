@@ -25,6 +25,12 @@
 # it, an alias `demo-latest` to the router, a team `demo` and one key per zone; the key
 # secrets are kept in .dev/demo-key (default) and .dev/demo-key-prod. One with no MCP server or A2A agent gets `example` and `helper`,
 # the example servers above. Each start issues fresh zone tokens (.dev/env).
+# Every start then runs `lumewarp-control-plane seed-dev`: orgs acme/research, teams
+# search/platform/ml-research, six users, five priced models deployed in both zones, two
+# aliases, two routers, budgets and 30 days of usage in both zones (called names, aliases,
+# routers, embeddings, transcription, MCP/A2A and some failures). A key secret per service
+# account and zone is kept in .dev/seed-keys. Reseeding rewrites only the seed teams' usage
+# rows, so other teams' history is untouched.
 # Open WebUI runs in a container (no login) with the demo key for both the gateway's
 # OpenAI API and its aggregate MCP endpoint; its chats live in a Docker volume. Its
 # connections come from the environment on every start, so settings changed in its
@@ -274,6 +280,19 @@ seed() {
     | jq -r .secret >"$state/demo-key-prod"
 }
 
+# The dev dataset (catalog and 30 days of usage) through the dev-only subcommand. Runs
+# even when `seed` has already returned, so an existing dev database gets the extra data.
+seed_dev() {
+  wait_http "$cp_url/healthz" "control plane"
+  log "seeding the development catalog and 30 days of usage"
+  (
+    # shellcheck source=/dev/null
+    source "$state/env"
+    cd "$root/control-plane"
+    exec uv run -q lumewarp-control-plane seed-dev
+  )
+}
+
 summary() { # stop hint
   wait_http "http://127.0.0.1:9464/readyz" "gateway"
   wait_http "http://127.0.0.1:9466/readyz" "second gateway"
@@ -322,6 +341,7 @@ case "${1:-all}" in
       ("$self" run "$svc" 2>&1 | sed -u "s/^/[$svc] /") &
     done
     seed
+    seed_dev
     openwebui_up
     summary "Ctrl+C stops everything (containers keep running: make dev-down)."
     wait
@@ -364,6 +384,7 @@ case "${1:-all}" in
     mcp_pane="$(split "$ui_pane" down mcp)"
     split "$mcp_pane" down a2a >/dev/null
     seed
+    seed_dev
     openwebui_up
     summary "make dev-stop closes this tab (containers keep running: make dev-down)."
     ;;

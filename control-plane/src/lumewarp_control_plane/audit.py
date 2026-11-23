@@ -77,6 +77,8 @@ _ROUTER_SETTINGS: dict[str, DetailSpec] = {
     "traffic_split": [_TRAFFIC_SPLIT],
     "sticky": None,
     "sticky_header": None,
+    "session_affinity": None,
+    "session_affinity_header": None,
 }
 
 # Every `audit.record(action=...)` call site must have an entry here; an unknown action

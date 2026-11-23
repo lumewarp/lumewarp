@@ -152,6 +152,14 @@ BY_NAME: dict[str, str] = {
         " `none` draws by weight on every request."
     ),
     "sticky_header": "Header whose value is hashed; required exactly when `sticky` is `header`.",
+    "session_affinity": (
+        "Route every request with a session id to the same member model, with or without a"
+        " traffic split."
+    ),
+    "session_affinity_header": (
+        "Extra request header read as a session id after `x-lumewarp-id`; must look like"
+        " `x-<name>-id` and needs `session_affinity`."
+    ),
     "plugin_timeout_ms": (
         "WASM strategy only: how long one pick may run, in ms; 0 = the gateway default (60 s)."
     ),

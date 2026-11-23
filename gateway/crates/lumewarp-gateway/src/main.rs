@@ -1,5 +1,6 @@
 mod a2a;
 mod a2a_ids;
+mod affinity;
 mod auth;
 mod balance;
 mod catalog;
@@ -343,8 +344,22 @@ async fn main() -> anyhow::Result<()> {
         Some(config) => Some(shared_limits::spawn(runtime.clone(), config.clone())?),
         None => None,
     };
+    // Same Redis and namespace, never the request path: overrides move between
+    // replicas once per shared-limits tick.
+    let affinity_sync = match &shared_limits {
+        Some(config) => Some(affinity::spawn(
+            runtime.clone(),
+            &config.redis_url,
+            &config.namespace,
+            config.sync_interval,
+        )?),
+        None => None,
+    };
     let result = server::serve(&settings, snapshot, runtime, telemetry.is_some()).await;
     if let Some(task) = shared_sync {
+        task.abort();
+    }
+    if let Some(task) = affinity_sync {
         task.abort();
     }
     if let Some(stream) = stream {

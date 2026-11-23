@@ -114,6 +114,7 @@ CLASSIFIED: dict[tuple[str, str], ColumnClass] = {
     ("routers", "params"): ColumnClass.CONFIG,
     ("routers", "reasoning_default_level"): ColumnClass.PUBLIC,
     ("routers", "sticky_header"): ColumnClass.PUBLIC,
+    ("routers", "session_affinity_header"): ColumnClass.PUBLIC,
     ("routers", "strategy"): ColumnClass.PUBLIC,
     ("orgs", "name"): ColumnClass.PUBLIC,
     ("zones", "name"): ColumnClass.PUBLIC,

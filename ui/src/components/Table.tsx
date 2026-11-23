@@ -76,6 +76,23 @@ export function DataTable<T>({ columns, rows, rowKey, loading, error, onRetry, e
   const [sort, setSort] = useState<{ key: string; dir: 1 | -1 } | null>(null);
   const [page, setPage] = useState(0);
 
+  // The column set changes with the grouping: a sort on a column that is gone is dropped, and paging restarts.
+  // Adjusted during render (not in an effect) so the first paint of the new columns already shows page 1.
+  const keys = columns.map((c) => c.key).join("\u0000");
+  const [seenKeys, setSeenKeys] = useState(keys);
+  if (seenKeys !== keys) {
+    setSeenKeys(keys);
+    setPage(0);
+    if (sort && !columns.some((c) => c.key === sort.key && c.sort)) setSort(null);
+  }
+  if (import.meta.env.DEV) {
+    const seen = new Set<string>();
+    for (const c of columns) {
+      if (seen.has(c.key)) console.error(`DataTable: duplicate column key "${c.key}"; give every column a unique key`);
+      seen.add(c.key);
+    }
+  }
+
   const sorted = useMemo(() => {
     const col = columns.find((c) => c.key === sort?.key);
     if (!rows || !col?.sort || !sort) return rows ?? [];

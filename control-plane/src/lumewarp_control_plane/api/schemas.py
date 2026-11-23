@@ -682,6 +682,8 @@ class KeyCreated(ApiModel):
 INT32_MAX = 2**31 - 1
 # RFC 9110 token: what the gateway accepts as a header name (hyper HeaderName).
 _HEADER_TOKEN = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+# A session-affinity header (snapshot.rs::valid_session_affinity_header).
+SESSION_AFFINITY_HEADER = re.compile(r"x-[a-z0-9-]+-id")
 # Split names are metric labels on the gateway (snapshot.rs::validate_split).
 _SPLIT_NAME = re.compile(r"[A-Za-z0-9_.-]{1,32}")
 MAX_SPLITS = 16
@@ -1454,7 +1456,17 @@ def _sticky_header(value: str | None) -> str | None:
     return value.lower()
 
 
+def _session_affinity_header(value: str | None) -> str | None:
+    if value is None:
+        return None
+    value = value.lower()
+    if not SESSION_AFFINITY_HEADER.fullmatch(value):
+        raise ValueError("session_affinity_header must look like x-<name>-id (lower-case)")
+    return value
+
+
 StickyHeader = Annotated[str, Field(max_length=200)]
+SessionAffinityHeader = Annotated[str, Field(max_length=200)]
 Splits = Annotated[list[TrafficSplitIn], AfterValidator(_check_splits)]
 
 
@@ -1478,6 +1490,8 @@ class RouterCreate(ApiModel):
     traffic_split: Splits = Field(default_factory=list)
     sticky: StickyBy = StickyBy.NONE
     sticky_header: StickyHeader | None = None
+    session_affinity: bool = False
+    session_affinity_header: SessionAffinityHeader | None = None
     # WASM strategy only: how long one `pick` may run; 0 = the gateway default (60 s).
     plugin_timeout_ms: int = Field(default=0, ge=0, le=INT32_MAX)
     reasoning_default_level: ReasoningLevel | None = None
@@ -1487,6 +1501,11 @@ class RouterCreate(ApiModel):
     @classmethod
     def _header(cls, value: str | None) -> str | None:
         return _sticky_header(value)
+
+    @field_validator("session_affinity_header")
+    @classmethod
+    def _affinity_header(cls, value: str | None) -> str | None:
+        return _session_affinity_header(value)
 
 
 class RouterUpdate(ApiModel):
@@ -1503,6 +1522,8 @@ class RouterUpdate(ApiModel):
     traffic_split: Splits | None = None
     sticky: StickyBy | None = None
     sticky_header: StickyHeader | None = None
+    session_affinity: bool | None = None
+    session_affinity_header: SessionAffinityHeader | None = None
     plugin_timeout_ms: int | None = Field(default=None, ge=0, le=INT32_MAX)
     reasoning_default_level: ReasoningLevel | None = None
     force: bool = _force_field()
@@ -1511,6 +1532,11 @@ class RouterUpdate(ApiModel):
     @classmethod
     def _header(cls, value: str | None) -> str | None:
         return _sticky_header(value)
+
+    @field_validator("session_affinity_header")
+    @classmethod
+    def _affinity_header(cls, value: str | None) -> str | None:
+        return _session_affinity_header(value)
 
 
 class RouterOut(ReadModel):
@@ -1525,6 +1551,14 @@ class RouterOut(ReadModel):
     traffic_split: list[TrafficSplitOut]
     sticky: StickyBy
     sticky_header: str | None
+    session_affinity: bool = Field(
+        description="Route every request with a session id to the same member model."
+    )
+    session_affinity_header: str | None = Field(
+        description=(
+            "Extra request header read as a session id after `x-lumewarp-id`; null = none."
+        )
+    )
     plugin_timeout_ms: int = Field(
         description="One strategy call's timeout in ms; 0 = the gateway's 60 s default."
     )
@@ -1839,6 +1873,31 @@ class UsageNameOut(ApiModel):
     name: str
 
 
+class UsageTotalsOut(ApiModel):
+    """Ungrouped amounts over one range (`compare=previous`)."""
+
+    requests: int = Field(description="Requests in the range.")
+    prompt_tokens: int = Field(description="Summed input tokens.")
+    completion_tokens: int = Field(description="Summed output tokens.")
+    total_tokens: int = Field(description="Input plus output tokens.")
+    audio_ms: int = Field(description="Summed transcription audio duration in ms.")
+    cost_nano_usd: int = Field(description="Summed cost in nano-USD.")
+    unknown_cost_count: int = Field(description="Requests whose cost is unknown.")
+    error_count: int = Field(description="Requests that failed (outcome or 4xx/5xx).")
+    total_duration_ms: int = Field(description="Summed request duration in ms.")
+    fallback_count: int = Field(description="Requests served by a fallback model.")
+    retried_count: int = Field(description="Requests with more than one upstream attempt.")
+    p50_duration_ms: float | None = Field(
+        description="Median request duration in ms; null when the range has no rows."
+    )
+    p95_duration_ms: float | None = Field(
+        description="95th percentile request duration in ms; null when the range has no rows."
+    )
+    p99_duration_ms: float | None = Field(
+        description="99th percentile request duration in ms; null when the range has no rows."
+    )
+
+
 class UsageRowOut(ApiModel):
     """Aggregated usage with current catalog names and immutable upstream names.
 
@@ -1848,11 +1907,18 @@ class UsageRowOut(ApiModel):
     alias/router grouping collects its refs and Served by; upstream-model grouping
     collects Served by. Default/scope-only grouping does not collect catalog refs.
 
+    `called` is the catalog identity of what the client called (the alias, else the
+    router, else the model, else the literal `requested`), labelled with its current
+    name; `called_kind` says which and `called_names` lists every literal spelling
+    seen, so a rename merges. `status_class` buckets the HTTP status, `outcome` is the
+    gateway outcome and `fallback` is the grouped fallback flag.
+
     `error_count` and `total_duration_ms` describe how the group's requests ended
     (an error outcome, or a 4xx/5xx status that is not a client cancellation;
     summed duration, so the mean is the sum over `requests`). The LLM tabs
     ignore them; the MCP and A2A tabs read them in place of tokens and cost. The
-    monthly totals fast path (LLM requests only) reports both as 0.
+    monthly totals fast path (LLM requests only) reports both as 0, and its
+    percentile amounts as null.
     """
 
     zone: str | None = Field(
@@ -1867,6 +1933,24 @@ class UsageRowOut(ApiModel):
     method: str | None = None
     tool: str | None = None
     requested: str | None = None
+    called: str | None = Field(
+        default=None,
+        description=(
+            "Current name of the called catalog item; only when `called` is grouped."
+            " An unknown or rejected name keeps its literal spelling."
+        ),
+    )
+    called_kind: Literal["model", "alias", "router", "unknown"] | None = Field(
+        default=None,
+        description=(
+            "What the called name is: `alias` wins over the `router` behind it, then"
+            " `model`; `unknown` when no live catalog item matched."
+        ),
+    )
+    called_names: list[str] = Field(
+        default_factory=list,
+        description="Literal called spellings in the group, so a rename merges into one row.",
+    )
     model: str | None = None
     model_id: uuid.UUID | None = None
     upstream_model: str | None = None
@@ -1874,6 +1958,16 @@ class UsageRowOut(ApiModel):
     alias_id: uuid.UUID | None = None
     router: str | None = None
     router_id: uuid.UUID | None = None
+    status_class: Literal["2xx", "4xx", "5xx", "other"] | None = Field(
+        default=None,
+        description="HTTP status bucket; only when `status_class` is grouped. 429 is 4xx.",
+    )
+    outcome: RequestOutcome | None = Field(
+        default=None, description="Gateway request outcome; only when `outcome` is grouped."
+    )
+    fallback: bool | None = Field(
+        default=None, description="The grouped fallback flag; only when `fallback` is grouped."
+    )
     upstream_models: list[str] = Field(default_factory=list)
     via_aliases: list[UsageNameOut] = Field(default_factory=list)
     via_routers: list[UsageNameOut] = Field(default_factory=list)
@@ -1893,6 +1987,34 @@ class UsageRowOut(ApiModel):
     unknown_cost_count: int
     error_count: int = 0
     total_duration_ms: int = 0
+    fallback_count: int = Field(default=0, description="Requests served by a fallback model.")
+    retried_count: int = Field(
+        default=0, description="Requests with more than one upstream attempt."
+    )
+    p50_duration_ms: float | None = Field(
+        default=None,
+        description="Median request duration in ms; null on the monthly totals fast path.",
+    )
+    p95_duration_ms: float | None = Field(
+        default=None,
+        description="95th percentile request duration in ms; null on the monthly totals fast path.",
+    )
+    p99_duration_ms: float | None = Field(
+        default=None,
+        description="99th percentile request duration in ms; null on the monthly totals fast path.",
+    )
+
+
+class UsagePage(Page[UsageRowOut]):
+    """One page of usage rows plus the previous range's ungrouped totals."""
+
+    previous: UsageTotalsOut | None = Field(
+        default=None,
+        description=(
+            "Ungrouped totals of the equal-length range immediately before `from`;"
+            " null unless `compare=previous`."
+        ),
+    )
 
 
 class UsageLeaderboardRowOut(ApiModel):
@@ -1913,7 +2035,14 @@ class UsageLeaderboardRowOut(ApiModel):
         )
     )
     requested: str | None = Field(
-        default=None, description="The called name; only for `by=requested`."
+        default=None, description="The literal called name; only for `by=requested`."
+    )
+    called: str | None = Field(
+        default=None,
+        description="The called catalog item's current name; only for `by=called`.",
+    )
+    called_kind: Literal["model", "alias", "router", "unknown"] | None = Field(
+        default=None, description="What the called item is; only for `by=called`."
     )
     team_id: uuid.UUID | None = Field(
         default=None,

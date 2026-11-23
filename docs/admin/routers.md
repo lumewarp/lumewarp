@@ -24,6 +24,7 @@ Settings that compile 1:1 into the snapshot (`proto/lumewarp/config/v1/snapshot.
 | `fallback_model_ids` (ordered) | router | `Router.fallbacks` (model names). Needs `retry` with at least 2 attempts |
 | `traffic_split [{name, weight, members}]` | router | `Router.traffic_split`; with a split the router's own `members` stay empty |
 | `sticky` (`none`/`header`/`team`/`key`), `sticky_header` | router | `Router.sticky` / `sticky_header` |
+| `session_affinity`, `session_affinity_header` | router | `Router.session_affinity` / `session_affinity_header`; off by default, and the header is only valid while the switch is on |
 
 Validation mirrors the gateway's snapshot checks so an accepted write never makes a gateway
 NACK (422 otherwise): health interval >= 1000 ms and 0 < timeout < interval, path absolute
@@ -32,9 +33,10 @@ statuses 400..599 and unique; members and fallbacks exist, are models and are un
 16 splits, names 1..32 of `[A-Za-z0-9_.-]` and unique, each split non-empty, weights >= 0
 summing to more than 0; `sticky_header` (an HTTP header name, stored lower-case) required iff
 `sticky=header`, and any sticky mode needs a split; a `weighted` router needs a positive total
-member weight per split (or over its members without a split). PATCH replaces lists that are
-given and keeps omitted fields; `retry: null` removes the policy, and leaving `sticky=header`
-drops the header.
+member weight per split (or over its members without a split); `session_affinity_header`
+must look like `x-<name>-id` in lower case and needs `session_affinity`. PATCH replaces lists
+that are given and keeps omitted fields; `retry: null` removes the policy, leaving
+`sticky=header` drops the sticky header and turning session affinity off drops its header.
 
 ## Strategies and plugins
 
@@ -54,7 +56,8 @@ The compiler lists a capability in `required_capabilities` exactly when a field 
 (the gateway's rule). Strategy support is checked against the gateways in the router's zone;
 upstream health and model probes are also aggregated within each zone. Capabilities include
 `health_check`, `circuit_breaker`, `vllm_load` (a metrics URL), `retry`,
-`fallbacks`, `traffic_split` (split or sticky) and `strategy:<name>` for every strategy in use.
+`fallbacks`, `traffic_split` (split or sticky), `session_affinity` and `strategy:<name>` for
+every strategy in use.
 `lowest_latency` is not a capability of its own any more: it is `strategy:lowest_latency`.
 
 ## Retry and health behavior
@@ -153,3 +156,51 @@ then seen as is. Error responses are never rewritten. A response the upstream co
 the removed `Accept-Encoding` is forwarded as is and counted in
 `lumewarp_response_model_rewrite_compressed_total`. The full decision table is in the
 [config protocol](../config-protocol.md).
+
+## Session affinity
+
+`session_affinity` routes every request that carries a session id to the same member
+model. The member is chosen by weighted rendezvous hashing over the eligible members, so
+every replica picks the same model without shared state, and the strategy (including the
+load-aware ones) does not pick on that attempt. Affinity works with or without a traffic
+split: with a split, `sticky` still chooses the split when set, while with `sticky: none`
+the session id also pins the split; the member is then chosen inside it. Retries and
+fallbacks keep their order; an attempt that excludes already-tried models hashes over the
+remaining ones.
+
+Session id sources, first match wins:
+
+1. header `x-lumewarp-id`;
+2. the router's `session_affinity_header` (lower-case `x-<name>-id`);
+3. the top-level JSON string body field `session_id` (JSON endpoints; multipart requests
+   use headers only).
+
+An empty id or one over 256 bytes counts as no session, and the request routes as if
+affinity were off. The id is never stored or logged; only its 64-bit hash is kept.
+
+**Moving.** When the hashed-best member is ineligible (unhealthy, breaker open, cooling
+down or already tried), the session lands on the next-scored eligible member and that move
+is remembered per `(router, session hash)` in a bounded process-local table (100,000
+entries by default, idle TTL one hour, refreshed on use). Later requests use the moved
+member while it stays eligible, so a session does not flip back when its original member
+recovers; when the moved member becomes ineligible the hash is re-run over the eligible
+members and the override is updated. Only a first attempt records a move; a retry's
+exclusion is transient, so a session served by a retry returns to its hashed member on the
+next request. The table never makes a request wait: under lock contention a lookup falls
+back to the hash and a move may go unrecorded, and a full table evicts an entry close to
+expiry.
+
+**Redis.** With `LUMEWARP_SHARED_LIMITS_REDIS_URL` set, a background task (never the
+request path) publishes local overrides under `{lw:<namespace>}:affinity:<router>` and
+merges the other gateways' entries every sync tick, the newest expiry winning, so
+replicas converge on a move they did not see themselves. Expired entries are deleted from
+Redis during the sync. A use refreshes an override's idle TTL on that gateway only, so
+another gateway may let it expire up to one TTL earlier. When Redis is unavailable each
+gateway keeps its own overrides and the hash still sends every replica's first request to
+the same member.
+
+The table is bounded by `LUMEWARP_SESSION_AFFINITY_MAX_ENTRIES` (default `100000`) and
+entries idle out after `LUMEWARP_SESSION_AFFINITY_TTL_SECONDS` (default `3600`).
+`lumewarp_session_affinity_total{router,result}` counts `hash`, `override`, `moved` and
+`none` per request, `lumewarp_session_affinity_overrides` gauges live entries, and
+`lumewarp_session_affinity_sync_errors_total{reason}` counts Redis sync failures.

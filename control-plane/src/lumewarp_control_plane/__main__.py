@@ -1,4 +1,4 @@
-"""CLI: `python -m lumewarp_control_plane {serve,migrate,openapi,openfga}`."""
+"""CLI: `python -m lumewarp_control_plane {serve,migrate,openapi,openfga,seed-dev}`."""
 
 import argparse
 import asyncio
@@ -103,6 +103,18 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("openapi", help="print the OpenAPI document (no database needed)")
     p.add_argument("-o", "--output", help="write to a file instead of stdout")
 
+    p = sub.add_parser(
+        "seed-dev",
+        help=(
+            "development only (LUMEWARP_DEV_MODE, loopback database): seed a catalog and"
+            " usage history into a running control plane"
+        ),
+    )
+    p.add_argument("--url", default="http://127.0.0.1:8091", help="control plane base URL")
+    p.add_argument("--days", type=int, default=30, help="days of usage ending now")
+    p.add_argument("--seed", type=int, default=42, help="PRNG seed (same seed, same events)")
+    p.add_argument("--no-usage", action="store_true", help="seed the catalog only")
+
     p = sub.add_parser("openfga", help="prepare or check the OpenFGA store (LUMEWARP_OPENFGA_*)")
     actions = p.add_subparsers(dest="openfga_command", required=True)
     actions.add_parser(
@@ -114,6 +126,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     actions.add_parser("check", help="check the store and model without writing anything")
     return parser
+
+
+def _seed_dev(settings: Settings, args: argparse.Namespace) -> None:
+    from lumewarp_control_plane import seed_dev
+
+    try:
+        seed_dev.run(settings, args)
+    except seed_dev.SeedRefused as exc:
+        raise SystemExit(f"seed-dev: {exc}") from None
 
 
 def _hash_password(settings: Settings, args: argparse.Namespace) -> None:
@@ -135,6 +156,7 @@ COMMANDS = {
     "openapi": _openapi,
     "hash-password": _hash_password,
     "openfga": _openfga,
+    "seed-dev": _seed_dev,
 }
 
 

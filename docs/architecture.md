@@ -257,6 +257,9 @@ gateway 原生輸出 Prometheus `/metrics` 與（選用）OTLP traces；control 
 | `lumewarp_vllm_scrape_failures_total` | upstream | vLLM metrics 抓取失敗（失敗即退回 in-flight 比較） |
 | `lumewarp_upstream_latency_ewma_seconds` | model | `lowest_latency` 使用的回應標頭時間 EWMA（於 `/metrics` 抓取時計算） |
 | `lumewarp_split_requests_total` | router, split | 依 traffic split 分配的請求數（canary 比例） |
+| `lumewarp_session_affinity_total` | router, result（hash／override／moved／none） | session affinity 的選模結果：無狀態 rendezvous 雜湊、沿用移轉後的 override、因最佳成員不可用而移轉、或沒有 session id |
+| `lumewarp_session_affinity_overrides` | — | 本程序現存的 session→模型 override 數（抓取時清除過期項） |
+| `lumewarp_session_affinity_sync_errors_total` | reason（connect／timeout／script） | session affinity override 的 Redis 同步失敗（只在設定共享限流 Redis 時存在） |
 | `lumewarp_mcp_requests_total` | server, method, status | MCP 請求；method 是轉發的方法或 `notification`／`other`，status 是 HTTP 狀態 |
 | `lumewarp_mcp_tool_calls_total` | server, tool, team, status | MCP tool 呼叫；`tool` 只放已核准的名稱，其餘是 `_unapproved`（避免上游製造標籤） |
 | `lumewarp_mcp_upstream_duration_seconds` | server | MCP 上游回應標頭時間 |
@@ -349,7 +352,7 @@ LLM upstream auth 另輸出 `upstream_auth` span（upstream、plugin、method、
 
 **路由（gateway + control plane）**
 
-- 快照與 standalone YAML 支援 `retry`、`fallbacks`、`health_check`、`circuit_breaker`、`traffic_split`、`vllm_load`、`rotation_grace`、`encrypted_api_key`、`model_limits`、`default_body`、`reasoning_effort`、`router_reasoning_default`、`model_chat_check`、`model_types`、`audio_price`、`mcp`、`a2a` 與三種 plugin capability（`strategy:`、`auth:`、`a2a_middleware:`）；control plane 只在欄位有用到時列出對應 capability，驗證規則與 gateway 一致（含 URI 文法）。非 LLM model 需要 `model_types`，非零音訊價格需要 `audio_price`。fallback 只能是同型別的 model，需要至少 2 次 attempt 的 retry policy。
+- 快照與 standalone YAML 支援 `retry`、`fallbacks`、`health_check`、`circuit_breaker`、`traffic_split`、`session_affinity`、`vllm_load`、`rotation_grace`、`encrypted_api_key`、`model_limits`、`default_body`、`reasoning_effort`、`router_reasoning_default`、`model_chat_check`、`model_types`、`audio_price`、`mcp`、`a2a` 與三種 plugin capability（`strategy:`、`auth:`、`a2a_middleware:`）；control plane 只在欄位有用到時列出對應 capability，驗證規則與 gateway 一致（含 URI 文法）。非 LLM model 需要 `model_types`，非零音訊價格需要 `audio_price`。fallback 只能是同型別的 model，需要至少 2 次 attempt 的 retry policy。
 - 重試僅限回應送出前，串流僅限收到上游 headers 前；最多五次，
   共用原路由 timeout 與全域重試額度（預設 20%，低流量允許三次 burst；
   只有設定 `retry` 的路由請求會存入額度）。`Retry-After` 使用 model

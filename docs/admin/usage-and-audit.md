@@ -8,8 +8,8 @@ usage events; audit answers a different question.
 
 Every request a gateway finishes becomes one usage event, stamped with the zone of its API
 key and reported to the control plane about once a second. The Usage page and
-`GET /api/v1/usage` aggregate them by zone, team, owner, key, called name, endpoint and model
-type. The Admin UI header selects one zone; choose **All zones** to include every zone.
+`GET /api/v1/usage` aggregate them by zone, team, owner, key, called name, endpoint, model
+type and status. The Admin UI header selects one zone; choose **All zones** to include every zone.
 The API's optional `zone` filter behaves the same way: omitted means all zones. `zone` is
 also a supported `group_by` dimension.
 
@@ -17,9 +17,18 @@ Only an installation admin sees where a request was served: the `model`, `upstre
 `alias` and `router` dimensions, their ids and `_missing` filters, and the `served_by`,
 `via_aliases`, `via_routers` and `upstream_model(s)` provenance. Any other caller gets
 `403` with the error code `routing_detail_forbidden` for those dimensions or filters, and
-the provenance fields are null or empty. Everyone else groups by the name the client
-called (`requested`) together with `day`, `team`, `owner`, `key`, `endpoint`, `model type`,
-`kind`, `target`, `method` and `tool`.
+the provenance fields are null or empty; `fallback` is routing detail too. Everyone else
+groups by the name the client called (`called`, or `requested` as typed) together with `day`,
+`team`, `owner`, `key`, `endpoint`, `model type`, `status_class`, `outcome`, `kind`,
+`target`, `method` and `tool`.
+
+**Called name is the default grouping for everyone.** The `called` dimension is the catalog
+item the client called (an alias, else a router, else a model; a name that matched nothing
+stays the literal text), labelled with its current name and a `called_kind` of `model`,
+`alias`, `router` or `unknown`. A rename therefore merges into one row, and `called_names`
+lists every spelling clients used. `requested` stays the exact text as typed, and `model`
+is the model that served, so a request answered by a fallback is attributed to the model
+that served it. The `called` filter selects the same item.
 
 Visibility follows the caller's role:
 
@@ -35,16 +44,55 @@ Visibility follows the caller's role:
   whole-team view, including owner and key grouping and filtering.
 - An installation admin sees every team as well.
 
-A renamed model, alias or router appears as separate called names before and after the
-rename: usage stores the name the client sent, not the catalog's current name. The
-`requested` filter therefore selects that exact spelling.
+Grouped by `requested`, a renamed model, alias or router appears as separate rows before
+and after the rename, because usage stores the name the client sent; `called` merges them.
+The `requested` filter selects one exact spelling.
 
-![Usage by day, by model](/screenshots/usage.png)
+![Usage by day, by called name](/screenshots/usage.png)
 
 The filter bar matches the one on Requests: range, zone, team, model and **Group by** on one
 row, and upstream model, alias, router, endpoint and model type under **More filters**. The
 MCP and A2A tabs have the range, zone, team and **Group by** only. The routing-specific
 filters and group-by choices are only available to an installation admin.
+
+**Group by** offers Called name (the default), Served model, Called × served, As typed,
+Upstream model, Alias, Router, Endpoint, Model type, Status, Team, Owner, API key and Day;
+a member gets the ones that are not routing detail. With **All zones** each row also names
+its zone.
+
+The LLM tab has a **View** switch beside the tabs, **Usage** or **Cost** (kept per browser,
+Usage by default), that reshapes the whole tab.
+
+- **Usage** shows an insights row of requests, tokens, error rate, p95 latency and
+  (installation admin only) fallback rate for the range, each with its change against the
+  previous range of the same length (`compare=previous`), and a donut of how the requests
+  ended, by status class or by outcome. The chart's metric is tokens, requests or errors, the
+  leaderboards rank by tokens, and the table lists requests, tokens (with a bar), prompt and
+  completion tokens, audio seconds, error share and p95.
+- **Cost** shows spend, average cost per request, cost per million tokens and the number of
+  unpriced requests, with the same change against the previous range (a rise in spend is not
+  coloured as bad). The chart draws cost only, the leaderboards rank by spend, and the table
+  lists requests, cost (with a bar), each row's share of the table's total cost, cost per
+  request and unpriced requests. The note about requests counted at $0 for lack of a price
+  appears here.
+
+![The Cost view](/screenshots/usage-cost.png)
+
+**The chart follows the grouping.** Its series are the first non-day dimension of
+**Group by** (`group_by=day,<dimension>` with the page's filters; **Day** is a single
+series). The top eight series by the chosen metric keep a palette colour and the rest fold
+into **Other**, whose names the tooltip and legend list. Except when grouped by **Day**, the chart type switches between
+stacked bars over UTC days, a share donut and ranked bars, and, on the Usage view, the
+metric between tokens, requests and errors (kept per browser). A model with no price is named and left out of
+cost instead of being drawn as zero; **Show data table** lists the same numbers as text.
+
+On the Usage view the table adds the error share and p95 latency per row (p95 is empty where the answer came
+from the monthly totals, which hold no durations). A called-name row shows its kind and,
+with several spellings, lists them in a tooltip; an installation admin can open **Served
+by** on it for the called × served breakdown (served model, upstream model, fallback share,
+p95). **View** opens [Requests](./requests.md) on the same name, range and team. The MCP
+and A2A tabs add a status donut and ranked bars of the top servers, agents, methods or
+tools by requests or errors.
 
 Grouped by **API key**, each key is a pill; hover or focus it for its org, team, owner or
 service account (when known), prefix and id. `GET /api/v1/usage` rows grouped by `key` carry
@@ -61,20 +109,22 @@ tracing backend ([Metrics, alerts and tracing](../operations/observability.md)).
 ## Leaderboard
 
 `GET /api/v1/usage/leaderboard` (`getUsageLeaderboard`) ranks the caller's readable teams by
-tokens and spend. `zone` optionally restricts the results; omitted means every zone.
+tokens or by spend. `zone` optionally restricts the results; omitted means every zone.
 Installation admins rank every team; everyone else only the teams they can read. `by`
 selects the board:
 
 | `by` | Ranks | Extra row fields |
 | --- | --- | --- |
-| `requested` | The names clients called, summed across the readable teams in each zone | `zone`, `requested` |
+| `called` | The catalog items clients called, renames merged, summed across the readable teams in each zone (the Usage page's **Called names** board) | `zone`, `called`, `called_kind` |
+| `requested` | The names as typed, summed across the readable teams in each zone | `zone`, `requested` |
 | `key` | API keys, grouped within their team and zone | `zone`, `team_id`, `key` (when readable) |
 | `owner` | Users and service accounts, grouped within their team and zone | `zone`, `team_id`, `owner_kind`, `owner_id`, `is_me` |
 
-Rows are ordered by `total_tokens` descending, then `cost_nano_usd`, and numbered from
-`rank=1`. The other query parameters are the range (`from`, `to`, defaulting to the current
-UTC month), `team_id`, `zone`, `kind` (`llm` by default) and `limit` (default 10, maximum
-50). Each row also carries `requests`, `prompt_tokens`, `completion_tokens`, `total_tokens`,
+Rows are ordered by `total_tokens` descending, then `cost_nano_usd`, or with `order=cost` by
+`cost_nano_usd` descending, then `total_tokens` (the Usage page's **Cost** view), and numbered
+from `rank=1`. The other query parameters are the range (`from`, `to`, defaulting to the
+current UTC month), `team_id`, `zone`, `kind` (`llm` by default), `limit` (default 10,
+maximum 50) and `order` (`tokens` by default, or `cost`). Each row also carries `requests`, `prompt_tokens`, `completion_tokens`, `total_tokens`,
 `cost_nano_usd` and `unknown_cost_count`.
 
 An identity is named only when the caller may read it. For `by=key`, `key` is a

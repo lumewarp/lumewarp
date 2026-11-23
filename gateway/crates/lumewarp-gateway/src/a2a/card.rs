@@ -888,6 +888,7 @@ mod tests {
             crate::runtime::EnvOptions {
                 id_key: None,
                 public_url: Some("https://gw.example.test".into()),
+                affinity: Default::default(),
             },
         );
         let table = RoutingTable::compile(

@@ -152,10 +152,30 @@ CRDs. `monitoring.prometheusRule.labels` must match your Prometheus `ruleSelecto
 five dashboards. The sidecar label defaults to `grafana_dashboard: "1"`; override
 `monitoring.grafanaDashboards.sidecarLabel` / `sidecarLabelValue` to match your Grafana
 sidecar, which must watch the release namespace. Select a Prometheus datasource
-using the dashboard's `datasource` variable. The `Lumewarp / MCP & A2A` dashboard
+using the dashboard's `datasource` variable.
+
+### Dashboards
+
+Each dashboard leads with at-a-glance panels and groups the remaining trends into
+collapsible rows. Every panel has a description, units and thresholds; the `namespace`
+filter applies to all of them.
+
+| Dashboard | Leads with | Also contains |
+| --- | --- | --- |
+| `Lumewarp / Overview` | Stat tiles for requests/s, 5xx ratio, gateway-overhead p99, TTFT p99, tokens/s and spend in range, with sparklines and thresholds; a 5xx gauge; a request-duration heatmap; an endpoint donut | Top called names by requests and tokens, top teams by spend, then the per-name traffic, latency, token and upstream-error trends |
+| `Lumewarp / Routing` | A per-model table from instant queries: probe health, breaker state, in-flight, vLLM queue, KV-cache usage, p99 and 5xx | Fallback and retry-budget bargauges, an attempt-outcome donut, split share, session-affinity hit/moved stats and the live-override gauge, then attempts, breaker, health, queue, in-flight and rewrite trends |
+| `Lumewarp / Usage` | Token, spend and request totals with the percent change against the preceding equal-length range, plus a 5xx ratio | Prompt/completion and per-team token donuts, top teams and called names, pipeline-health stats (failures, drops, queue depth, metering gaps), then token, spend and delivery trends |
+| `Lumewarp / MCP & A2A` | MCP and A2A request rates and 5xx ratios, plugin trap/timeout share and dropped catalog reports | Error-ratio gauges, top tools and agents, upstream-latency heatmaps, then method, tool, plugin and catalog-review trends |
+| `Lumewarp / Control plane` | Connected sessions, worst-zone outbox backlog, compile failures and NACKs in the last hour, skipped usage events and compile rate | Per-zone and per-gateway state tables, a compile-duration heatmap, then ACK/NACK, version, ingestion, authorization and key-lifecycle trends |
+
+Filters follow the labels the metrics actually carry: `requested` and `team` on Overview
+and Usage, `requested`, `router` and `model` on Routing, and `server`/`agent` on
+MCP & A2A. Gateway metrics carry no zone label, so zone selection is not offered there.
+The affinity panels need the gateway's `lumewarp_session_affinity_total` and
+`lumewarp_session_affinity_overrides` series. The `Lumewarp / MCP & A2A` dashboard
 reads gateway MCP/A2A, plugin and catalog metrics plus the control plane's
-`lumewarp_cp_mcp_*` counters, so its review panels need
-`controlPlane.metrics.enabled` and its traffic panels a gateway ServiceMonitor.
+`lumewarp_cp_mcp_*` counters, so its review panels need `controlPlane.metrics.enabled`
+and its traffic panels a gateway ServiceMonitor.
 
 The chart bundles `files/prometheus/rules.yaml` and `files/dashboards/*.json`.
 Their sources of truth are `deploy/prometheus/rules.yaml` and
@@ -191,10 +211,11 @@ reconciler's first success, so a never-successful reconciler still alerts. With
 
 Dashboard filters apply only where metric labels exist: tokens support team and
 model, while spend supports team only. Spend panels explicitly cover all models;
-model-level cost cannot be derived from the current metrics contract. Latency
-histograms have no team label, and global pipeline and model gauges are not
-filtered by team. Gauge observations of the same vLLM upstream are aggregated
-with max/min, not summed across gateways.
+model-level cost cannot be derived from the current metrics contract, so no dashboard
+offers spend by requested name. Latency histograms have no team label, and global
+pipeline and model gauges are not filtered by team. Gauge observations of the same vLLM
+upstream are aggregated with max/min, not summed across gateways. There is no budget
+metric, so budget burn stays in the Admin UI and API rather than on a dashboard.
 
 Validate rules locally (pinned CI image):
 

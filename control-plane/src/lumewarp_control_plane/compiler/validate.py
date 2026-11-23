@@ -36,6 +36,7 @@ SUPPORTED_CAPABILITIES: frozenset[str] = frozenset(
         "health_check",
         "circuit_breaker",
         "traffic_split",
+        "session_affinity",
         "vllm_load",
         "rotation_grace",
         "encrypted_api_key",
@@ -101,6 +102,7 @@ MAX_RATE_LIMIT_SCOPES = 4
 _SPLIT_NAME = re.compile(r"[A-Za-z0-9_.-]{1,32}")
 # hyper HeaderName::from_bytes: an RFC 9110 token.
 _HEADER_NAME = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+_SESSION_AFFINITY_HEADER = re.compile(r"x-[a-z0-9-]+-id")
 UPSTREAM_KINDS = {
     pb.UPSTREAM_KIND_OPENAI,
     pb.UPSTREAM_KIND_VLLM,
@@ -263,6 +265,8 @@ def capabilities_used(snap: pb.Snapshot) -> list[str]:
             used.add("fallbacks")
         if r.traffic_split or r.sticky != pb.STICKY_BY_NONE or r.sticky_header:
             used.add("traffic_split")
+        if r.session_affinity or r.session_affinity_header:
+            used.add("session_affinity")
         if r.reasoning_default_level:
             used.add("router_reasoning_default")
         used.add(f"strategy:{r.strategy}")
@@ -623,6 +627,14 @@ def validate_snapshot(snap: pb.Snapshot, *, max_bytes: int, max_keys: int) -> No
             raise SnapshotInvalid(problem)
         if r.sticky not in STICKY_BY:
             raise SnapshotInvalid(f"router {r.name!r} has sticky {r.sticky}")
+        if r.session_affinity_header and not r.session_affinity:
+            raise SnapshotInvalid(
+                f"router {r.name!r} sets session_affinity_header without session_affinity"
+            )
+        if r.session_affinity_header and not _SESSION_AFFINITY_HEADER.fullmatch(
+            r.session_affinity_header
+        ):
+            raise SnapshotInvalid(f"router {r.name!r} has an invalid session_affinity_header")
         if r.plugin_timeout_ms > MAX_TARGET_TIMEOUT_MS:
             raise SnapshotInvalid(f"router {r.name!r} plugin_timeout_ms is too large")
         if r.HasField("retry") and (

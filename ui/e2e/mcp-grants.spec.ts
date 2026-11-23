@@ -255,7 +255,7 @@ test("usage: the MCP and A2A tabs group by server, method and tool with failures
   // The LLM tab is the default and asks for LLM events only: MCP and A2A carry no model, tokens or cost.
   await expect(page.getByRole("tab", { name: "LLM" })).toHaveAttribute("aria-selected", "true");
   await expect.poll(() => asked.some((call) => call.kind === "llm")).toBe(true);
-  await expect(page.getByText("Spend", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("insight-tokens")).toBeVisible();
 
   await page.getByRole("tab", { name: "MCP", exact: true }).click();
   // The MCP tab opens on server × method × tool, the most detailed read.
@@ -271,7 +271,7 @@ test("usage: the MCP and A2A tabs group by server, method and tool with failures
   await expect(call).toContainText("500 ms");
   // 15 requests, 2 failures, 5.5 s in total: tokens and spend are not on this tab.
   await expect(page.getByText("Spend", { exact: true })).toHaveCount(0);
-  await expect(page.getByText("15", { exact: true })).toBeVisible();
+  await expect(page.getByText("15", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("13.3%", { exact: true })).toBeVisible();
   await expect(page.getByText("367 ms", { exact: true })).toBeVisible();
   await shot(page, "usage-mcp");

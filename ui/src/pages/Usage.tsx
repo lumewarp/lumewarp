@@ -5,7 +5,9 @@ import { api, type UsageQuery, type UsageRow } from "../api";
 import { Badge, fmtCompact, fmtNumber as n, fmtUsd, PageHeader, TypeBadge } from "../components/Bits";
 import { FilterBar } from "../components/FilterBar";
 import { SelectField, TextField } from "../components/Form";
-import { UsageChart } from "../components/UsageChart";
+import { CalledBreakdown, CalledCell } from "../components/usage/Called";
+import { fmtMs } from "../components/usage/format";
+import { Toggle } from "../components/usage/Toggle";
 import { Card } from "../components/ui/card";
 import { ComboboxField } from "../components/ui/combobox-field";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
@@ -13,7 +15,7 @@ import { DataTable, type Column } from "../components/Table";
 import { dayStart, isoDay, shiftDay } from "../lib/days";
 import { MODEL_TYPES, type ModelType } from "../lib/modelType";
 import type { RequestsSearch } from "../lib/requests";
-import { useUsageMetric } from "../lib/usageMetric";
+import { USAGE_METRICS, useUsageLens, useUsageMetric, type UsageLens } from "../lib/usageMetric";
 import { useCan, useMe, useModels, useNames, useTeamDirectory, useTeams, useZoneFilter } from "../hooks";
 import { ZoneBadge } from "../zone";
 import { ENDPOINTS, endpointLabel } from "../lib/endpoints";
@@ -22,6 +24,25 @@ import { Leaderboard } from "../components/Leaderboard";
 
 // The catalog picker is a lazy chunk: this page ships in the entry chunk.
 const LazyCatalogFilter = lazy(() => import("../components/CatalogPicker").then((m) => ({ default: m.CatalogFilter })));
+// The charts (recharts) are lazy chunks too: the landing JavaScript carries no chart library.
+const LazyUsageChart = lazy(() => import("../components/UsageChart").then((m) => ({ default: m.UsageChart })));
+const LazyInsights = lazy(() => import("../components/usage/Insights").then((m) => ({ default: m.Insights })));
+const LazyTrafficCharts = lazy(() => import("../components/usage/TrafficCharts").then((m) => ({ default: m.TrafficCharts })));
+const UsageChart = (props: ComponentProps<typeof LazyUsageChart>) => (
+  <Suspense fallback={<div aria-busy="true" className="h-[220px] w-full animate-pulse rounded-md bg-accent" />}>
+    <LazyUsageChart {...props} />
+  </Suspense>
+);
+const Insights = (props: ComponentProps<typeof LazyInsights>) => (
+  <Suspense fallback={null}>
+    <LazyInsights {...props} />
+  </Suspense>
+);
+const TrafficCharts = (props: ComponentProps<typeof LazyTrafficCharts>) => (
+  <Suspense fallback={null}>
+    <LazyTrafficCharts {...props} />
+  </Suspense>
+);
 const CatalogFilter = (props: ComponentProps<typeof LazyCatalogFilter>) => (
   <Suspense fallback={null}>
     <LazyCatalogFilter {...props} />
@@ -38,31 +59,39 @@ function useDebounced<T>(value: T, ms: number): T {
   return settled;
 }
 
+/** Called name is the default for everyone: the name the client asked for, with renames merged. */
 const GROUPS = [
-  { value: "model", label: "Model" },
+  { value: "called", label: "Called name" },
+  { value: "model", label: "Served model" },
+  { value: "called,model", label: "Called × served" },
+  { value: "requested", label: "As typed" },
   { value: "upstream_model", label: "Upstream model" },
   { value: "alias", label: "Alias" },
   { value: "router", label: "Router" },
-  { value: "requested", label: "Requested name" },
   { value: "endpoint", label: "Endpoint" },
   { value: "model_type", label: "Model type" },
+  { value: "status_class", label: "Status" },
   { value: "team", label: "Team" },
   { value: "owner", label: "Owner" },
   { value: "key", label: "API key" },
   { value: "day", label: "Day" },
-  { value: "day,model", label: "Day × model" },
-  { value: "team,owner,key", label: "Team × owner × key" },
 ];
 
 /** What everyone but an installation admin may group by: no served model, upstream, alias or router. */
 const MEMBER_GROUPS = [
-  { value: "requested", label: "Requested name" },
-  { value: "day", label: "Day" },
-  { value: "day,requested", label: "Day × requested name" },
+  { value: "called", label: "Called name" },
+  { value: "requested", label: "As typed" },
+  { value: "endpoint", label: "Endpoint" },
+  { value: "model_type", label: "Model type" },
+  { value: "status_class", label: "Status" },
   { value: "team", label: "Team" },
   { value: "key", label: "API key" },
+  { value: "day", label: "Day" },
 ];
 const OWNER_GROUP = { value: "owner", label: "Owner" };
+
+/** The series dimension of a grouping: its first non-day dimension, `day` when it has none. */
+const seriesDim = (groupBy: string) => groupBy.split(",").find((dim) => dim !== "day") ?? "day";
 
 /** MCP traffic read by server, method and tool; the first entry is the default (the most detail). */
 const MCP_GROUPS = [
@@ -216,17 +245,33 @@ export function Usage() {
   const [tab, setTab] = useState<"llm" | "mcp" | "a2a">("llm");
   const zone = useZoneFilter();
   const range: RangeProps = { from, to, teamId, onFrom: setFrom, onTo: setTo, onTeam: setTeamId, zone };
+  // Cost or usage is the LLM tab's top-level view: it sits beside the tabs and reshapes the whole tab.
+  const [lens, setLens] = useUsageLens();
   return (
     <>
-      <PageHeader title="Usage" hint="Spend is for the model that served each request." />
+      <PageHeader title="Usage" hint="Rows are grouped by the name the client called; Served model shows what answered, and a fallback bills the model that served." />
       <Tabs value={tab} onValueChange={(value) => setTab(value as typeof tab)}>
-        <TabsList variant="line">
-          <TabsTrigger value="llm">LLM</TabsTrigger>
-          <TabsTrigger value="mcp">MCP</TabsTrigger>
-          <TabsTrigger value="a2a">A2A</TabsTrigger>
-        </TabsList>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <TabsList variant="line">
+            <TabsTrigger value="llm">LLM</TabsTrigger>
+            <TabsTrigger value="mcp">MCP</TabsTrigger>
+            <TabsTrigger value="a2a">A2A</TabsTrigger>
+          </TabsList>
+          {tab === "llm" && (
+            <Toggle
+              label="View"
+              testId="usage-lens"
+              value={lens}
+              onChange={setLens}
+              options={[
+                { value: "usage", label: "Usage" },
+                { value: "cost", label: "Cost" },
+              ]}
+            />
+          )}
+        </div>
         <TabsContent value="llm">
-          <LlmUsage range={range} />
+          <LlmUsage range={range} lens={lens} />
         </TabsContent>
         <TabsContent value="mcp">
           <TrafficUsage kind="mcp" range={range} />
@@ -239,7 +284,7 @@ export function Usage() {
   );
 }
 
-function LlmUsage({ range }: { range: RangeProps }) {
+function LlmUsage({ range, lens }: { range: RangeProps; lens: UsageLens }) {
   const [pickedGroup, setGroupBy] = useState("");
   const [model, setModel] = useState(ANY);
   const [upstreamText, setUpstreamText] = useState("");
@@ -302,9 +347,9 @@ function LlmUsage({ range }: { range: RangeProps }) {
     queryFn: () => api.usage(filters),
     enabled: !!range.from && !!range.to,
   });
-  // The chart keeps the page's range and filters but is always by day and name, whatever the table groups by.
-  const seriesBy = routing ? "model" : "requested";
-  const chartFilters: UsageQuery = { ...filters, group_by: `day,${seriesBy}` };
+  // The chart follows the table's grouping: same filters, one series per name of its first non-day dimension.
+  const chartDim = seriesDim(groupBy);
+  const chartFilters: UsageQuery = { ...filters, group_by: chartDim === "day" ? "day" : `day,${chartDim}` };
   const chart = useQuery({
     queryKey: ["usage", chartFilters],
     queryFn: () => api.usage(chartFilters),
@@ -312,7 +357,8 @@ function LlmUsage({ range }: { range: RangeProps }) {
     // A refusal or an outage is shown in the card, with its own retry: it must not stall the page.
     retry: false,
   });
-  const [metric, setMetric] = useUsageMetric();
+  const [usageMetric, setUsageMetric] = useUsageMetric();
+  const costLens = lens === "cost";
   // A half-filled range is not an error: the query stays disabled and the chart says what is missing.
   const ranged = !!range.from && !!range.to;
 
@@ -350,17 +396,57 @@ function LlmUsage({ range }: { range: RangeProps }) {
     if (!id) return "—";
     return kind === "service_account" ? accountName(id) : ownName(id);
   };
+  /** The chart's series name of a row: the same text the table shows for the dimension. */
+  const seriesLabel = (row: Row): string => {
+    switch (chartDim) {
+      case "called":
+        return row.called || "—";
+      case "model":
+        return row.model || "—";
+      case "requested":
+        return row.requested || "—";
+      case "upstream_model":
+        return row.upstream_model || "—";
+      case "alias":
+        return row.alias || "No alias";
+      case "router":
+        return row.router || "No router";
+      case "endpoint":
+        return row.endpoint ? endpointLabel(row.endpoint) : "—";
+      case "model_type":
+        return row.model_type ?? "—";
+      case "status_class":
+        return row.status_class ?? "—";
+      case "team":
+        return row.team_id ? teamName(row.team_id) : "—";
+      case "owner":
+        return row.owner_id ? ownerLabel(row.owner_kind, row.owner_id) : "—";
+      case "key":
+        return row.key?.name ?? (row.key_id ? row.key_id.slice(0, 8) : "—");
+      default:
+        return "All usage";
+    }
+  };
+  // The chart draws one series per name of its first non-day dimension, so it is named after that dimension alone.
+  const dimLabel = GROUPS.find((option) => option.value === chartDim)?.label ?? "Usage";
   const dimCols: Record<string, Column<Row>[]> = {
     zone: [{ key: "zone", header: "Zone", sort: (a, b) => (a.zone ?? "").localeCompare(b.zone ?? ""), cell: (row) => zoneOf(row.zone) }],
     day: [{ key: "day", header: "Date", sort: (a, b) => (a.date ?? "").localeCompare(b.date ?? ""), cell: (row) => row.date ?? "—" }],
     endpoint: [{ key: "endpoint", header: "Endpoint", sort: (a, b) => (a.endpoint ?? "").localeCompare(b.endpoint ?? ""), cell: (row) => (row.endpoint ? <code>{endpointLabel(row.endpoint)}</code> : <span className="text-muted-foreground">—</span>) }],
     model_type: [{ key: "model_type", header: "Type", sort: (a, b) => (a.model_type ?? "").localeCompare(b.model_type ?? ""), cell: (row) => <TypeBadge type={row.model_type} /> }],
-    requested: [{ key: "requested", header: "Requested", sort: (a, b) => (a.requested ?? "").localeCompare(b.requested ?? ""), cell: (row) => row.requested ?? "—" }],
+    called: [{ key: "called", header: "Called name", sort: (a, b) => (a.called ?? "").localeCompare(b.called ?? ""), cell: (row) => <CalledCell row={row} /> }],
+    status_class: [{ key: "status_class", header: "Status", sort: (a, b) => (a.status_class ?? "").localeCompare(b.status_class ?? ""), cell: (row) => row.status_class ?? "—" }],
+    requested: [{ key: "requested", header: "As typed", sort: (a, b) => (a.requested ?? "").localeCompare(b.requested ?? ""), cell: (row) => row.requested ?? "—" }],
     model: [
-      { key: "model", header: "Model", sort: (a, b) => (a.model ?? "").localeCompare(b.model ?? ""), cell: (row) => <strong>{row.model || "—"}</strong> },
+      { key: "model", header: "Served model", sort: (a, b) => (a.model ?? "").localeCompare(b.model ?? ""), cell: (row) => <strong>{row.model || "—"}</strong> },
       { key: "upstream_model", header: "Upstream model", cell: (row) => <UpstreamModel row={row} /> },
-      { key: "via_alias", header: "Via alias", cell: (row) => <Provenance single={row.alias} list={row.via_aliases} /> },
-      { key: "via_router", header: "Via router", cell: (row) => <Provenance single={row.router} list={row.via_routers} /> },
+      // Called × served already names the called side; the routes are the single Served model view's detail.
+      ...(groupBy === "model"
+        ? [
+            { key: "via_alias", header: "Via alias", cell: (row: Row) => <Provenance single={row.alias} list={row.via_aliases} /> },
+            { key: "via_router", header: "Via router", cell: (row: Row) => <Provenance single={row.router} list={row.via_routers} /> },
+          ]
+        : []),
     ],
     upstream_model: [
       { key: "upstream_model", header: "Upstream model", cell: (row) => <UpstreamModel row={row} /> },
@@ -379,6 +465,65 @@ function LlmUsage({ range }: { range: RangeProps }) {
     key: [{ key: "key", header: "API key", cell: (row) => (row.key_id ? <KeyPill keyRef={row.key} fallbackId={row.key_id} /> : "—") }],
   };
   const peak = Math.max(1, ...(query.data ?? []).map((r) => r.total_tokens));
+  const costPeak = Math.max(1, ...(query.data ?? []).map((r) => r.cost_nano_usd));
+  const bar = (share: number) => (
+    <span className="hidden h-1.5 w-20 overflow-hidden rounded-full bg-muted sm:inline-block" aria-hidden="true">
+      <span className="block h-full bg-primary" style={{ width: `${share * 100}%` }} />
+    </span>
+  );
+  const muted = (text: string) => <span className="text-muted-foreground">{text}</span>;
+  const requestsColumn: Column<Row> = { key: "requests", header: "Requests", align: "right", sort: (a, b) => a.requests - b.requests, cell: (row) => n(row.requests) };
+  const logColumn: Column<Row> = {
+    key: "log",
+    header: "Log",
+    cell: (row) => (
+      <span className="inline-flex items-center gap-1">
+        <Link to="/requests" search={requestsSearchFor(row)} className="font-medium whitespace-nowrap">
+          View
+        </Link>
+        {routing && dims.includes("called") && row.called && !dims.includes("model") && <CalledBreakdown row={row} filters={filters} />}
+      </span>
+    ),
+  };
+  const usageColumns: Column<Row>[] = [
+    requestsColumn,
+    {
+      key: "tokens",
+      header: "Total tokens",
+      align: "right",
+      sort: (a, b) => a.total_tokens - b.total_tokens,
+      cell: (row) => (
+        <span className="inline-flex items-center justify-end gap-2">
+          {n(row.total_tokens)}
+          {bar(row.total_tokens / peak)}
+        </span>
+      ),
+    },
+    { key: "prompt", header: "Prompt", align: "right", hideBelow: "md", cell: (row) => n(row.prompt_tokens) },
+    { key: "completion", header: "Completion", align: "right", hideBelow: "md", cell: (row) => n(row.completion_tokens) },
+    ...(total.audio > 0 ? [{ key: "audio", header: "Audio (s)", align: "right" as const, hideBelow: "md" as const, sort: (a: Row, b: Row) => a.audio_ms - b.audio_ms, cell: (row: Row) => (row.audio_ms ? fmtSeconds(row.audio_ms) : muted("—")) }] : []),
+    { key: "errors", header: "Errors", align: "right", hideBelow: "md", sort: (a, b) => a.error_count / Math.max(1, a.requests) - b.error_count / Math.max(1, b.requests), cell: (row) => <span className={row.error_count ? "tabular-nums" : "text-muted-foreground"}>{fmtShare(row.error_count, row.requests)}</span> },
+    { key: "p95", header: "p95", align: "right", hideBelow: "md", sort: (a, b) => (a.p95_duration_ms ?? 0) - (b.p95_duration_ms ?? 0), cell: (row) => <span className="tabular-nums">{fmtMs(row.p95_duration_ms)}</span> },
+  ];
+  const perRequest = (row: Row) => (row.requests ? row.cost_nano_usd / row.requests : 0);
+  const costColumns: Column<Row>[] = [
+    requestsColumn,
+    {
+      key: "cost",
+      header: "Cost",
+      align: "right",
+      sort: (a, b) => a.cost_nano_usd - b.cost_nano_usd,
+      cell: (row) => (
+        <span className="inline-flex items-center justify-end gap-2">
+          {fmtUsd(row.cost_nano_usd)}
+          {bar(row.cost_nano_usd / costPeak)}
+        </span>
+      ),
+    },
+    { key: "cost_share", header: "Share of cost", align: "right", hideBelow: "md", sort: (a, b) => a.cost_nano_usd - b.cost_nano_usd, cell: (row) => (total.cost > 0 ? `${((row.cost_nano_usd / total.cost) * 100).toLocaleString(undefined, { maximumFractionDigits: 1 })}%` : muted("—")) },
+    { key: "cost_per_request", header: "Cost / request", align: "right", hideBelow: "md", sort: (a, b) => perRequest(a) - perRequest(b), cell: (row) => (row.requests ? fmtUsd(perRequest(row)) : muted("—")) },
+    { key: "unpriced", header: "Unpriced", align: "right", hideBelow: "md", sort: (a, b) => a.unknown_cost_count - b.unknown_cost_count, cell: (row) => (row.unknown_cost_count ? <span className="tabular-nums">{n(row.unknown_cost_count)}</span> : muted("—")) },
+  ];
   // The same names, key and range the row was grouped by, so Requests opens on the matching rows.
   const requestsSearchFor = (row: Row): RequestsSearch => ({
     kind: "llm",
@@ -386,15 +531,27 @@ function LlmUsage({ range }: { range: RangeProps }) {
     to: range.to,
     team_id: row.team_id ?? (range.teamId || undefined),
     key_id: row.key_id ?? undefined,
-    requested: row.requested || undefined,
-    ...(routing ? { model: row.model || undefined, alias: row.alias || undefined, router: row.router || undefined } : {}),
+    // A called row opens the log on the one spelling it holds; with several, an admin filters by the catalog item.
+    requested: row.requested || (row.called_names?.length === 1 ? row.called_names[0] : !routing ? row.called || undefined : undefined),
+    ...(routing
+      ? {
+          model: row.model || (row.called_kind === "model" && (row.called_names?.length ?? 0) !== 1 ? row.called || undefined : undefined),
+          alias: row.alias || (row.called_kind === "alias" && (row.called_names?.length ?? 0) !== 1 ? row.called || undefined : undefined),
+          router: row.router || (row.called_kind === "router" && (row.called_names?.length ?? 0) !== 1 ? row.called || undefined : undefined),
+        }
+      : {}),
   });
 
   return (
     <>
       <FilterBar
         testId="usage-filters"
-        className={routing ? "lg:grid-cols-[10rem_10rem_repeat(4,minmax(0,1fr))_auto]" : "lg:grid-cols-[10rem_10rem_repeat(3,minmax(0,1fr))_auto]"}
+        className={
+          // Group by is last and keeps room for its longest label ("Called × served").
+          routing
+            ? "lg:grid-cols-[10rem_10rem_repeat(3,minmax(0,1fr))_minmax(11rem,1fr)_auto]"
+            : "lg:grid-cols-[10rem_10rem_repeat(2,minmax(0,1fr))_minmax(11rem,1fr)_auto]"
+        }
         more={{
           active: [routing && upstreamText, routing && alias, routing && router, endpoint, modelType].filter(Boolean).length,
           onClear: () => {
@@ -421,68 +578,36 @@ function LlmUsage({ range }: { range: RangeProps }) {
         {routing && <CatalogFilter label="Model" kinds={["model"]} value={model} onChange={setModel} leading={[{ value: ANY, label: "All models" }]} />}
         <SelectField label="Group by" value={groupBy} onChange={setGroupBy} options={groupOptions} />
       </FilterBar>
-      <div className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3">
-        <Stat label="Requests" value={fmtCompact(total.requests)} title={n(total.requests)} />
-        {total.audio > 0 && <Stat label="Audio (seconds)" value={fmtSeconds(total.audio)} />}
-        <Stat label="Total tokens" value={fmtCompact(total.tokens)} title={n(total.tokens)} />
-        <Stat label="Prompt / completion" value={`${fmtCompact(total.prompt)} / ${fmtCompact(total.completion)}`} title={`${n(total.prompt)} / ${n(total.completion)}`} />
-        <Stat label="Spend" value={fmtUsd(total.cost)} />
-      </div>
-      {total.unpriced > 0 && <p className="text-muted-foreground">{n(total.unpriced)} request(s) had no price configured and are counted at $0.</p>}
+      <Insights filters={{ ...filters, group_by: undefined }} admin={routing} ranged={ranged} lens={lens} />
+      {!costLens && total.audio > 0 && <p className="text-muted-foreground">Audio transcribed: {fmtSeconds(total.audio)} s.</p>}
+      {costLens && total.unpriced > 0 && <p className="text-muted-foreground">{n(total.unpriced)} request(s) had no price configured and are counted at $0.</p>}
       <div className="my-4">
         <UsageChart
-          seriesBy={seriesBy}
           rows={ranged ? chart.data : []}
+          labelOf={seriesLabel}
+          dimLabel={dimLabel}
+          singleSeries={chartDim === "day"}
           from={range.from}
           to={range.to}
-          metric={metric}
-          onMetricChange={setMetric}
+          metric={costLens ? "cost" : usageMetric}
+          onMetricChange={setUsageMetric}
+          metrics={costLens ? ["cost"] : USAGE_METRICS}
           loading={ranged && chart.isPending}
           error={chart.error}
           onRetry={() => void chart.refetch()}
           empty={ranged ? "No usage in this range." : "Choose a date range."}
-          title="Usage by day"
+          title={costLens ? "Cost by day" : "Usage by day"}
         />
       </div>
-      {ranged && <Leaderboard from={rangeQuery.from} to={rangeQuery.to} teamId={range.teamId} zone={range.zone.param} />}
+      {ranged && <Leaderboard from={rangeQuery.from} to={rangeQuery.to} teamId={range.teamId} zone={range.zone.param} lens={lens} />}
       <DataTable
         rows={query.data}
         loading={query.isPending || teams.isPending || (directoryEnabled && directory.isPending)}
         error={query.error ?? teams.error ?? (directoryEnabled ? directory.error : null)}
         onRetry={() => void query.refetch()}
-        rowKey={(row) => [row.zone, row.date, row.endpoint, row.model_type, row.requested, row.model_id ?? row.model, row.alias_id ?? row.alias, row.router_id ?? row.router, row.upstream_model, row.team_id, row.owner_kind, row.owner_id, row.key_id].join("|")}
+        rowKey={(row) => [row.zone, row.date, row.called, row.status_class, row.endpoint, row.model_type, row.requested, row.model_id ?? row.model, row.alias_id ?? row.alias, row.router_id ?? row.router, row.upstream_model, row.team_id, row.owner_kind, row.owner_id, row.key_id].join("|")}
         empty="No usage in this period."
-        columns={[
-          ...dims.flatMap((dimension) => dimCols[dimension] ?? []),
-          { key: "requests", header: "Requests", align: "right", sort: (a, b) => a.requests - b.requests, cell: (row) => n(row.requests) },
-          {
-            key: "tokens",
-            header: "Total tokens",
-            align: "right",
-            sort: (a, b) => a.total_tokens - b.total_tokens,
-            cell: (row) => (
-              <span className="inline-flex items-center justify-end gap-2">
-                {n(row.total_tokens)}
-                <span className="hidden h-1.5 w-20 overflow-hidden rounded-full bg-muted sm:inline-block" aria-hidden="true">
-                  <span className="block h-full bg-primary" style={{ width: `${(row.total_tokens / peak) * 100}%` }} />
-                </span>
-              </span>
-            ),
-          },
-          { key: "prompt", header: "Prompt", align: "right", hideBelow: "md", cell: (row) => n(row.prompt_tokens) },
-          { key: "completion", header: "Completion", align: "right", hideBelow: "md", cell: (row) => n(row.completion_tokens) },
-          ...(total.audio > 0 ? [{ key: "audio", header: "Audio (s)", align: "right" as const, hideBelow: "md" as const, sort: (a: Row, b: Row) => a.audio_ms - b.audio_ms, cell: (row: Row) => (row.audio_ms ? fmtSeconds(row.audio_ms) : <span className="text-muted-foreground">—</span>) }] : []),
-          { key: "cost", header: "Cost", align: "right", sort: (a, b) => a.cost_nano_usd - b.cost_nano_usd, cell: (row) => fmtUsd(row.cost_nano_usd) },
-          {
-            key: "requests",
-            header: "Log",
-            cell: (row) => (
-              <Link to="/requests" search={requestsSearchFor(row)} className="font-medium whitespace-nowrap">
-                View
-              </Link>
-            ),
-          },
-        ]}
+        columns={[...dims.flatMap((dimension) => dimCols[dimension] ?? []), ...(costLens ? costColumns : usageColumns), logColumn]}
       />
     </>
   );
@@ -510,6 +635,8 @@ function TrafficUsage({ kind, range }: { kind: "mcp" | "a2a"; range: RangeProps 
     queryFn: () => api.usage(filters),
     enabled: ranged,
   });
+  const endFilters: UsageQuery = { ...filters, group_by: "status_class" };
+  const ends = useQuery({ queryKey: ["usage", endFilters], queryFn: () => api.usage(endFilters), enabled: ranged, retry: false });
   const total = useMemo(
     () =>
       (query.data ?? []).reduce(
@@ -575,6 +702,7 @@ function TrafficUsage({ kind, range }: { kind: "mcp" | "a2a"; range: RangeProps 
       <p className="mb-4 text-sm text-muted-foreground">
         An error is an error outcome or a 4xx/5xx answer from the gateway; a client that hangs up is neither.
       </p>
+      {ranged && <TrafficCharts rows={query.data} ends={ends.data} groupBy={groupBy} />}
       <DataTable
         rows={ranged ? query.data : []}
         loading={ranged && query.isPending}

@@ -23,6 +23,7 @@ pub const SUPPORTED_CAPABILITIES: &[&str] = &[
     "health_check",
     "circuit_breaker",
     "traffic_split",
+    "session_affinity",
     "vllm_load",
     "rotation_grace",
     "encrypted_api_key",
@@ -42,6 +43,22 @@ pub const SUPPORTED_CAPABILITIES: &[&str] = &[
     // One-off ProbeRequest over the config stream (gateway-side Test now).
     "upstream_probe",
 ];
+
+/// A custom session header: lower-case `x-`, a non-empty lower-case/digit/hyphen
+/// middle, then `-id` (`x-lumewarp-id`, `x-conversation-id`). Anything else
+/// could collide with a credential or a hop-by-hop header.
+pub fn valid_session_affinity_header(name: &str) -> bool {
+    let Some(middle) = name
+        .strip_prefix("x-")
+        .and_then(|rest| rest.strip_suffix("-id"))
+    else {
+        return false;
+    };
+    !middle.is_empty()
+        && middle
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
 
 /// The strategy of a pool that came from a `Model`, not a `Router`.
 pub const DEFAULT_STRATEGY: &str = "weighted";
@@ -371,6 +388,24 @@ pub fn validate(snapshot: &Snapshot, supported_caps: &[&str]) -> Result<(), Appl
             !r.traffic_split.is_empty() || r.sticky != 0 || !r.sticky_header.is_empty(),
             "traffic_split",
         )?;
+        require(
+            r.session_affinity || !r.session_affinity_header.is_empty(),
+            "session_affinity",
+        )?;
+        if !r.session_affinity && !r.session_affinity_header.is_empty() {
+            return Err(ApplyError::invalid(format!(
+                "router {:?} sets session_affinity_header without session_affinity",
+                r.name
+            )));
+        }
+        if !r.session_affinity_header.is_empty()
+            && !valid_session_affinity_header(&r.session_affinity_header)
+        {
+            return Err(ApplyError::invalid(format!(
+                "router {:?} has an invalid session_affinity_header",
+                r.name
+            )));
+        }
         let sticky = known::<pb::StickyBy>(r.sticky, true, "sticky")?;
         validate_split(r, sticky, &models)?;
         if let Some(p) = &r.retry {
@@ -1087,6 +1122,7 @@ pub(crate) mod tests {
                     s.models[0].reasoning_effort = Some(pb::ReasoningEffort::default())
                 }
                 "router_reasoning_default" => r.reasoning_default_level = "low".into(),
+                "session_affinity" => r.session_affinity = true,
                 "mcp" => {
                     s.mcp_servers = vec![pb::McpServer {
                         id: "s1-id".into(),
@@ -1375,6 +1411,54 @@ pub(crate) mod tests {
         );
         // An unsupported capability is still a NACK of its own kind.
         s.required_capabilities.push("traffic_split".into());
+        assert_code(validate(&s, &[]), NackCode::UnsupportedFeature);
+    }
+
+    #[test]
+    fn session_affinity_field_and_header_validation() {
+        let check = |mutate: &dyn Fn(&mut pb::Router)| {
+            let mut s = base();
+            s.required_capabilities.push("session_affinity".into());
+            s.routers[0].session_affinity = true;
+            mutate(&mut s.routers[0]);
+            validate(&s, SUPPORTED_CAPABILITIES)
+        };
+        check(&|_| {}).unwrap();
+        check(&|r| r.session_affinity_header = "x-conversation-id".into()).unwrap();
+        check(&|r| r.session_affinity_header = "x-lumewarp-id".into()).unwrap();
+        // Valid with or without traffic splits.
+        let mut s = base();
+        s.required_capabilities
+            .extend(["session_affinity".into(), "traffic_split".into()]);
+        s.routers[1].session_affinity = true;
+        s.routers[1].traffic_split = vec![split("stable", &["a"], 9), split("canary", &["b"], 1)];
+        validate(&s, SUPPORTED_CAPABILITIES).unwrap();
+
+        type Mutation = Box<dyn Fn(&mut pb::Router)>;
+        let bad: Vec<Mutation> = vec![
+            Box::new(|r| {
+                r.session_affinity = false;
+                r.session_affinity_header = "x-conversation-id".into();
+            }),
+            Box::new(|r| r.session_affinity_header = "X-Session-Id".into()),
+            Box::new(|r| r.session_affinity_header = "x-session".into()),
+            Box::new(|r| r.session_affinity_header = "x-id".into()),
+            Box::new(|r| r.session_affinity_header = "authorization".into()),
+            Box::new(|r| r.session_affinity_header = "x-session id".into()),
+            Box::new(|r| r.session_affinity_header = "x--id".into()),
+        ];
+        for mutate in &bad {
+            assert_code(check(mutate.as_ref()), NackCode::InvalidConfig);
+        }
+        // The field without its capability is an error, not ignored.
+        let mut s = base();
+        s.routers[0].session_affinity = true;
+        assert_code(
+            validate(&s, SUPPORTED_CAPABILITIES),
+            NackCode::InvalidConfig,
+        );
+        // An old gateway that lacks the capability NACKs its own kind.
+        s.required_capabilities.push("session_affinity".into());
         assert_code(validate(&s, &[]), NackCode::UnsupportedFeature);
     }
 

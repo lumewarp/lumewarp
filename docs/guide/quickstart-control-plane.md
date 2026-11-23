@@ -91,6 +91,24 @@ settings, SSO, authorization backends, the catalog, plugins and operations, and
 The seeded demo API key is in `.dev/demo-key`. Postgres is at `127.0.0.1:55432`, with
 database, user and password all `lumewarp`.
 
+Every start also runs `uv run lumewarp-control-plane seed-dev` against the running control
+plane, so the pages and dashboards are populated without using the UI first. That seed adds
+the orgs `acme` and `research` (the existing `default` stays), the teams `search`,
+`platform` and `ml-research`, six users as members or team admins (one of them an org
+admin), a service account with one key per zone in every team, five priced models
+(`llama-3.1-8b`, `qwen2.5-32b`, `gpt-4o-mini`, `bge-m3`, `whisper-large-v3`) deployed on the
+mock upstream in both zones, the aliases `chat-default` and `embed`, the routers `chat` (with session affinity) and
+`chat-ab`, a model group, MCP/A2A grants for `example` and `helper`, and org, team, member
+and service-account limits and budgets above the seeded spend. It then ingests 30 UTC days
+of usage in both zones, ending now: weekday/weekend and hour-of-day curves, calls through
+models, aliases and routers, streaming and non-streaming, embeddings, transcription, MCP
+`tools/call` and A2A requests, and about 3% 429/5xx with their outcomes. Key secrets are in
+`.dev/seed-keys` (not the database); the run deletes and re-ingests only the seed teams'
+`usage_events` and rebuilds their monthly totals, so the window slides forward and other
+teams' history is untouched. `seed-dev --days N --seed N --no-usage` changes the window or
+seeds the catalog only; it refuses to run unless `LUMEWARP_DEV_MODE` is on and the database
+is loopback.
+
 The stack runs two gateways sharing the default zone's fixed token. The control plane
 assigns each stream's gateway id in its first `Welcome`; a reconnect gets a new id and row:
 <http://127.0.0.1:4000/> (admin `127.0.0.1:9464`) and <http://127.0.0.1:4001/> (admin

@@ -38,6 +38,8 @@ const STICKY: { value: Sticky; label: string }[] = [
 const SPLIT_NAME = /^[A-Za-z0-9_.-]{1,32}$/;
 const MAX_SPLITS = 16;
 const HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+// Gateway rule (snapshot.rs::valid_session_affinity_header).
+const SESSION_HEADER = /^x-[a-z0-9-]+-id$/;
 
 interface Split {
   name: string;
@@ -61,6 +63,8 @@ interface Values {
   splits: Split[];
   sticky: Sticky;
   sticky_header: string;
+  session_affinity: boolean;
+  session_affinity_header: string;
   force: boolean;
 }
 const blank: Values = {
@@ -78,6 +82,8 @@ const blank: Values = {
   splits: [],
   sticky: "none",
   sticky_header: "",
+  session_affinity: false,
+  session_affinity_header: "",
   force: false,
 };
 
@@ -100,6 +106,8 @@ const fromRouter = (r: Router): Values => ({
   })),
   sticky: r.sticky,
   sticky_header: r.sticky_header ?? "",
+  session_affinity: r.session_affinity,
+  session_affinity_header: r.session_affinity_header ?? "",
   force: false,
 });
 
@@ -168,10 +176,12 @@ const body = (v: Values, missing: boolean) => ({
   })),
   sticky: v.splits.length ? v.sticky : ("none" as const),
   sticky_header: v.splits.length && v.sticky === "header" ? v.sticky_header.trim() : null,
+  session_affinity: v.session_affinity,
+  session_affinity_header: v.session_affinity ? v.session_affinity_header.trim() || null : null,
   ...(v.force && missing ? { force: true } : {}),
 });
 
-const PATCHABLE = ["name", "strategy", "params", "plugin_timeout_ms", "members", "retry", "fallback_model_ids", "reasoning_default_level", "traffic_split", "sticky", "sticky_header"] as const;
+const PATCHABLE = ["name", "strategy", "params", "plugin_timeout_ms", "members", "retry", "fallback_model_ids", "reasoning_default_level", "traffic_split", "sticky", "sticky_header", "session_affinity", "session_affinity_header"] as const;
 
 /**
  * The PATCH of an edit: only what the form changed against the router as it was loaded. A save never
@@ -200,6 +210,8 @@ const ALIAS = {
   weight: "splits",
   sticky: "sticky",
   sticky_header: "sticky_header",
+  session_affinity: "session_affinity",
+  session_affinity_header: "session_affinity_header",
   retry: "retry_max_attempts",
   max_attempts: "retry_max_attempts",
   retry_on_status: "retry_statuses",
@@ -381,6 +393,8 @@ function RouterForm({ existing, strategies, models }: { existing?: Router; strat
     retry_statuses: (v, all) => (all.retry_enabled && parseStatuses(v) === undefined ? "Comma-separated HTTP statuses in 400–599" : undefined),
     retry_max_attempts: (v, all) => (all.retry_enabled && v !== null && (v < 1 || v > 5) ? "Between 1 and 5" : undefined),
     sticky_header: (v, all) => (all.splits.length && all.sticky === "header" && !HEADER_NAME.test(v.trim()) ? "Enter a header name" : undefined),
+    session_affinity_header: (v, all) =>
+      all.session_affinity && v.trim() && !SESSION_HEADER.test(v.trim()) ? "Use x-<name>-id, lower-case" : undefined,
     force: (v, all) => ((strategyByName.get(all.strategy)?.missing_gateways.length ?? 0) > 0 && !v ? "Tick “Save anyway” to save while those gateways lack this strategy" : undefined),
   });
   const v = form.values;
@@ -777,6 +791,27 @@ function RouterForm({ existing, strategies, models }: { existing?: Router; strat
               />
             )}
           </>
+        )}
+      </Section>
+
+      <Section
+        title="Session affinity"
+        hint="Every request with the same session id goes to the same member model."
+        toggle={{
+          label: "Session affinity",
+          checked: v.session_affinity,
+          onChange: (x) => form.set("session_affinity", x),
+        }}
+      >
+        {v.session_affinity && (
+          <TextField
+            label="Session header"
+            value={v.session_affinity_header}
+            onChange={(x) => form.set("session_affinity_header", x)}
+            error={form.errors.session_affinity_header}
+            placeholder="x-session-id"
+            hint="Requests are matched by x-lumewarp-id, then this header, then the body session_id; it must look like x-<name>-id."
+          />
         )}
       </Section>
     </EditPage>
