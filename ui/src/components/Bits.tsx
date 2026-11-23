@@ -69,6 +69,12 @@ export const usdToNano = (u: number | null) => (u === null ? null : Math.round(u
 /** Money, in the reader's currency format. */
 export const fmtUsd = (nano: number | null | undefined, empty = "—") =>
   nano === null || nano === undefined ? empty : (nano / NANO).toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 6 });
+/** A summary's money: cents from a dollar up, else four decimals; an amount that would round to zero keeps full precision. */
+export const fmtUsdShort = (nano: number) => {
+  const usd = nano / NANO;
+  if (usd > 0 && usd < 0.0001) return fmtUsd(nano);
+  return usd.toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: usd >= 1 ? 2 : 4 });
+};
 /** Counts and token totals, in the reader's locale. The table and the charts share it. */
 export const fmtNumber = (value: number) => value.toLocaleString();
 

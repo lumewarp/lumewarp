@@ -1,7 +1,8 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQueries, type UseQueryResult } from "@tanstack/react-query";
 
 import { api, type LeaderboardRow } from "../api";
-import { Badge, fmtCompact, fmtNumber as n, fmtUsd } from "./Bits";
+import { Badge, fmtCompact, fmtNumber as n, fmtUsd, fmtUsdShort } from "./Bits";
+import { cn } from "../lib/utils";
 import { KeyPill } from "./KeyPill";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
 
@@ -15,12 +16,13 @@ const BOARDS: { by: By; title: string }[] = [
   { by: "owner", title: "Users" },
 ];
 
+const isAnonymous = (row: LeaderboardRow, by: By) => by !== "called" && !(by === "key" ? row.key : row.owner_id);
+
 /** Where a row has no readable identity the server sends a "Key #3" style label: it is shown muted. */
 function Label({ row, by }: { row: LeaderboardRow; by: By }) {
   if (by === "key" && row.key)
     return <KeyPill keyRef={row.key} fallbackId={row.key.id} />;
-  const anonymous =
-    by !== "called" && !(by === "key" ? row.key : row.owner_id);
+  const anonymous = isAnonymous(row, by);
   return (
     <span
       className={
@@ -34,39 +36,7 @@ function Label({ row, by }: { row: LeaderboardRow; by: By }) {
   );
 }
 
-function Board({
-  by,
-  title,
-  from,
-  to,
-  teamId,
-  zone,
-  lens,
-}: {
-  lens: UsageLens;
-  by: By;
-  title: string;
-  from: string;
-  to: string;
-  teamId: string;
-  /** The `?zone=` value; absent = every zone. */
-  zone?: string;
-}) {
-  const params = {
-    by,
-    from,
-    to,
-    kind: "llm" as const,
-    team_id: teamId || undefined,
-    zone,
-    limit: 10,
-    order: lens === "cost" ? ("cost" as const) : ("tokens" as const),
-  };
-  const query = useQuery({
-    queryKey: ["usage-leaderboard", params],
-    queryFn: () => api.usageLeaderboard(params),
-    retry: false,
-  });
+function Board({ by, title, zone, lens, query }: { lens: UsageLens; by: By; title: string; zone?: string; query: UseQueryResult<LeaderboardRow[]> }) {
   // The server ranks by the lens: tokens, or spend in the Cost lens.
   const rows = (query.data ?? []).map((row, i) => ({ row, rank: i + 1 }));
   const value = (row: LeaderboardRow) => (lens === "cost" ? row.cost_nano_usd : row.total_tokens);
@@ -102,7 +72,7 @@ function Board({
                   {!zone && <Badge tone="info">{row.zone}</Badge>}
                 </span>
                 <span className="text-right tabular-nums">
-                  {lens === "cost" ? fmtUsd(row.cost_nano_usd) : <span title={`${n(row.total_tokens)} tokens`}>{fmtCompact(row.total_tokens)}</span>}
+                  {lens === "cost" ? <span title={fmtUsd(row.cost_nano_usd)}>{fmtUsdShort(row.cost_nano_usd)}</span> : <span title={`${n(row.total_tokens)} tokens`}>{fmtCompact(row.total_tokens)}</span>}
                 </span>
                 <span />
                 <span className="flex items-center gap-2 text-sm tabular-nums">
@@ -134,21 +104,44 @@ export function Leaderboard({
   teamId,
   zone,
   lens,
+  seesOthers,
 }: {
   lens: UsageLens;
   from: string;
   to: string;
   teamId: string;
   zone?: string;
+  /** An installation or team admin: other people's keys and owners are readable, so every board stays. */
+  seesOthers: boolean;
 }) {
+  const queries = useQueries({
+    queries: BOARDS.map(({ by }) => {
+      const params = {
+        by,
+        from,
+        to,
+        kind: "llm" as const,
+        team_id: teamId || undefined,
+        zone,
+        limit: 10,
+        order: lens === "cost" ? ("cost" as const) : ("tokens" as const),
+      };
+      return { queryKey: ["usage-leaderboard", params], queryFn: () => api.usageLeaderboard(params), retry: false };
+    }),
+  });
+  // For a plain member, a key or user board with no row of their own would only repeat the
+  // total as "Key #1": it is left out. An admin keeps it (a deleted key is anonymous there too).
+  const boards = BOARDS.map((board, i) => ({ ...board, query: queries[i] })).filter(
+    ({ by, query }) => seesOthers || by === "called" || !query.data || query.data.length === 0 || query.data.some((row) => !isAnonymous(row, by)),
+  );
   return (
     <section
-      className="my-4 grid gap-3 lg:grid-cols-3"
+      className={cn("my-4 grid gap-3", boards.length === 3 ? "lg:grid-cols-3" : boards.length === 2 && "lg:grid-cols-2")}
       aria-label="Leaderboards"
       data-testid="leaderboards"
     >
-      {BOARDS.map((board) => (
-        <Board key={board.by} {...board} from={from} to={to} teamId={teamId} zone={zone} lens={lens} />
+      {boards.map((board) => (
+        <Board key={board.by} by={board.by} title={board.title} zone={zone} lens={lens} query={board.query} />
       ))}
     </section>
   );

@@ -1,35 +1,15 @@
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
 
 import { api, type UsageQuery, type UsageRow, type UsageTotals } from "../../api";
 import { cn } from "../../lib/utils";
 import type { UsageLens } from "../../lib/usageMetric";
-import { fmtCompact, fmtNumber as n } from "../Bits";
-import { Card, CardContent, CardHeader, CardTitle } from "../ui/card";
-import { Toggle } from "./Toggle";
+import { fmtCompact, fmtNumber as n, fmtUsdShort as fmtSpend } from "../Bits";
+import { Card } from "../ui/card";
 import { fmtMs } from "./format";
-import { Donut, SliceLegend, type Slice } from "./charts";
 
 const rate = (count: number, requests: number) => (requests ? count / requests : null);
 const fmtRate = (value: number | null) => (value === null ? "—" : `${(value * 100).toLocaleString(undefined, { maximumFractionDigits: 1 })}%`);
 
-/** A tile's spend: cents from a dollar up, otherwise four decimals (the table keeps full precision). */
-function fmtSpend(nano: number): string {
-  const usd = nano / 1e9;
-  return usd.toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: usd >= 1 ? 2 : 4 });
-}
-
-/** Where a status class or outcome keeps its colour, so the donut reads the same everywhere. */
-const STATUS_FILL: Record<string, string> = {
-  "2xx": "var(--series-3)",
-  "4xx": "var(--series-4)",
-  "5xx": "var(--series-8)",
-  completed: "var(--series-3)",
-  client_cancelled: "var(--series-4)",
-  rejected: "var(--series-2)",
-  upstream_error: "var(--series-8)",
-};
-const statusFill = (name: string) => STATUS_FILL[name] ?? "var(--series-other)";
 
 interface Tile {
   key: string;
@@ -91,31 +71,15 @@ function tiles(now: UsageRow | undefined, before: UsageTotals | null, admin: boo
   return out;
 }
 
-type Split = "status_class" | "outcome";
-
 /**
- * Totals with the change against the previous equal-length range, and how the requests ended. `filters` are the
+ * Totals with the change against the previous equal-length range. `filters` are the
  * page's, without a grouping. Fallback rate is routing detail: only an installation admin gets it.
  */
 export function Insights({ filters, admin, ranged, lens }: { filters: UsageQuery; admin: boolean; ranged: boolean; lens: UsageLens }) {
-  const [split, setSplit] = useState<Split>("status_class");
   const totals = useQuery({ queryKey: ["usage-totals", filters], queryFn: () => api.usageTotals(filters), enabled: ranged, retry: false });
-  const splitFilters: UsageQuery = { ...filters, group_by: split };
-  const ends = useQuery({ queryKey: ["usage", splitFilters], queryFn: () => api.usage(splitFilters), enabled: ranged && lens === "usage", retry: false });
-  // "All zones" answers one row per zone and class: the donut sums them per class.
-  const byName = new Map<string, number>();
-  for (const row of ends.data ?? []) {
-    const name = (split === "status_class" ? row.status_class : row.outcome) ?? "—";
-    byName.set(name, (byName.get(name) ?? 0) + row.requests);
-  }
-  const slices: Slice[] = [...byName]
-    .map(([name, value]) => ({ name, value, fill: statusFill(name) }))
-    .filter((slice) => slice.value > 0)
-    .sort((a, b) => b.value - a.value);
-  const total = slices.reduce((sum, slice) => sum + slice.value, 0);
 
   return (
-    <section className={cn("mb-4 grid gap-3", lens === "usage" && "lg:grid-cols-[minmax(0,1fr)_17rem]")} aria-label="Insights" data-testid="usage-insights" data-lens={lens}>
+    <section className="mb-4 grid gap-3" aria-label="Insights" data-testid="usage-insights" data-lens={lens}>
       <div className="grid grid-cols-[repeat(auto-fit,minmax(130px,1fr))] content-start gap-3">
         {totals.error ? (
           <p className="col-span-full text-destructive" role="alert">
@@ -133,37 +97,6 @@ export function Insights({ filters, admin, ranged, lens }: { filters: UsageQuery
           ))
         )}
       </div>
-      {lens === "usage" && (
-      <Card className="gap-2" data-testid="insight-status">
-        <CardHeader className="flex-row flex-wrap items-center justify-between gap-2">
-          <CardTitle>How requests ended</CardTitle>
-          <Toggle
-            label="Split by"
-            testId="insight-split"
-            value={split}
-            onChange={setSplit}
-            options={[
-              { value: "status_class", label: "Status" },
-              { value: "outcome", label: "Outcome" },
-            ]}
-          />
-        </CardHeader>
-        <CardContent>
-          {ends.error ? (
-            <p className="text-destructive" role="alert">
-              {ends.error.message}
-            </p>
-          ) : slices.length === 0 ? (
-            <p className="m-0 text-sm text-muted-foreground">{ends.isPending ? "Loading…" : "No usage in this range."}</p>
-          ) : (
-            <div className="grid gap-2">
-              <Donut slices={slices} format={(value) => `${n(value)} (${fmtRate(value / total)})`} centre={{ value: fmtCompact(total), label: "requests" }} height={150} />
-              <SliceLegend slices={slices} label="Status" />
-            </div>
-          )}
-        </CardContent>
-      </Card>
-      )}
     </section>
   );
 }

@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { Split } from "lucide-react";
 import { useState } from "react";
 
 import { api, type UsageQuery, type UsageRow } from "../../api";
@@ -57,9 +58,15 @@ export function CalledBreakdown({ row, filters }: { row: UsageRow; filters: Usag
   const rows = result.data ?? [];
   return (
     <>
-      <Button type="button" variant="ghost" size="sm" aria-haspopup="dialog" onClick={() => setOpen(true)}>
-        Served by
-      </Button>
+      {/* An icon keeps the Log column narrow; the name and the tooltip say what it opens. */}
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button type="button" variant="ghost" size="icon" className="size-7" aria-label="Served by" aria-haspopup="dialog" onClick={() => setOpen(true)}>
+            <Split aria-hidden="true" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>Served by</TooltipContent>
+      </Tooltip>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="sm:max-w-3xl" data-testid="called-breakdown">
           <DialogHeader>

@@ -281,6 +281,33 @@ test("leaderboards: rank, bar, spend, the 'you' badge and muted anonymous rows",
   }
 });
 
+test("leaderboards: a key or user board with no readable row is left out, and spend is short", async ({ browser, request }) => {
+  await roleTeam(request);
+  const row = (rank: number, label: string, extra: object = {}) => ({
+    rank, label, requested: null, team_id: null, key: null, owner_kind: null, owner_id: null, is_me: false,
+    requests: 1, prompt_tokens: 10, completion_tokens: 0, total_tokens: 10, cost_nano_usd: 292_026_000, unknown_cost_count: 0, ...extra,
+  });
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  try {
+    await page.route("**/api/v1/usage/leaderboard?*", (route) => {
+      const by = new URL(route.request().url()).searchParams.get("by");
+      const items = by === "called" ? [row(1, "chat", { called: "chat" })] : [row(1, by === "key" ? "Key #1" : "Member #1")];
+      return route.fulfill({ status: 200, json: { items, next_cursor: null } });
+    });
+    await context.addCookies([{ name: "lumewarp_session", value: MEMBER, url: test.info().project.use.baseURL! }]);
+    await page.goto("/usage");
+    await expect(page.getByTestId("leaderboard-called").getByTestId("leaderboard-row")).toHaveCount(1);
+    await expect(page.getByTestId("leaderboard-key")).toHaveCount(0);
+    await expect(page.getByTestId("leaderboard-owner")).toHaveCount(0);
+    await page.getByTestId("usage-lens").getByRole("button", { name: "Cost", exact: true }).click();
+    const value = page.getByTestId("leaderboard-called").getByTitle("$0.292026");
+    await expect(value).toHaveText("$0.292");
+  } finally {
+    await context.close();
+  }
+});
+
 test("usage as an installation admin keeps the routing page and its leaderboards", async ({ page }) => {
   // The suite's beforeEach signed this page in with the break-glass session.
   await expect(page.getByRole("combobox", { name: "Model", exact: true })).toBeVisible();

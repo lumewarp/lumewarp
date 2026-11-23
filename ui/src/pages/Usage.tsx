@@ -466,8 +466,9 @@ function LlmUsage({ range, lens }: { range: RangeProps; lens: UsageLens }) {
   };
   const peak = Math.max(1, ...(query.data ?? []).map((r) => r.total_tokens));
   const costPeak = Math.max(1, ...(query.data ?? []).map((r) => r.cost_nano_usd));
+  // The inline bar needs room the dimension columns take at laptop widths: wide screens only.
   const bar = (share: number) => (
-    <span className="hidden h-1.5 w-20 overflow-hidden rounded-full bg-muted sm:inline-block" aria-hidden="true">
+    <span className="hidden h-1.5 w-20 overflow-hidden rounded-full bg-muted 2xl:inline-block" aria-hidden="true">
       <span className="block h-full bg-primary" style={{ width: `${share * 100}%` }} />
     </span>
   );
@@ -503,7 +504,7 @@ function LlmUsage({ range, lens }: { range: RangeProps; lens: UsageLens }) {
     { key: "completion", header: "Completion", align: "right", hideBelow: "md", cell: (row) => n(row.completion_tokens) },
     ...(total.audio > 0 ? [{ key: "audio", header: "Audio (s)", align: "right" as const, hideBelow: "md" as const, sort: (a: Row, b: Row) => a.audio_ms - b.audio_ms, cell: (row: Row) => (row.audio_ms ? fmtSeconds(row.audio_ms) : muted("—")) }] : []),
     { key: "errors", header: "Errors", align: "right", hideBelow: "md", sort: (a, b) => a.error_count / Math.max(1, a.requests) - b.error_count / Math.max(1, b.requests), cell: (row) => <span className={row.error_count ? "tabular-nums" : "text-muted-foreground"}>{fmtShare(row.error_count, row.requests)}</span> },
-    { key: "p95", header: "p95", align: "right", hideBelow: "md", sort: (a, b) => (a.p95_duration_ms ?? 0) - (b.p95_duration_ms ?? 0), cell: (row) => <span className="tabular-nums">{fmtMs(row.p95_duration_ms)}</span> },
+    { key: "p95", header: "p95", align: "right", hideBelow: "md", sort: (a, b) => (a.p95_duration_ms ?? 0) - (b.p95_duration_ms ?? 0), cell: (row) => <span className="whitespace-nowrap tabular-nums">{fmtMs(row.p95_duration_ms)}</span> },
   ];
   const perRequest = (row: Row) => (row.requests ? row.cost_nano_usd / row.requests : 0);
   const costColumns: Column<Row>[] = [
@@ -599,7 +600,7 @@ function LlmUsage({ range, lens }: { range: RangeProps; lens: UsageLens }) {
           title={costLens ? "Cost by day" : "Usage by day"}
         />
       </div>
-      {ranged && <Leaderboard from={rangeQuery.from} to={rangeQuery.to} teamId={range.teamId} zone={range.zone.param} lens={lens} />}
+      {ranged && <Leaderboard from={rangeQuery.from} to={rangeQuery.to} teamId={range.teamId} zone={range.zone.param} lens={lens} seesOthers={routing || ownerOffered} />}
       <DataTable
         rows={query.data}
         loading={query.isPending || teams.isPending || (directoryEnabled && directory.isPending)}

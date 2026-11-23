@@ -65,8 +65,7 @@ Usage by default), that reshapes the whole tab.
 
 - **Usage** shows an insights row of requests, tokens, error rate, p95 latency and
   (installation admin only) fallback rate for the range, each with its change against the
-  previous range of the same length (`compare=previous`), and a donut of how the requests
-  ended, by status class or by outcome. The chart's metric is tokens, requests or errors, the
+  previous range of the same length (`compare=previous`). The chart's metric is tokens, requests or errors, the
   leaderboards rank by tokens, and the table lists requests, tokens (with a bar), prompt and
   completion tokens, audio seconds, error share and p95.
 - **Cost** shows spend, average cost per request, cost per million tokens and the number of
@@ -75,6 +74,10 @@ Usage by default), that reshapes the whole tab.
   lists requests, cost (with a bar), each row's share of the table's total cost, cost per
   request and unpriced requests. The note about requests counted at $0 for lack of a price
   appears here.
+
+The page's leaderboards follow the same view. For a plain member, the **Keys** and **Users**
+boards appear only when one of the rows is their own; otherwise they would repeat the total
+under an anonymous label.
 
 ![The Cost view](/screenshots/usage-cost.png)
 

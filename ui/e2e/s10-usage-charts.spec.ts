@@ -211,7 +211,6 @@ test("lens: Cost reshapes tiles, chart, leaderboards and table, and survives a r
   await expect(lens(page, "Usage")).toHaveAttribute("aria-pressed", "true");
   for (const id of ["requests", "tokens", "errors", "p95", "fallback"]) await expect(tiles.getByTestId(`insight-${id}`)).toBeVisible();
   await expect(tiles.getByTestId("insight-spend")).toHaveCount(0);
-  await expect(tiles.getByTestId("insight-status")).toBeVisible();
   await expect(page.getByRole("columnheader", { name: "Prompt", exact: true })).toBeVisible();
   await expect(page.getByRole("columnheader", { name: "Cost", exact: true })).toHaveCount(0);
   await expect(page.getByTestId("leaderboard-called").getByTestId("leaderboard-row").first()).not.toContainText("$");
@@ -328,8 +327,6 @@ test("insights: tiles with the change against the previous range, and the status
   await expect(insights.getByTestId("insight-errors")).toContainText("10%");
   await expect(insights.getByTestId("insight-p95")).toContainText("900 ms");
   await expect(insights.getByTestId("insight-fallback")).toContainText("5%");
-  await expect(insights.getByTestId("insight-status").locator('[data-series="2xx"]')).toHaveCount(1);
-  await expect(insights.getByTestId("insight-status").locator('[data-series="5xx"]')).toHaveCount(1);
 
   // Cost lens: the previous range has the same spend, so the tile says so.
   await lens(page, "Cost").click();
