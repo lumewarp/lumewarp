@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { lazy, Suspense, useEffect, useMemo, useState, type ComponentProps } from "react";
 import { api, type UsageQuery, type UsageRow } from "../api";
-import { Badge, fmtCompact, fmtNumber as n, fmtUsd, PageHeader, TypeBadge } from "../components/Bits";
+import { Badge, fmtNumber as n, fmtUsd, PageHeader, TypeBadge } from "../components/Bits";
 import { FilterBar } from "../components/FilterBar";
 import { SelectField, TextField } from "../components/Form";
 import { CalledBreakdown, CalledCell } from "../components/usage/Called";
@@ -12,7 +12,8 @@ import { Card } from "../components/ui/card";
 import { ComboboxField } from "../components/ui/combobox-field";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { DataTable, type Column } from "../components/Table";
-import { dayStart, isoDay, shiftDay } from "../lib/days";
+import { browserTimeZone, fromLocalInput, toLocalInput } from "../lib/days";
+import { bucketOf, bucketSlots } from "../lib/usageSeries";
 import { MODEL_TYPES, type ModelType } from "../lib/modelType";
 import type { RequestsSearch } from "../lib/requests";
 import { USAGE_METRICS, useUsageLens, useUsageMetric, type UsageLens } from "../lib/usageMetric";
@@ -27,7 +28,6 @@ const LazyCatalogFilter = lazy(() => import("../components/CatalogPicker").then(
 // The charts (recharts) are lazy chunks too: the landing JavaScript carries no chart library.
 const LazyUsageChart = lazy(() => import("../components/UsageChart").then((m) => ({ default: m.UsageChart })));
 const LazyInsights = lazy(() => import("../components/usage/Insights").then((m) => ({ default: m.Insights })));
-const LazyTrafficCharts = lazy(() => import("../components/usage/TrafficCharts").then((m) => ({ default: m.TrafficCharts })));
 const UsageChart = (props: ComponentProps<typeof LazyUsageChart>) => (
   <Suspense fallback={<div aria-busy="true" className="h-[220px] w-full animate-pulse rounded-md bg-accent" />}>
     <LazyUsageChart {...props} />
@@ -38,9 +38,11 @@ const Insights = (props: ComponentProps<typeof LazyInsights>) => (
     <LazyInsights {...props} />
   </Suspense>
 );
-const TrafficCharts = (props: ComponentProps<typeof LazyTrafficCharts>) => (
+// The MCP and A2A tabs are a lazy chunk too: most visits stay on the LLM tab.
+const LazyTrafficUsage = lazy(() => import("../components/usage/TrafficUsage").then((m) => ({ default: m.TrafficUsage })));
+const TrafficUsage = (props: ComponentProps<typeof LazyTrafficUsage>) => (
   <Suspense fallback={null}>
-    <LazyTrafficCharts {...props} />
+    <LazyTrafficUsage {...props} />
   </Suspense>
 );
 const CatalogFilter = (props: ComponentProps<typeof LazyCatalogFilter>) => (
@@ -59,11 +61,11 @@ function useDebounced<T>(value: T, ms: number): T {
   return settled;
 }
 
-/** Called name is the default for everyone: the name the client asked for, with renames merged. */
+/** Model is the default for everyone: the name the client asked for, with renames merged. */
 const GROUPS = [
-  { value: "called", label: "Called name" },
+  { value: "called", label: "Model" },
   { value: "model", label: "Served model" },
-  { value: "called,model", label: "Called × served" },
+  { value: "called,model", label: "Model × served" },
   { value: "requested", label: "As typed" },
   { value: "upstream_model", label: "Upstream model" },
   { value: "alias", label: "Alias" },
@@ -79,7 +81,7 @@ const GROUPS = [
 
 /** What everyone but an installation admin may group by: no served model, upstream, alias or router. */
 const MEMBER_GROUPS = [
-  { value: "called", label: "Called name" },
+  { value: "called", label: "Model" },
   { value: "requested", label: "As typed" },
   { value: "endpoint", label: "Endpoint" },
   { value: "model_type", label: "Model type" },
@@ -93,28 +95,30 @@ const OWNER_GROUP = { value: "owner", label: "Owner" };
 /** The series dimension of a grouping: its first non-day dimension, `day` when it has none. */
 const seriesDim = (groupBy: string) => groupBy.split(",").find((dim) => dim !== "day") ?? "day";
 
-/** MCP traffic read by server, method and tool; the first entry is the default (the most detail). */
-const MCP_GROUPS = [
-  { value: "target,method,tool", label: "Server × method × tool" },
-  { value: "target,method", label: "Server × method" },
-  { value: "target,tool", label: "Server × tool" },
-  { value: "method", label: "Method" },
-  { value: "tool", label: "Tool" },
-  { value: "target", label: "Server" },
-];
-
-/** A2A traffic read by agent and method; the first entry is the default. */
-const A2A_GROUPS = [
-  { value: "target,method", label: "Agent × method" },
-  { value: "method", label: "Method" },
-  { value: "target", label: "Agent" },
-];
-
 /** Audio is stored in milliseconds and read in seconds. */
 const fmtSeconds = (ms: number) => (ms / 1000).toLocaleString(undefined, { maximumFractionDigits: 1 });
 
-const today = new Date();
-const daysAgo = (count: number) => new Date(today.getTime() - count * 86_400_000);
+/** Local midnight `count` days ago, as a `datetime-local` value. */
+const localMidnightAgo = (count: number) => {
+  const now = new Date();
+  return toLocalInput(new Date(now.getFullYear(), now.getMonth(), now.getDate() - count));
+};
+
+/** The range as the API reads it: `to` is exclusive, so the chosen To minute is included by adding one. */
+export function rangeIso(range: { from: string; to: string }) {
+  const from = fromLocalInput(range.from);
+  const end = fromLocalInput(range.to);
+  return { from, to: end ? new Date(Date.parse(end) + 60_000).toISOString() : "" };
+}
+
+/** `Nov 1, 00:00 – Nov 23, 14:05 (Asia/Taipei)`: the chosen minutes, in the browser's zone. */
+function rangeText(range: { from: string; to: string }) {
+  const format = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
+  const start = new Date(range.from);
+  const end = new Date(range.to);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return "";
+  return `${format.format(start)} – ${format.format(end)} (${browserTimeZone()})`;
+}
 
 type Row = UsageRow;
 
@@ -130,8 +134,8 @@ export function Stat({ label, value, title }: { label: string; value: string; ti
   );
 }
 
-/** The date range and team every tab shares; `to` is inclusive on screen. */
-interface RangeProps {
+/** The time range and team every tab shares; both ends are local `datetime-local` values and the To minute is included. */
+export interface RangeProps {
   from: string;
   to: string;
   teamId: string;
@@ -142,11 +146,11 @@ interface RangeProps {
   zone: ReturnType<typeof useZoneFilter>;
 }
 
-function RangeFields({ range, teams }: { range: RangeProps; teams: { id: string; name: string }[] | undefined }) {
+export function RangeFields({ range, teams }: { range: RangeProps; teams: { id: string; name: string }[] | undefined }) {
   return (
     <>
-      <TextField label="From" type="date" value={range.from} onChange={range.onFrom} />
-      <TextField label="To" type="date" value={range.to} onChange={range.onTo} hint="Inclusive." />
+      <TextField label="From" type="datetime-local" value={range.from} onChange={range.onFrom} hint="In your browser's time zone." />
+      <TextField label="To" type="datetime-local" value={range.to} onChange={range.onTo} hint="Includes the chosen minute." />
       <ComboboxField
         label="Team"
         value={range.teamId}
@@ -159,7 +163,7 @@ function RangeFields({ range, teams }: { range: RangeProps; teams: { id: string;
 }
 
 /** A mean duration as a human number: milliseconds under a second, then seconds, then minutes. */
-function fmtDuration(ms: number): string {
+export function fmtDuration(ms: number): string {
   if (!Number.isFinite(ms) || ms <= 0) return "0 ms";
   if (ms < 1000) return `${Math.round(ms)} ms`;
   if (ms < 60_000) return `${(ms / 1000).toLocaleString(undefined, { maximumFractionDigits: 1 })} s`;
@@ -167,7 +171,7 @@ function fmtDuration(ms: number): string {
 }
 
 /** Errors over requests, as a percentage; a group with no request shows none. */
-function fmtShare(errors: number, requests: number): string {
+export function fmtShare(errors: number, requests: number): string {
   if (!requests) return "—";
   const percent = (errors / requests) * 100;
   return `${percent.toLocaleString(undefined, { maximumFractionDigits: 1 })}%`;
@@ -239,8 +243,8 @@ function ServedBy({ row }: { row: Row }) {
  * (servers, agents, methods, tools) where tokens and cost do not exist. The range and team carry across tabs.
  */
 export function Usage() {
-  const [from, setFrom] = useState(isoDay(daysAgo(29)));
-  const [to, setTo] = useState(isoDay(today));
+  const [from, setFrom] = useState(() => localMidnightAgo(29));
+  const [to, setTo] = useState(() => toLocalInput(new Date()));
   const [teamId, setTeamId] = useState("");
   const [tab, setTab] = useState<"llm" | "mcp" | "a2a">("llm");
   const zone = useZoneFilter();
@@ -249,7 +253,7 @@ export function Usage() {
   const [lens, setLens] = useUsageLens();
   return (
     <>
-      <PageHeader title="Usage" hint="Rows are grouped by the name the client called; Served model shows what answered, and a fallback bills the model that served." />
+      <PageHeader title="Usage" hint="Rows are grouped by the model name the client used; Served model shows what answered, and a fallback bills the model that served." />
       <Tabs value={tab} onValueChange={(value) => setTab(value as typeof tab)}>
         <div className="flex flex-wrap items-center justify-between gap-2">
           <TabsList variant="line">
@@ -322,13 +326,13 @@ function LlmUsage({ range, lens }: { range: RangeProps; lens: UsageLens }) {
         ? memberName(id)
         : id.slice(0, 8);
 
-  // `to` is exclusive on the server; include the chosen end day.
-  const rangeQuery = {
-    from: dayStart(range.from),
-    to: dayStart(shiftDay(range.to, 1)),
-  };
+  // `to` is exclusive on the server; include the chosen end minute.
+  const rangeQuery = rangeIso(range);
+  const bucket = bucketOf(rangeQuery.from, rangeQuery.to);
+  const slots = useMemo(() => bucketSlots(rangeQuery.from, rangeQuery.to, bucket), [rangeQuery.from, rangeQuery.to, bucket]);
   const filters: UsageQuery = {
     ...rangeQuery,
+    tz: browserTimeZone(),
     // An MCP or A2A event carries no model, tokens or cost: the LLM tab asks for LLM only.
     kind: "llm",
     // With "All zones" each row names its zone.
@@ -347,9 +351,10 @@ function LlmUsage({ range, lens }: { range: RangeProps; lens: UsageLens }) {
     queryFn: () => api.usage(filters),
     enabled: !!range.from && !!range.to,
   });
-  // The chart follows the table's grouping: same filters, one series per name of its first non-day dimension.
+  // The chart follows the table's grouping: same filters, one series per name of its first non-day dimension,
+  // bucketed by hour for a range of at most 48 h and by local day beyond.
   const chartDim = seriesDim(groupBy);
-  const chartFilters: UsageQuery = { ...filters, group_by: chartDim === "day" ? "day" : `day,${chartDim}` };
+  const chartFilters: UsageQuery = { ...filters, group_by: chartDim === "day" ? bucket : `${bucket},${chartDim}` };
   const chart = useQuery({
     queryKey: ["usage", chartFilters],
     queryFn: () => api.usage(chartFilters),
@@ -434,7 +439,7 @@ function LlmUsage({ range, lens }: { range: RangeProps; lens: UsageLens }) {
     day: [{ key: "day", header: "Date", sort: (a, b) => (a.date ?? "").localeCompare(b.date ?? ""), cell: (row) => row.date ?? "—" }],
     endpoint: [{ key: "endpoint", header: "Endpoint", sort: (a, b) => (a.endpoint ?? "").localeCompare(b.endpoint ?? ""), cell: (row) => (row.endpoint ? <code>{endpointLabel(row.endpoint)}</code> : <span className="text-muted-foreground">—</span>) }],
     model_type: [{ key: "model_type", header: "Type", sort: (a, b) => (a.model_type ?? "").localeCompare(b.model_type ?? ""), cell: (row) => <TypeBadge type={row.model_type} /> }],
-    called: [{ key: "called", header: "Called name", sort: (a, b) => (a.called ?? "").localeCompare(b.called ?? ""), cell: (row) => <CalledCell row={row} /> }],
+    called: [{ key: "called", header: "Model", sort: (a, b) => (a.called ?? "").localeCompare(b.called ?? ""), cell: (row) => <CalledCell row={row} showKind={routing} /> }],
     status_class: [{ key: "status_class", header: "Status", sort: (a, b) => (a.status_class ?? "").localeCompare(b.status_class ?? ""), cell: (row) => row.status_class ?? "—" }],
     requested: [{ key: "requested", header: "As typed", sort: (a, b) => (a.requested ?? "").localeCompare(b.requested ?? ""), cell: (row) => row.requested ?? "—" }],
     model: [
@@ -528,8 +533,9 @@ function LlmUsage({ range, lens }: { range: RangeProps; lens: UsageLens }) {
   // The same names, key and range the row was grouped by, so Requests opens on the matching rows.
   const requestsSearchFor = (row: Row): RequestsSearch => ({
     kind: "llm",
-    from: range.from,
-    to: range.to,
+    from: rangeQuery.from,
+    // Requests reads `to` as the last included minute and adds the minute itself.
+    to: fromLocalInput(range.to) || undefined,
     team_id: row.team_id ?? (range.teamId || undefined),
     key_id: row.key_id ?? undefined,
     // A called row opens the log on the one spelling it holds; with several, an admin filters by the catalog item.
@@ -548,10 +554,10 @@ function LlmUsage({ range, lens }: { range: RangeProps; lens: UsageLens }) {
       <FilterBar
         testId="usage-filters"
         className={
-          // Group by is last and keeps room for its longest label ("Called × served").
+          // Group by is last and keeps room for its longest label ("Model × served").
           routing
-            ? "lg:grid-cols-[10rem_10rem_repeat(3,minmax(0,1fr))_minmax(11rem,1fr)_auto]"
-            : "lg:grid-cols-[10rem_10rem_repeat(2,minmax(0,1fr))_minmax(11rem,1fr)_auto]"
+            ? "2xl:grid-cols-[13rem_13rem_repeat(3,minmax(0,1fr))_minmax(11rem,1fr)_auto]"
+            : "2xl:grid-cols-[13rem_13rem_repeat(2,minmax(0,1fr))_minmax(11rem,1fr)_auto]"
         }
         more={{
           active: [routing && upstreamText, routing && alias, routing && router, endpoint, modelType].filter(Boolean).length,
@@ -579,7 +585,7 @@ function LlmUsage({ range, lens }: { range: RangeProps; lens: UsageLens }) {
         {routing && <CatalogFilter label="Model" kinds={["model"]} value={model} onChange={setModel} leading={[{ value: ANY, label: "All models" }]} />}
         <SelectField label="Group by" value={groupBy} onChange={setGroupBy} options={groupOptions} />
       </FilterBar>
-      <Insights filters={{ ...filters, group_by: undefined }} admin={routing} ranged={ranged} lens={lens} />
+      <Insights filters={{ ...filters, group_by: undefined }} admin={routing} ranged={ranged} lens={lens} bucket={bucket} slots={slots} singleZone={!range.zone.all} />
       {!costLens && total.audio > 0 && <p className="text-muted-foreground">Audio transcribed: {fmtSeconds(total.audio)} s.</p>}
       {costLens && total.unpriced > 0 && <p className="text-muted-foreground">{n(total.unpriced)} request(s) had no price configured and are counted at $0.</p>}
       <div className="my-4">
@@ -588,8 +594,9 @@ function LlmUsage({ range, lens }: { range: RangeProps; lens: UsageLens }) {
           labelOf={seriesLabel}
           dimLabel={dimLabel}
           singleSeries={chartDim === "day"}
-          from={range.from}
-          to={range.to}
+          slots={slots}
+          bucket={bucket}
+          rangeLabel={rangeText(range)}
           metric={costLens ? "cost" : usageMetric}
           onMetricChange={setUsageMetric}
           metrics={costLens ? ["cost"] : USAGE_METRICS}
@@ -597,10 +604,10 @@ function LlmUsage({ range, lens }: { range: RangeProps; lens: UsageLens }) {
           error={chart.error}
           onRetry={() => void chart.refetch()}
           empty={ranged ? "No usage in this range." : "Choose a date range."}
-          title={costLens ? "Cost by day" : "Usage by day"}
+          title={`${costLens ? "Cost" : "Usage"} by ${bucket}`}
         />
       </div>
-      {ranged && <Leaderboard from={rangeQuery.from} to={rangeQuery.to} teamId={range.teamId} zone={range.zone.param} lens={lens} seesOthers={routing || ownerOffered} />}
+      {ranged && <Leaderboard from={rangeQuery.from} to={rangeQuery.to} teamId={range.teamId} zone={range.zone.param} lens={lens} seesOthers={routing || ownerOffered} routing={routing} />}
       <DataTable
         rows={query.data}
         loading={query.isPending || teams.isPending || (directoryEnabled && directory.isPending)}
@@ -609,134 +616,6 @@ function LlmUsage({ range, lens }: { range: RangeProps; lens: UsageLens }) {
         rowKey={(row) => [row.zone, row.date, row.called, row.status_class, row.endpoint, row.model_type, row.requested, row.model_id ?? row.model, row.alias_id ?? row.alias, row.router_id ?? row.router, row.upstream_model, row.team_id, row.owner_kind, row.owner_id, row.key_id].join("|")}
         empty="No usage in this period."
         columns={[...dims.flatMap((dimension) => dimCols[dimension] ?? []), ...(costLens ? costColumns : usageColumns), logColumn]}
-      />
-    </>
-  );
-}
-
-/**
- * MCP or A2A traffic: which server or agent, which JSON-RPC method and (for MCP) which tool, with
- * requests, failures and duration — the two protocols carry no model, tokens or cost.
- */
-function TrafficUsage({ kind, range }: { kind: "mcp" | "a2a"; range: RangeProps }) {
-  const groups = kind === "mcp" ? MCP_GROUPS : A2A_GROUPS;
-  const [groupBy, setGroupBy] = useState(groups[0].value);
-  const teams = useTeams();
-  const ranged = !!range.from && !!range.to;
-  const filters: UsageQuery = {
-    from: dayStart(range.from),
-    to: dayStart(shiftDay(range.to, 1)),
-    kind,
-    group_by: range.zone.all ? `zone,${groupBy}` : groupBy,
-    zone: range.zone.param,
-    team_id: range.teamId || undefined,
-  };
-  const query = useQuery({
-    queryKey: ["usage", filters],
-    queryFn: () => api.usage(filters),
-    enabled: ranged,
-  });
-  const endFilters: UsageQuery = { ...filters, group_by: "status_class" };
-  const ends = useQuery({ queryKey: ["usage", endFilters], queryFn: () => api.usage(endFilters), enabled: ranged, retry: false });
-  const total = useMemo(
-    () =>
-      (query.data ?? []).reduce(
-        (acc, row) => ({
-          requests: acc.requests + row.requests,
-          errors: acc.errors + row.error_count,
-          duration: acc.duration + row.total_duration_ms,
-        }),
-        { requests: 0, errors: 0, duration: 0 },
-      ),
-    [query.data],
-  );
-  const dimCols: Record<string, Column<Row>[]> = {
-    zone: [
-      {
-        key: "zone",
-        header: "Zone",
-        sort: (a, b) => (a.zone ?? "").localeCompare(b.zone ?? ""),
-        cell: (row) => {
-          const zone = range.zone.zones.find((z) => z.id === row.zone);
-          return zone ? <ZoneBadge zone={zone} /> : <span className="text-muted-foreground">{row.zone ?? "—"}</span>;
-        },
-      },
-    ],
-    target: [
-      {
-        key: "target",
-        header: kind === "mcp" ? "Server" : "Agent",
-        sort: (a, b) => (a.target ?? "").localeCompare(b.target ?? ""),
-        cell: (row) => <strong className="[overflow-wrap:anywhere]">{row.target || "—"}</strong>,
-      },
-    ],
-    method: [
-      {
-        key: "method",
-        header: "Method",
-        sort: (a, b) => (a.method ?? "").localeCompare(b.method ?? ""),
-        cell: (row) => (row.method ? <code className="[overflow-wrap:anywhere]">{row.method}</code> : <span className="text-muted-foreground">—</span>),
-      },
-    ],
-    tool: [
-      {
-        key: "tool",
-        header: "Tool",
-        sort: (a, b) => (a.tool ?? "").localeCompare(b.tool ?? ""),
-        cell: (row) => (row.tool ? <code className="[overflow-wrap:anywhere]">{row.tool}</code> : <span className="text-muted-foreground">—</span>),
-      },
-    ],
-  };
-  const dims = [...(range.zone.all ? ["zone"] : []), ...groupBy.split(",")];
-  return (
-    <>
-      <FilterBar testId="usage-filters" className="lg:grid-cols-[10rem_10rem_repeat(3,minmax(0,1fr))]">
-        <RangeFields range={range} teams={teams.data} />
-        <SelectField label="Group by" value={groupBy} onChange={setGroupBy} options={groups} />
-      </FilterBar>
-      <div className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3">
-        <Stat label="Requests" value={fmtCompact(total.requests)} title={n(total.requests)} />
-        <Stat label="Errors" value={fmtCompact(total.errors)} title={n(total.errors)} />
-        <Stat label="Error share" value={fmtShare(total.errors, total.requests)} />
-        <Stat label="Mean duration" value={fmtDuration(total.requests ? total.duration / total.requests : 0)} />
-      </div>
-      <p className="mb-4 text-sm text-muted-foreground">
-        An error is an error outcome or a 4xx/5xx answer from the gateway; a client that hangs up is neither.
-      </p>
-      {ranged && <TrafficCharts rows={query.data} ends={ends.data} groupBy={groupBy} />}
-      <DataTable
-        rows={ranged ? query.data : []}
-        loading={ranged && query.isPending}
-        error={query.error ?? teams.error}
-        onRetry={() => void query.refetch()}
-        rowKey={(row) => [row.zone, row.kind, row.target, row.method, row.tool, row.team_id].join("|")}
-        empty={ranged ? `No ${kind === "mcp" ? "MCP" : "A2A"} traffic in this range.` : "Choose a date range."}
-        columns={[
-          ...dims.flatMap((dimension) => dimCols[dimension] ?? []),
-          { key: "requests", header: "Requests", align: "right", sort: (a, b) => a.requests - b.requests, cell: (row) => n(row.requests) },
-          {
-            key: "errors",
-            header: "Errors",
-            align: "right",
-            sort: (a, b) => a.error_count - b.error_count,
-            cell: (row) =>
-              row.error_count ? (
-                <span className="inline-flex items-baseline justify-end gap-2 tabular-nums">
-                  {n(row.error_count)}
-                  <span className="text-xs text-muted-foreground">{fmtShare(row.error_count, row.requests)}</span>
-                </span>
-              ) : (
-                <span className="text-muted-foreground">0</span>
-              ),
-          },
-          {
-            key: "duration",
-            header: "Mean duration",
-            align: "right",
-            sort: (a, b) => a.total_duration_ms / a.requests - b.total_duration_ms / b.requests,
-            cell: (row) => <span className="tabular-nums">{fmtDuration(row.requests ? row.total_duration_ms / row.requests : 0)}</span>,
-          },
-        ]}
       />
     </>
   );

@@ -103,7 +103,7 @@ interface TextProps {
   error?: string;
   hint?: string;
   note?: ReactNode;
-  type?: "text" | "password" | "url" | "date";
+  type?: "text" | "password" | "url" | "date" | "datetime-local";
   placeholder?: string;
   autoFocus?: boolean;
   /** For date inputs: the accepted range, as `YYYY-MM-DD`. */

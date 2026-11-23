@@ -71,7 +71,7 @@ export function RankedBars({ slices, format }: { slices: Slice[]; format: (value
         <XAxis type="number" tickLine={false} axisLine={false} tickFormatter={(value: number) => format(value)} />
         <YAxis type="category" dataKey="name" tickLine={false} axisLine={false} width={120} tickFormatter={clip} />
         <ChartTooltip content={<Tip format={format} />} />
-        <Bar dataKey="value" radius={3} isAnimationActive={false}>
+        <Bar dataKey="value" radius={[0, 3, 3, 0]} isAnimationActive={false}>
           {slices.map((slice) => (
             <Cell key={slice.name} fill={slice.fill} />
           ))}

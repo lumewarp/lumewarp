@@ -311,6 +311,36 @@ async def test_board_defaults_to_llm_and_kind_selects_the_protocol(client, commi
     assert [(row["requested"], row["requests"], row["total_tokens"]) for row in mcp] == [("", 1, 0)]
 
 
+async def test_board_merges_zones_without_a_zone_filter(client, committed) -> None:
+    team = await make_team(committed)
+    owner = await make_user(committed)
+    key_a = await make_key(committed, team, owner, name="key-a", zone="zone-a")
+    key_b = await make_key(committed, team, owner, name="key-b", zone="zone-b")
+    committed.add_all(
+        [
+            usage_event(key_a, ts=TS, requested="shared", prompt_tokens=10, cost_nano_usd=100),
+            usage_event(key_b, ts=TS, requested="shared", prompt_tokens=20, cost_nano_usd=200),
+        ]
+    )
+    await committed.commit()
+
+    for by in ("requested", "called", "owner"):
+        rows = board(client, by=by, team_id=str(team.id))
+        assert len(rows) == 1, by
+        assert rows[0]["zone"] is None, by
+        assert rows[0]["total_tokens"] == 40, by
+        assert rows[0]["requests"] == 2, by
+
+    requested = board(client, by="requested", team_id=str(team.id), zone="zone-a")
+    assert [(row["zone"], row["total_tokens"]) for row in requested] == [("zone-a", 15)]
+    called = board(client, by="called", team_id=str(team.id), zone="zone-b")
+    assert [(row["zone"], row["total_tokens"]) for row in called] == [("zone-b", 25)]
+    owners = board(client, by="owner", team_id=str(team.id), zone="zone-a")
+    assert [(row["zone"], row["owner_id"], row["total_tokens"]) for row in owners] == [
+        ("zone-a", str(owner.id), 15)
+    ]
+
+
 @pytest.mark.parametrize(
     "params",
     [

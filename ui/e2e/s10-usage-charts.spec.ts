@@ -10,6 +10,9 @@ import { signIn, VIEWER } from "./selfService";
  * price and nine models on one day; the cases that need exact rows mock the chart's own query.
  */
 
+// The chart buckets by the browser's zone; the seeded rows and apiRows() are UTC days.
+test.use({ timezoneId: "UTC" });
+
 const BREAK_GLASS = "e2e-break-glass-password";
 const isoDay = (date: Date) => date.toISOString().slice(0, 10);
 const daysAgo = (n: number) => isoDay(new Date(Date.now() - n * 86_400_000));
@@ -38,10 +41,11 @@ async function signInAsAdmin(page: Page, request: APIRequestContext) {
   await page.context().addCookies((await request.storageState()).cookies);
 }
 
+/** From the start of day `from` to the last minute of day `to` (the inputs are local date-times). */
 async function setRange(page: Page, from: string, to: string) {
-  await page.getByLabel("From").fill(from);
-  await page.getByLabel("To", { exact: true }).fill(to);
-  await expect(page.getByLabel("From")).toHaveValue(from);
+  await page.getByLabel("From").fill(`${from}T00:00`);
+  await page.getByLabel("To", { exact: true }).fill(`${to}T23:59`);
+  await expect(page.getByLabel("From")).toHaveValue(`${from}T00:00`);
 }
 
 /** Park the pointer over the plot's last day (the right end): a stacked chart's tooltip follows the x position. */
@@ -81,17 +85,27 @@ test("usage: the chart draws the API's rows by called name, and its table and th
   await signInAsAdmin(page, request);
   await page.goto("/usage");
   const today = isoDay(new Date());
-  await setRange(page, today, today);
-  const rows = await apiRows(request, today, today);
+  // Three days: a range over 48 h is drawn by day, which this test reads against the API's day rows.
+  const first = daysAgo(2);
+  await setRange(page, first, today);
+  const rows = await apiRows(request, first, today);
   expect(rows.length).toBeGreaterThan(1);
-  const tokens = new Map(rows.map((r) => [r.called ?? "—", r.total_tokens]));
-  const total = rows.reduce((sum, r) => sum + r.total_tokens, 0);
+  const sum = (items: ApiRow[]) => {
+    const out = new Map<string, number>();
+    for (const r of items) out.set(r.called ?? "—", (out.get(r.called ?? "—") ?? 0) + r.total_tokens);
+    return out;
+  };
+  const tokens = sum(rows);
+  const todays = rows.filter((r) => r.date === today);
+  expect(todays.length).toBeGreaterThan(0);
+  const dayTokens = sum(todays);
+  const total = todays.reduce((acc, r) => acc + r.total_tokens, 0);
 
-  await expect(page.getByLabel("Group by")).toHaveText("Called name");
+  await expect(page.getByLabel("Group by")).toHaveText("Model");
   for (const name of tokens.keys()) await expect(legend(page).locator(`[data-series="${name}"]`)).toHaveCount(1);
   await hoverLastDay(page);
   await expect(tooltip(page)).toBeVisible();
-  for (const name of tokens.keys()) await expect(tooltip(page)).toContainText(name);
+  for (const name of dayTokens.keys()) await expect(tooltip(page)).toContainText(name);
 
   // The chart's own table: one row per day, one column per name, the same numbers.
   await page.getByTestId("usage-chart-table-toggle").click();
@@ -99,10 +113,10 @@ test("usage: the chart draws the API's rows by called name, and its table and th
   await expect(table).toBeVisible();
   const headers = await table.getByRole("columnheader").allTextContents();
   const cells = await table.getByRole("row").filter({ hasText: today }).getByRole("cell").allTextContents();
-  for (const [name, value] of tokens) {
+  for (const name of tokens.keys()) {
     const column = headers.indexOf(name);
     expect(column, `${name} is a column`).toBeGreaterThan(0);
-    expect(cells[column]).toBe(value.toLocaleString());
+    expect(cells[column]).toBe((dayTokens.get(name) ?? 0).toLocaleString());
   }
   expect(cells[headers.indexOf("Total")]).toBe(total.toLocaleString());
 
@@ -133,10 +147,10 @@ test("group by: the chart's query and legend follow the table's grouping", async
   await expect(legend(page).locator('[data-series="alias-one"]')).toHaveCount(0);
   expect(seen).toContain("day,model");
 
-  // Called × served: the chart's series is the first non-day dimension, the called name.
-  await pickGroup("Called × served");
+  // Model × served: the chart's series is the first non-day dimension, the called name.
+  await pickGroup("Model × served");
   await expect(legend(page).locator('[data-series="router-two"]')).toHaveCount(1);
-  await expect(page.getByLabel("Group by")).toHaveText("Called × served");
+  await expect(page.getByLabel("Group by")).toHaveText("Model × served");
 
   await pickGroup("As typed");
   await expect(legend(page).locator('[data-series="typed-x"]')).toHaveCount(1);
@@ -164,6 +178,80 @@ test("chart type: stacked bars, a share donut and ranked bars over the same seri
   await expect(chart(page).locator(".recharts-bar-rectangle")).toHaveCount(2);
   await view(page, "Over time").click();
   await expect(chart(page).getByTestId("usage-chart-plot")).toHaveAttribute("data-view", "stacked");
+});
+
+test("legend: an item toggles its series in the bars, the tooltip and the share total; Show all restores", async ({ page, request }) => {
+  await signInAsAdmin(page, request);
+  const today = isoDay(new Date());
+  await mockChart(page, [row(today, { called: "big" }, 900), row(today, { called: "small" }, 100)]);
+  await page.goto("/usage");
+  const item = (name: string) => legend(page).locator(`[data-series="${name}"] button`);
+  await expect(item("big")).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByTestId("usage-chart-show-all")).toHaveCount(0);
+  await hoverLastDay(page);
+  await expect(tooltip(page)).toContainText("small");
+
+  await item("small").click();
+  await expect(item("small")).toHaveAttribute("aria-pressed", "false");
+  await expect(item("big")).toHaveAttribute("aria-pressed", "true");
+  await hoverLastDay(page);
+  await expect(tooltip(page)).toContainText("big");
+  await expect(tooltip(page)).not.toContainText("small");
+
+  await view(page, "Share").click();
+  const centre = chart(page).getByTestId("usage-chart-plot").locator("span.text-xl");
+  await expect(centre).toHaveText("900");
+  await view(page, "Ranked").click();
+  await expect(chart(page).locator(".recharts-bar-rectangle")).toHaveCount(1);
+
+  // The data table keeps every series.
+  await page.getByTestId("usage-chart-table-toggle").click();
+  await expect(page.getByTestId("usage-chart-table").getByRole("columnheader", { name: "small", exact: true })).toBeVisible();
+
+  await item("big").click();
+  await expect(chart(page).getByTestId("usage-chart-hidden")).toHaveText("All series hidden.");
+  await expect(chart(page).getByTestId("usage-chart-plot")).toHaveCount(0);
+
+  await page.getByTestId("usage-chart-show-all").click();
+  await expect(page.getByTestId("usage-chart-show-all")).toHaveCount(0);
+  await expect(item("small")).toHaveAttribute("aria-pressed", "true");
+  await view(page, "Share").click();
+  await expect(centre).toHaveText("1,000");
+});
+
+test.describe("hour buckets in the browser's zone", () => {
+  test.use({ timezoneId: "Asia/Taipei" });
+
+  test("a range of at most 48 h is drawn by local hour and sends tz", async ({ page, request }) => {
+    await signInAsAdmin(page, request);
+    const seen: URLSearchParams[] = [];
+    await page.route("**/api/v1/usage?*", async (route) => {
+      const params = new URL(route.request().url()).searchParams;
+      const groupBy = params.get("group_by") ?? "";
+      if (!groupBy.startsWith("hour") && !groupBy.startsWith("day")) return route.continue();
+      seen.push(params);
+      // 02:00Z is 10:00 in Taipei.
+      await route.fulfill({ status: 200, json: { items: [row("2026-11-20", { hour: "2026-11-20T02:00:00Z", called: "hourly" }, 100)], next_cursor: null } });
+    });
+    await page.goto("/usage");
+    await setRange(page, "2026-11-20", "2026-11-20");
+    await expect(chart(page).getByRole("heading", { name: "Usage by hour" }).or(chart(page).getByText("Usage by hour", { exact: true }))).toBeVisible();
+    await expect(legend(page).locator('[data-series="hourly"]')).toHaveCount(1);
+    await expect.poll(() => seen.some((p) => p.get("group_by") === "hour,called")).toBe(true);
+    const hourly = seen.filter((p) => p.get("group_by") === "hour,called").at(-1)!;
+    expect(hourly.get("tz")).toBe("Asia/Taipei");
+    expect(hourly.get("from")).toBe("2026-11-19T16:00:00.000Z");
+    expect(hourly.get("to")).toBe("2026-11-20T16:00:00.000Z");
+    const ticks = chart(page).locator(".recharts-cartesian-axis-tick-value").filter({ hasText: ":00" });
+    await expect(ticks.first()).toHaveText(/^11-20 \d\d:00$/);
+    expect((await ticks.allTextContents()).some((text) => /^\d\d:00$/.test(text))).toBe(true);
+    await expect(chart(page).getByTestId("usage-chart-range")).toContainText("(Asia/Taipei)");
+
+    // Beyond 48 h the chart goes back to local days.
+    await page.getByLabel("From").fill("2026-11-10T00:00");
+    await expect(chart(page).getByText("Usage by day", { exact: true })).toBeVisible();
+    await expect.poll(() => seen.some((p) => p.get("group_by") === "day,called" && p.get("tz") === "Asia/Taipei")).toBe(true);
+  });
 });
 
 test("metric: tokens, requests and errors on the Usage lens; the choice survives a reload and storage that throws", async ({ page, request, browser }) => {
@@ -213,7 +301,12 @@ test("lens: Cost reshapes tiles, chart, leaderboards and table, and survives a r
   await expect(tiles.getByTestId("insight-spend")).toHaveCount(0);
   await expect(page.getByRole("columnheader", { name: "Prompt", exact: true })).toBeVisible();
   await expect(page.getByRole("columnheader", { name: "Cost", exact: true })).toHaveCount(0);
-  await expect(page.getByTestId("leaderboard-called").getByTestId("leaderboard-row").first()).not.toContainText("$");
+  // The board shows tokens and requests in the Usage lens, spend and requests in the Cost lens.
+  const boardColumns = () => page.getByTestId("leaderboard-called").getByTestId("leaderboard-row").first().locator("[data-column]");
+  await expect(boardColumns()).toHaveCount(2);
+  await expect(boardColumns().nth(0)).toHaveAttribute("data-column", "tokens");
+  await expect(boardColumns().nth(1)).toHaveAttribute("data-column", "requests");
+  await expect(page.getByTestId("leaderboard-called")).not.toContainText("$");
 
   await lens(page, "Cost").click();
   await expect(lens(page, "Cost")).toHaveAttribute("aria-pressed", "true");
@@ -225,7 +318,9 @@ test("lens: Cost reshapes tiles, chart, leaderboards and table, and survives a r
   const headers = page.getByRole("columnheader");
   for (const name of ["Requests", "Cost", "Share of cost", "Cost / request", "Unpriced", "Log"]) await expect(headers.filter({ hasText: new RegExp(`^${name.replace("/", "\\/")}$`) })).toHaveCount(1);
   for (const name of ["Prompt", "Completion", "Total tokens", "p95"]) await expect(headers.filter({ hasText: new RegExp(`^${name}$`) })).toHaveCount(0);
-  await expect(page.getByTestId("leaderboard-called").getByTestId("leaderboard-row").first()).toContainText("$");
+  await expect(boardColumns()).toHaveCount(2);
+  await expect(boardColumns().nth(0)).toHaveAttribute("data-column", "spend");
+  await expect(boardColumns().nth(1)).toHaveAttribute("data-column", "requests");
 
   expect(await page.evaluate(() => localStorage.getItem("lumewarp.usage-lens"))).toBe("cost");
   await page.reload();
@@ -347,7 +442,7 @@ test("a plain member's Usage page still works, has no fallback tile, and is empt
     await expect(member.getByTestId("state-error")).toHaveCount(0);
     await expect(member.getByTestId("insight-requests")).toBeVisible();
     await expect(member.getByTestId("insight-fallback")).toHaveCount(0);
-    await expect(member.getByLabel("Group by")).toHaveText("Called name");
+    await expect(member.getByLabel("Group by")).toHaveText("Model");
     await lens(member, "Cost").click();
     await expect(lens(member, "Cost")).toHaveAttribute("aria-pressed", "true");
     await expect(member.getByTestId("insight-spend")).toBeVisible();
@@ -359,9 +454,9 @@ test("a plain member's Usage page still works, has no fallback tile, and is empt
 
 /** The dimension headers each Group by option adds, in table order (an "All zones" view puts Zone first). */
 const GROUP_HEADERS: Record<string, string[]> = {
-  "Called name": ["Called name"],
+  Model: ["Model"],
   "Served model": ["Served model", "Upstream model", "Via alias", "Via router"],
-  "Called × served": ["Called name", "Served model", "Upstream model"],
+  "Model × served": ["Model", "Served model", "Upstream model"],
   "As typed": ["As typed"],
   "Upstream model": ["Upstream model", "Served by"],
   Alias: ["Alias", "Served by"],
@@ -430,7 +525,7 @@ test("group by: a sort on a column that goes away is dropped and paging restarts
   await pager.getByRole("button", { name: "Next page" }).click();
   await expect(pager).toContainText(/^11–/);
   // Away and back: without the reset the Date sort and page 2 would come back with the column.
-  await pick(page, "Group by", "Called name");
+  await pick(page, "Group by", "Model");
   await expect(table.locator("thead th[aria-sort]")).toHaveCount(0);
   await pick(page, "Group by", "Day");
   await expect(table.locator("thead th").first()).toHaveText("Date");

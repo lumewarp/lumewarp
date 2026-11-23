@@ -13,9 +13,14 @@ amber for 4xx and red for 5xx, with the outcome when the request did not complet
 installation admin sees it), **Key** (a pill with the key name; hover or focus it for the
 org, team, owner (or service account), zone, `lw-` prefix and id),
 **Tokens** (total, with input + output in brackets) and **Cost**. The filter bar holds the
-range, zone, team, key and requested name; the other filters, including the resolved names, are
+range (**From** and **To**, date and time), zone, team, key and requested name; the other filters, including the resolved names, are
 under **More filters** and only an installation admin sees the routing ones. The copy button
 next to the date copies the request id.
+
+**From** and **To** are date and time pickers in the browser's time zone. **From** is inclusive; **To** includes the chosen minute, so the page sends the
+next minute as the API's exclusive `to`. Empty **From** starts 24 hours ago and empty **To** ends
+now. A link with a bare day (`from=2026-11-20`, as older bookmarks have) opens as that local
+day: **From** at 00:00 and **To** at 23:59.
 
 ## Request details
 

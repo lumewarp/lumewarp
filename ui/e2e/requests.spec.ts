@@ -200,6 +200,32 @@ test("Requests stays usable at 390 px and in dark mode", async ({ page }) => {
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
+test.describe("local time range", () => {
+  test.use({ timezoneId: "Asia/Taipei" });
+
+  test("a bare-day link opens as that local day", async ({ page }) => {
+    await page.goto("/requests?from=2026-11-20&to=2026-11-21");
+    await expect(page.getByLabel("From")).toHaveValue("2026-11-20T00:00");
+    await expect(page.getByLabel("To", { exact: true })).toHaveValue("2026-11-21T23:59");
+  });
+
+  test("From and To are local times and the To minute is included", async ({ page }) => {
+    await page.goto("/requests");
+    const sent = page.waitForRequest((r) => {
+      const q = new URL(r.url()).searchParams;
+      return new URL(r.url()).pathname === "/api/v1/requests" && q.get("to") !== null;
+    });
+    await page.getByLabel("From").fill("2026-11-20T08:30");
+    await page.getByLabel("To", { exact: true }).fill("2026-11-21T10:45");
+    const query = new URL((await sent).url()).searchParams;
+    expect(query.get("from")).toBe("2026-11-20T00:30:00.000Z");
+    expect(query.get("to")).toBe("2026-11-21T02:46:00.000Z");
+  });
+});
+
+test.describe("usage link", () => {
+  test.use({ timezoneId: "Asia/Taipei" });
+
 test("Usage rows open Requests with the same names and range", async ({ page }) => {
   await page.goto("/usage");
   await expect(page.getByRole("heading", { name: "Usage", level: 1 })).toBeVisible();
@@ -210,8 +236,12 @@ test("Usage rows open Requests with the same names and range", async ({ page }) 
   expect(href).toContain("from=");
   expect(href).toContain("to=");
 
+  // The same local range: Usage's From and To minutes reappear unchanged.
+  const usageFrom = await page.getByLabel("From").inputValue();
+  const usageTo = await page.getByLabel("To", { exact: true }).inputValue();
   await view.click();
   await expect(page.getByRole("heading", { name: "Requests", level: 1 })).toBeVisible();
-  await expect(page.getByLabel("From")).toHaveValue(/^\d{4}-\d{2}-\d{2}$/);
-  await expect(page.getByLabel("To", { exact: true })).toHaveValue(/^\d{4}-\d{2}-\d{2}$/);
+  await expect(page.getByLabel("From")).toHaveValue(usageFrom);
+  await expect(page.getByLabel("To", { exact: true })).toHaveValue(usageTo);
+});
 });

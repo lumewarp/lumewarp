@@ -13,14 +13,14 @@ import { fmtMs } from "./format";
 
 const KIND_TONE = { model: "muted", alias: "info", router: "warn", unknown: "danger" } as const;
 
-/** The called name with its kind; a tooltip lists every spelling a rename left in the group. */
-export function CalledCell({ row }: { row: UsageRow }) {
+/** The model name the client used, with its kind for a caller who can read routing; a tooltip lists every spelling a rename left in the group. */
+export function CalledCell({ row, showKind = false }: { row: UsageRow; showKind?: boolean }) {
   const names = row.called_names ?? [];
   const kind = row.called_kind ?? "unknown";
   const label = (
     <span className="inline-flex flex-wrap items-center gap-1.5">
       <strong className="[overflow-wrap:anywhere]">{row.called || "—"}</strong>
-      <Badge tone={KIND_TONE[kind]}>{kind}</Badge>
+      {showKind && <Badge tone={KIND_TONE[kind]}>{kind}</Badge>}
       {names.length > 1 && <span className="text-xs text-muted-foreground">{names.length} spellings</span>}
     </span>
   );

@@ -59,6 +59,7 @@ never come from the IdP.
 | `LUMEWARP_OIDC_ISSUER` | Issuer URL; unset disables SSO. |
 | `LUMEWARP_OIDC_CLIENT_ID`, `LUMEWARP_OIDC_CLIENT_SECRET` | Client credentials (secret optional for a public PKCE client). |
 | `LUMEWARP_OIDC_SCOPES` | Default `openid email profile`. |
+| `LUMEWARP_SSO_DISPLAY_NAME` | The IdP's name on the login page's button, `Sign in with <name>`; unset shows `Sign in with SSO`. With SSO the break-glass password is folded under "Emergency sign-in". |
 | `LUMEWARP_INITIAL_ADMIN_EMAIL` | The first login with this email becomes `proxy_admin` while no proxy_admin exists (it must also pass `LUMEWARP_OIDC_REQUIRE_EMAIL_VERIFIED`). Changing the setting afterwards never moves the role. |
 | `LUMEWARP_PUBLIC_URL` | External base URL; the redirect URI is `<public_url>/api/v1/session/oidc/callback`. |
 | `LUMEWARP_OIDC_JIT_USERS` | Create a user with no grants on first login (default true). |

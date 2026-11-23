@@ -1,8 +1,11 @@
 """Usage aggregation: monthly `usage_totals` fast path plus recent `usage_events`.
 
-`from`/`to` are a half-open UTC range. `group_by` is a comma-separated subset of
-`zone,day,kind,target,method,tool,requested,called,model,upstream_model,alias,router,status_class,outcome,fallback,team,owner,key`;
-the default is `day,requested`. `owner` groups by the key owner
+`from`/`to` are a half-open UTC range. `tz` is an IANA zone used to bucket `day` and
+`hour`; the default is `UTC`. `group_by` is a comma-separated subset of
+`zone,hour,day,kind,target,method,tool,requested,called,model,upstream_model,alias,router,status_class,outcome,fallback,team,owner,key`;
+the default is `day,requested`. `hour` buckets by the local clock hour and returns the
+bucket start as an aware instant; asking for it limits the range to 31 days. `owner`
+groups by the key owner
 (`owner_kind`, `owner_id`: a user or a service account). `kind` is the gateway protocol
 (`llm`, `mcp`, `a2a`); `target`, `method` and `tool` are an MCP server or A2A agent, its
 JSON-RPC method and the MCP tool or prompt. An installation admin's single `team` dimension
@@ -41,11 +44,12 @@ from __future__ import annotations
 import base64
 import json
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Query
-from sqlalchemy import String, and_, case, cast, distinct, func, or_, select, tuple_
+from sqlalchemy import Integer, String, and_, case, cast, distinct, func, or_, select, tuple_
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -90,6 +94,7 @@ router = APIRouter(tags=["usage"])
 
 DIMENSIONS = (
     "zone",
+    "hour",
     "day",
     "endpoint",
     "model_type",
@@ -113,6 +118,7 @@ DIMENSIONS = (
 # Output columns behind each dimension, in cursor order.
 COLUMNS = {
     "zone": ("zone",),
+    "hour": ("hour",),
     "day": ("day",),
     "endpoint": ("endpoint",),
     "model_type": ("model_type",),
@@ -224,14 +230,22 @@ def _decode_cursor(cursor: str, columns: list[str]) -> list[Any]:
                 converted.append(uuid.UUID(value))
             except (ValueError, TypeError) as exc:
                 raise validation_error("cursor", "invalid cursor") from exc
-        elif name == "day":
+        elif name in ("day", "hour"):
             try:
                 parsed = datetime.fromisoformat(value)
             except (ValueError, TypeError) as exc:
                 raise validation_error("cursor", "invalid cursor") from exc
-            if parsed.tzinfo is not None:
-                parsed = parsed.astimezone(UTC).replace(tzinfo=None)
-            converted.append(parsed)
+            if name == "hour":
+                # The hour bucket is a timestamptz; compare it as the same instant.
+                converted.append(
+                    (parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed).astimezone(
+                        UTC
+                    )
+                )
+            else:
+                if parsed.tzinfo is not None:
+                    parsed = parsed.astimezone(UTC).replace(tzinfo=None)
+                converted.append(parsed)
         elif name == "owner_kind":
             if value not in {kind.value for kind in KeyOwnerKind}:
                 raise validation_error("cursor", "invalid cursor")
@@ -366,6 +380,7 @@ def _events_query(
     from_: datetime,
     to_: datetime,
     filters: list[Any],
+    tz_name: str,
 ) -> tuple[Any, dict[str, Any], list[str], bool]:
     """Aggregate raw rows first; resolve names/collect UI refs only after reduction.
 
@@ -387,9 +402,29 @@ def _events_query(
         )
     upstream = "model" in groups or "upstream_model" in groups
     called = "called" in groups
+    # The minutes of the event's UTC offset that are not whole hours, as an interval.
+    offset_minutes = func.make_interval(
+        0,
+        0,
+        0,
+        0,
+        0,
+        func.mod(
+            cast(func.extract("minute", func.timezone(tz_name, UsageEvent.ts)), Integer)
+            - cast(func.extract("minute", func.timezone("UTC", UsageEvent.ts)), Integer)
+            + 60,
+            60,
+        ),
+    )
     fields = {
         "zone": UsageEvent.zone,
-        "day": func.date_trunc("day", func.timezone("UTC", UsageEvent.ts)),
+        # `day` is the calendar day in the requested zone (a naive local wall-clock value).
+        "day": func.date_trunc("day", func.timezone(tz_name, UsageEvent.ts)),
+        # `hour` is the instant the event's local hour started, under the event's own offset:
+        # truncate the UTC hour after shifting by the offset's minutes (30 for Asia/Kolkata,
+        # 0 for whole-hour zones). It never goes through wall-clock time, so the two 01:00
+        # hours of a DST fall-back stay two buckets.
+        "hour": func.date_trunc("hour", UsageEvent.ts - offset_minutes) + offset_minutes,
         "kind": UsageEvent.kind,
         "endpoint": UsageEvent.endpoint,
         # Use a non-null cursor key; expose the absent type as null in the response.
@@ -551,6 +586,7 @@ async def _events_page(
     from_: datetime,
     to_: datetime,
     filters: list[Any],
+    tz_name: str,
     limit: int,
     cursor: str | None,
 ) -> Page[UsageRowOut]:
@@ -560,7 +596,7 @@ async def _events_page(
     # range) stays a single all-zones row, so its `zone` is null.
     if groups and "zone" not in groups:
         groups = ["zone", *groups]
-    stmt, fields, kinds, upstream = _events_query(groups, readable, from_, to_, filters)
+    stmt, fields, kinds, upstream = _events_query(groups, readable, from_, to_, filters, tz_name)
     names = list(fields)
     group_columns = list(fields.values())
     if names:
@@ -574,7 +610,7 @@ async def _events_page(
         next_cursor = _encode_cursor(
             [
                 last[name].isoformat()
-                if name == "day"
+                if name in ("day", "hour")
                 else getattr(last[name], "value", None) or str(last[name])
                 for name in names
             ]
@@ -621,6 +657,7 @@ async def _events_page(
                 **provenance,
                 **plain,
                 date=row["day"].date() if "day" in row else None,
+                hour=row.get("hour"),
                 requested=row.get("requested"),
                 called=called,
                 called_kind=called_kind,
@@ -657,7 +694,24 @@ async def get_usage(
     session: SessionDep,
     from_: FromQuery = None,
     to_: ToQuery = None,
-    group_by: str | None = None,
+    group_by: Annotated[
+        str | None,
+        Query(
+            description=(
+                "Comma-separated dimensions to group by; default `day,requested`. `hour` limits"
+                " the range to 31 days."
+            )
+        ),
+    ] = None,
+    tz: Annotated[
+        str,
+        Query(
+            description=(
+                "IANA time zone used to bucket `day` and `hour`, e.g. `Asia/Taipei`;"
+                " default `UTC`. An unknown zone is 422."
+            )
+        ),
+    ] = "UTC",
     team_id: uuid.UUID | None = None,
     user_id: uuid.UUID | None = None,
     service_account_id: uuid.UUID | None = None,
@@ -720,14 +774,15 @@ async def get_usage(
 ) -> UsagePage:
     """Aggregate usage within the caller's existing team/key permission scope.
 
-    `day,requested` is the default; `requested` is the literal name the client called, so a
-    renamed model, alias or router appears as separate before/after names. `called` groups
-    by the catalog item instead (the alias, else the router, else the model, else the
-    literal), so a rename merges; it is visible to every caller, as are `status_class` and
-    `outcome`. Only an installation admin may group or filter by `model`, `upstream_model`,
-    `alias`, `router` or `fallback` and their ids/`_missing` variants; any other caller gets
-    403 `routing_detail_forbidden` and never receives `served_by`, `via_aliases`,
-    `via_routers` or `upstream_model(s)`.
+    `day,requested` is the default; `day` is the calendar day in `tz`, and `hour` gives
+    aware one-hour buckets (at most a 31-day range). `requested` is the literal name the
+    client called, so a renamed model, alias or router appears as separate before/after
+    names. `called` groups by the catalog item instead (the alias, else the router, else the
+    model, else the literal), so a rename merges; it is visible to every caller, as are
+    `status_class` and `outcome`. Only an installation admin may group or filter by `model`,
+    `upstream_model`, `alias`, `router` or `fallback` and their ids/`_missing` variants. Any
+    other caller gets 403 `routing_detail_forbidden` and never receives `served_by`,
+    `via_aliases`, `via_routers` or `upstream_model(s)`.
 
     Every row carries fallback/retry counts and p50/p95/p99 durations. The percentiles are
     null on the monthly totals fast path, which stores no durations. `compare=previous`
@@ -759,6 +814,13 @@ async def get_usage(
     if end <= start:
         raise validation_error("to", "must be after from")
     groups = _parse_group_by(group_by)
+    try:
+        zone_info = ZoneInfo(tz)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise validation_error("tz", f"unknown IANA time zone {tz!r}") from exc
+    tz_name = zone_info.key
+    if "hour" in groups and end - start > timedelta(days=31):
+        raise validation_error("to", "a range grouped by hour must not exceed 31 days")
     is_admin = await authz.is_admin()
     if not is_admin:
         # Refuse before any scope lookup: a caller without routing access learns nothing
@@ -792,6 +854,7 @@ async def get_usage(
         admin_teams = await authz.admin_teams(candidates)
     use_totals = (
         is_admin
+        and tz_name == "UTC"
         and groups == ["team"]
         and requested is None
         and called is None
@@ -922,11 +985,15 @@ async def get_usage(
                         ),
                     )
                 )
-        page = await _events_page(session, groups, readable, start, end, filters, limit, cursor)
+        page = await _events_page(
+            session, groups, readable, start, end, filters, tz_name, limit, cursor
+        )
         previous = None
         if compare == "previous":
             span = end - start
-            prior = await _events_page(session, [], readable, start - span, start, filters, 1, None)
+            prior = await _events_page(
+                session, [], readable, start - span, start, filters, tz_name, 1, None
+            )
             if prior.items:
                 row = prior.items[0]
                 previous = UsageTotalsOut(
@@ -1015,7 +1082,8 @@ async def get_usage_leaderboard(
     across the readable teams (a renamed model, alias or router shows as separate names).
     `by=called` groups the called catalog item instead (the alias, else the router, else the
     model, else the literal), so a rename merges; it is visible to every caller. `by=key`
-    and `by=owner` group within the team and return `team_id`.
+    and `by=owner` group within the team and return `team_id`. Without a `zone` filter rows
+    merge every zone of that identity and their `zone` is null; with one they stay per zone.
 
     An installation admin ranks every team. Everyone else ranks only their readable teams;
     a plain member therefore sees another member in the ranking but not their identity:
@@ -1041,12 +1109,15 @@ async def get_usage_leaderboard(
     if readable is not None and not readable:
         return Page[UsageLeaderboardRowOut](items=[], next_cursor=None)
 
+    # Without a zone filter the board merges every zone into one row per identity; with it,
+    # rows stay per zone. `zone` in the response is null for a merged row.
+    zone_group = [UsageEvent.zone] if zone is not None else []
     extra_columns: list[Any] = []
     if by == "requested":
-        group_columns = [UsageEvent.zone, UsageEvent.requested]
+        group_columns = [*zone_group, UsageEvent.requested]
     elif by == "called":
         group_columns = [
-            UsageEvent.zone,
+            *zone_group,
             func.coalesce(cast(CALLED_ID, String), CALLED_LITERAL).label("called_identity"),
             CALLED_ID.label("called_id"),
         ]
@@ -1055,10 +1126,10 @@ async def get_usage_leaderboard(
             func.min(CALLED_KIND).label("called_kind"),
         ]
     elif by == "key":
-        group_columns = [UsageEvent.zone, UsageEvent.team_id, UsageEvent.key_id]
+        group_columns = [*zone_group, UsageEvent.team_id, UsageEvent.key_id]
     else:
         group_columns = [
-            UsageEvent.zone,
+            *zone_group,
             UsageEvent.team_id,
             UsageEvent.owner_kind,
             UsageEvent.owner_id,
@@ -1143,7 +1214,7 @@ async def get_usage_leaderboard(
     for rank, row in enumerate(rows, start=1):
         values: dict[str, Any] = {
             "rank": rank,
-            "zone": row["zone"],
+            "zone": row.get("zone"),
             "requests": int(row["requests"]),
             "prompt_tokens": int(row["prompt_tokens"]),
             "completion_tokens": int(row["completion_tokens"]),

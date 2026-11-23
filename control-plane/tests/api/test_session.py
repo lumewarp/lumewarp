@@ -690,3 +690,12 @@ async def test_session_installation_admin_is_local_and_backend_independent(
     assert me.json()["installation_role"] == ("admin" if local else None)
     # The team listing still asks the backend and fails closed.
     assert me.json()["authz_unavailable"] is True
+
+
+def test_sso_display_name_is_sent_only_with_sso(client, idp):
+    settings = client.app.state.settings
+    assert "sso_display_name" not in client.get("/api/v1/session").json()
+    settings.sso_display_name = "Okta"
+    assert client.get("/api/v1/session").json()["sso_display_name"] == "Okta"
+    settings.oidc_issuer = None
+    assert "sso_display_name" not in client.get("/api/v1/session").json()

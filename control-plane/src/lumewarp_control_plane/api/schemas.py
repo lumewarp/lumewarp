@@ -1911,7 +1911,9 @@ class UsageRowOut(ApiModel):
     router, else the model, else the literal `requested`), labelled with its current
     name; `called_kind` says which and `called_names` lists every literal spelling
     seen, so a rename merges. `status_class` buckets the HTTP status, `outcome` is the
-    gateway outcome and `fallback` is the grouped fallback flag.
+    gateway outcome and `fallback` is the grouped fallback flag. `date` is the calendar
+    day in the query's `tz`, and `hour` is the aware instant of that zone's one-hour bucket
+    start (serialized in UTC).
 
     `error_count` and `total_duration_ms` describe how the group's requests ended
     (an error outcome, or a 4xx/5xx status that is not a client cancellation;
@@ -1927,7 +1929,17 @@ class UsageRowOut(ApiModel):
     endpoint: str | None = None
     model_type: ModelType | None = None
     audio_ms: int = 0
-    date: date_type | None = None
+    date: date_type | None = Field(
+        default=None,
+        description="Calendar day in the query's `tz`; only when `day` is grouped.",
+    )
+    hour: datetime | None = Field(
+        default=None,
+        description=(
+            "Aware instant of the one-hour bucket start of the query's `tz`, serialized in"
+            " UTC; only when `hour` is grouped."
+        ),
+    )
     kind: TrafficKind | None = None
     target: str | None = None
     method: str | None = None
@@ -2027,7 +2039,13 @@ class UsageLeaderboardRowOut(ApiModel):
     """
 
     rank: int = Field(description="1-based position, ordered by total tokens, then cost.")
-    zone: str = Field(description="The zone this row was ranked in.")
+    zone: str | None = Field(
+        default=None,
+        description=(
+            "The zone this row was ranked in; null when no `zone` filter was given and the"
+            " row merges every zone of that identity."
+        ),
+    )
     label: str = Field(
         description=(
             "What the row names: the called name, the key's name or the owner's name; an"

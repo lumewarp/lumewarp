@@ -88,7 +88,7 @@ test("a 403 from a permission-dependent read revalidates /users/me", async ({ pa
       body: JSON.stringify({ error: { code: "forbidden", message: "not allowed" } }),
     }),
   );
-  await page.getByLabel("From").fill("2026-01-01");
+  await page.getByLabel("From").fill("2026-01-01T00:00");
   await expect.poll(() => meRequests, { timeout: 15_000 }).toBeGreaterThan(1);
 });
 

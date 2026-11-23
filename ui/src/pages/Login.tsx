@@ -1,4 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { ChevronDownIcon } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useState, type FormEvent } from "react";
 import { api, client } from "../api";
@@ -23,6 +24,7 @@ export function Login() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
+  const [emergency, setEmergency] = useState(false);
   const navigate = useNavigate();
   const qc = useQueryClient();
   const session = useQuery({ queryKey: ["session"], queryFn: () => api.session(), retry: false });
@@ -56,17 +58,28 @@ export function Login() {
     }
   };
 
+  const sso = session.data?.oidc_enabled;
+  const breakGlass = session.data?.break_glass_enabled && (
+    <div className="flex flex-col gap-4">
+      <TextField label="Break-glass password" type="password" value={password} onChange={setPassword} error={error} autoFocus />
+      <Button type="submit" variant={sso ? "outline" : "default"} disabled={busy}>
+        {busy ? "Signing in…" : "Sign in"}
+      </Button>
+    </div>
+  );
+
   return (
-    <div className="grid min-h-screen place-items-center p-4">
-      <Card className="w-[min(380px,100%)] py-7">
-        <form className="flex flex-col gap-4 px-7" onSubmit={submit} noValidate>
-          <div className="flex items-center gap-2.5 text-base font-bold">
-            <img src="/favicon.svg" alt="" aria-hidden="true" className="size-6" />
-            Lumewarp
+    <div className="grid min-h-svh place-items-center p-4 pb-[12vh]">
+      <Card className="w-[min(380px,100%)] py-8">
+        <form className="flex flex-col gap-5 px-7" onSubmit={submit} noValidate>
+          <div className="flex flex-col items-center gap-3 text-center">
+            <img src="/favicon.svg" alt="" aria-hidden="true" className="size-20" />
+            <h1 className="text-xl font-semibold">
+              <span className="sr-only">Sign in to </span>Lumewarp
+            </h1>
           </div>
-          <h1 className="text-xl font-semibold">Sign in</h1>
-          {!session.data?.oidc_enabled && (
-            <p className="text-sm text-muted-foreground">
+          {!sso && (
+            <p className="text-center text-sm text-muted-foreground">
               {session.isPending
                 ? "Checking sign-in options…"
                 : session.data
@@ -79,23 +92,36 @@ export function Login() {
               <AlertDescription>{ssoError}</AlertDescription>
             </Alert>
           )}
-          {session.data?.oidc_enabled && (
+          {sso && (
             <Button
               type="button"
+              size="lg"
               onClick={() => {
                 window.location.assign(`/api/v1/session/oidc/login?next=${encodeURIComponent(next)}`);
               }}
             >
-              Sign in with SSO
+              Sign in with {session.data?.sso_display_name || "SSO"}
             </Button>
           )}
-          {session.data?.break_glass_enabled && (
-            <>
-              <TextField label="Break-glass password" type="password" value={password} onChange={setPassword} error={error} autoFocus />
-              <Button type="submit" variant={session.data?.oidc_enabled ? "outline" : "default"} disabled={busy}>
-                {busy ? "Signing in…" : "Sign in"}
+          {sso && breakGlass ? (
+            // With SSO the emergency password is the exception, so it stays folded away.
+            <div className="flex flex-col gap-4">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="self-center text-muted-foreground"
+                aria-expanded={emergency}
+                aria-controls="emergency-sign-in"
+                onClick={() => setEmergency((open) => !open)}
+              >
+                Emergency sign-in
+                <ChevronDownIcon className={emergency ? "rotate-180 transition-transform" : "transition-transform"} aria-hidden="true" />
               </Button>
-            </>
+              {emergency && <div id="emergency-sign-in">{breakGlass}</div>}
+            </div>
+          ) : (
+            breakGlass
           )}
           {session.error && (
             <Alert variant="destructive">

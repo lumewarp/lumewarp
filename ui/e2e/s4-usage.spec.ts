@@ -188,16 +188,15 @@ function expectNoRouting(seen: ReturnType<typeof watchApi>) {
 }
 
 for (const [role, token] of [["member", MEMBER], ["team admin", TEAM_ADMIN]] as const) {
-  test(`usage as a ${role}: called names, team totals and three leaderboards, no routing and no 403`, async ({ browser, request }) => {
+  test(`usage as a ${role}: called names, team totals and a leaderboard switch, no routing and no 403`, async ({ browser, request }) => {
     await roleTeam(request);
     const { context, page, seen } = await asRole(browser, token, "/usage");
     try {
       await expect(page.getByRole("heading", { name: "Usage", level: 1 })).toBeVisible();
       await expect(page.getByTestId("leaderboards")).toBeVisible();
-      for (const board of ["called", "key", "owner"]) await expect(page.getByTestId(`leaderboard-${board}`)).toBeVisible();
-      await expect(page.getByTestId("leaderboard-called").getByText("Called names", { exact: true })).toBeVisible();
-      await expect(page.getByTestId("leaderboard-key").getByText("Keys", { exact: true })).toBeVisible();
-      await expect(page.getByTestId("leaderboard-owner").getByText("Users", { exact: true })).toBeVisible();
+      await expect(page.getByTestId("leaderboard-view").getByRole("button", { name: "Models", exact: true })).toHaveAttribute("aria-pressed", "true");
+      await expect(page.getByTestId("leaderboard-called")).toBeVisible();
+      await expect(page.getByTestId("leaderboards").getByText("Top 10", { exact: true })).toBeVisible();
       await expect(page.getByTestId("state-error")).toHaveCount(0);
 
       // No routing control: no Model filter, and Group by has the called name and no served model.
@@ -205,7 +204,7 @@ for (const [role, token] of [["member", MEMBER], ["team admin", TEAM_ADMIN]] as 
       // Owner is offered once the administered teams have loaded; wait for that before reading the options.
       if (role === "team admin") await expect.poll(async () => (await optionNames(page, "Group by")).includes("Owner")).toBe(true);
       const groups = await optionNames(page, "Group by");
-      expect(groups).toEqual(expect.arrayContaining(["Called name", "As typed", "Status", "Day", "Team", "API key"]));
+      expect(groups).toEqual(expect.arrayContaining(["Model", "As typed", "Status", "Day", "Team", "API key"]));
       for (const routing of ["Served model", "Called × served", "Upstream model", "Alias", "Router"]) expect(groups).not.toContain(routing);
       expect(groups.includes("Owner")).toBe(role === "team admin");
       await moreFilters(page);
@@ -255,33 +254,40 @@ test("leaderboards: rank, bar, spend, the 'you' badge and muted anonymous rows",
     await context.addCookies([{ name: "lumewarp_session", value: MEMBER, url: test.info().project.use.baseURL! }]);
     await page.goto("/usage");
     const board = (by: string) => page.getByTestId(`leaderboard-${by}`);
+    const view = (name: string) => page.getByTestId("leaderboard-view").getByRole("button", { name, exact: true });
     await expect(board("called").getByTestId("leaderboard-row")).toHaveCount(2);
     await expect(board("called").getByTestId("leaderboard-row").first()).toContainText("shared-chat");
+    // A merged row (zone null) carries no zone badge.
+    await expect(board("called").getByTestId("leaderboard-row").first().locator("[data-slot=badge]")).toHaveCount(0);
+    await view("Keys").click();
     await expect(board("key").getByTestId("key-pill").first()).toContainText("ci-key");
     await expect(board("key").getByText("Key #2")).toHaveClass(/text-muted-foreground/);
+    await view("Users").click();
     await expect(board("owner").getByTestId("leaderboard-row").first()).toContainText("you");
     await expect(board("owner").getByText("Member #2")).toHaveClass(/text-muted-foreground/);
-    // The Usage lens ranks by tokens and shows no money; the Cost lens ranks by spend.
+    // The Usage lens ranks by tokens; the Cost lens ranks by spend and shows it first.
     await expect(board("owner").getByTestId("leaderboard-row").first()).toContainText("700");
-    await expect(board("owner").getByTestId("leaderboard-row").first()).not.toContainText("$");
     await page.getByTestId("usage-lens").getByRole("button", { name: "Cost", exact: true }).click();
     await expect(board("owner").getByTestId("leaderboard-row").first()).toContainText("$");
+    await expect(board("owner").getByTestId("leaderboard-row").first().locator("[data-column]").first()).toHaveAttribute("data-column", "spend");
+    await view("Models").click();
     await expect(board("called").getByTestId("leaderboard-row").first()).toContainText("shared-chat");
-    // Three cards side by side on a wide screen, stacked on a phone.
-    const tops = async () => Promise.all(["called", "key", "owner"].map(async (by) => (await board(by).boundingBox())!.y));
-    const wide = await tops();
-    expect(new Set(wide.map(Math.round)).size).toBe(1);
+    // Columns line up: every row's Requests cell has the same x and width on a wide screen.
+    const cells = board("called").getByTestId("leaderboard-row").locator("[data-column=requests]");
+    const [c1, c2] = [await cells.nth(0).boundingBox(), await cells.nth(1).boundingBox()];
+    expect(Math.round(c1!.x + c1!.width)).toBe(Math.round(c2!.x + c2!.width));
+    // On a phone the numbers sit under the name and nothing overflows.
     await page.setViewportSize({ width: 390, height: 800 });
-    const narrow = await tops();
-    expect(narrow[0]).toBeLessThan(narrow[1]);
-    expect(narrow[1]).toBeLessThan(narrow[2]);
+    const nameBox = await board("called").getByTestId("leaderboard-row").first().locator("span.font-medium").boundingBox();
+    const numBox = await cells.first().boundingBox();
+    expect(numBox!.y).toBeGreaterThan(nameBox!.y);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   } finally {
     await context.close();
   }
 });
 
-test("leaderboards: a key or user board with no readable row is left out, and spend is short", async ({ browser, request }) => {
+test("leaderboards: a key or user option with no readable row is left out, and spend is short", async ({ browser, request }) => {
   await roleTeam(request);
   const row = (rank: number, label: string, extra: object = {}) => ({
     rank, label, requested: null, team_id: null, key: null, owner_kind: null, owner_id: null, is_me: false,
@@ -298,8 +304,10 @@ test("leaderboards: a key or user board with no readable row is left out, and sp
     await context.addCookies([{ name: "lumewarp_session", value: MEMBER, url: test.info().project.use.baseURL! }]);
     await page.goto("/usage");
     await expect(page.getByTestId("leaderboard-called").getByTestId("leaderboard-row")).toHaveCount(1);
-    await expect(page.getByTestId("leaderboard-key")).toHaveCount(0);
-    await expect(page.getByTestId("leaderboard-owner")).toHaveCount(0);
+    const view = page.getByTestId("leaderboard-view");
+    await expect(view.getByRole("button", { name: "Models", exact: true })).toBeVisible();
+    await expect(view.getByRole("button", { name: "Keys", exact: true })).toHaveCount(0);
+    await expect(view.getByRole("button", { name: "Users", exact: true })).toHaveCount(0);
     await page.getByTestId("usage-lens").getByRole("button", { name: "Cost", exact: true }).click();
     const value = page.getByTestId("leaderboard-called").getByTitle("$0.292026");
     await expect(value).toHaveText("$0.292");
@@ -312,9 +320,9 @@ test("usage as an installation admin keeps the routing page and its leaderboards
   // The suite's beforeEach signed this page in with the break-glass session.
   await expect(page.getByRole("combobox", { name: "Model", exact: true })).toBeVisible();
   const groups = await optionNames(page, "Group by");
-  expect(groups).toEqual(expect.arrayContaining(["Called name", "Served model", "Called × served", "Upstream model", "Alias", "Router", "As typed"]));
+  expect(groups).toEqual(expect.arrayContaining(["Model", "Served model", "Model × served", "Upstream model", "Alias", "Router", "As typed"]));
   await expect(page.getByRole("columnheader", { name: "Served model", exact: true })).toBeVisible();
-  for (const board of ["called", "key", "owner"]) await expect(page.getByTestId(`leaderboard-${board}`)).toBeVisible();
+  for (const name of ["Models", "Keys", "Users"]) await expect(page.getByTestId("leaderboard-view").getByRole("button", { name, exact: true })).toBeVisible();
   await expect(page.getByTestId("leaderboard-called").getByTestId("leaderboard-row").first()).toBeVisible();
 });
 
@@ -334,8 +342,8 @@ test("a team admin's tables carry no routing column, and a request with null rou
     await page.route("**/api/v1/requests?*", (route) => route.fulfill({ status: 200, json: { items: [logged], next_cursor: null } }));
     await context.addCookies([{ name: "lumewarp_session", value: TEAM_ADMIN, url: test.info().project.use.baseURL! }]);
     await page.goto("/usage");
-    await expect(page.getByRole("columnheader", { name: "Called name", exact: true })).toBeVisible();
-    await expect(page.getByRole("columnheader", { name: /^(Served model|Model|Upstream model|Via alias|Via router|Served by)$/ })).toHaveCount(0);
+    await expect(page.getByRole("columnheader", { name: "Model", exact: true })).toBeVisible();
+    await expect(page.getByRole("columnheader", { name: /^(Served model|Upstream model|Via alias|Via router|Served by)$/ })).toHaveCount(0);
     await expect(page.getByRole("link", { name: "View" }).first()).not.toHaveAttribute("href", /(model|alias|router)=/);
 
     await page.goto("/requests");

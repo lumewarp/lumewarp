@@ -47,6 +47,10 @@ class SessionUser(BaseModel):
 
 class SessionInfo(BaseModel):
     oidc_enabled: bool
+    sso_display_name: str | None = Field(
+        default=None,
+        description="The IdP's name for the login button (`LUMEWARP_SSO_DISPLAY_NAME`), with SSO.",
+    )
     break_glass_enabled: bool
     authenticated: bool
     is_break_glass: bool = False
@@ -63,8 +67,10 @@ async def session_info(request: Request, response: Response) -> SessionInfo:
     Answers 200 without a session too.
     """
     response.headers["Cache-Control"] = "no-store"
+    settings = request.app.state.settings
     info = SessionInfo(
-        oidc_enabled=bool(request.app.state.settings.oidc_issuer),
+        oidc_enabled=bool(settings.oidc_issuer),
+        sso_display_name=(settings.sso_display_name or None) if settings.oidc_issuer else None,
         break_glass_enabled=break_glass.enabled(request.app.state.settings),
         authenticated=False,
     )

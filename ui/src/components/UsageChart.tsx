@@ -1,9 +1,8 @@
 import { useId, useMemo, useState, type ReactNode } from "react";
-import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts";
+import { Bar, BarChart, BarStack, CartesianGrid, XAxis, YAxis } from "recharts";
 
 import type { UsageRow } from "../api";
-import { daysBetween } from "../lib/days";
-import { buildSeries, paint, type Series } from "../lib/usageSeries";
+import { buildSeries, paint, type Bucket, type Series } from "../lib/usageSeries";
 import { METRIC_LABEL, METRICS, type UsageMetric } from "../lib/usageMetric";
 import { fmtCompact, fmtNumber, fmtUsd, nanoToUsd } from "./Bits";
 import { Button } from "./ui/button";
@@ -15,10 +14,30 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from ".
 
 /*
  * Usage charts (shadcn `chart`, recharts). The series are the table's grouping: `GET /usage` rows with
- * `group_by=day,<dimension>` (a single series for `day`), drawn as stacked bars over UTC days, a share donut
- * or ranked bars. The API buckets by UTC day, so a long range stays daily. This module is only imported by the
+ * `group_by=<hour|day>,<dimension>` (a single series for `day`), drawn as stacked bars over the page's slots
+ * (local hours for a range of at most 48 h, local days beyond), a share donut or ranked bars. This module is only imported by the
  * lazy Usage route, so recharts stays out of the landing chunk.
  */
+
+const two = (n: number) => String(n).padStart(2, "0");
+
+/** An hour slot in the browser's zone: `14:00`, or `11-23 14:00` when the date is wanted. */
+function hourLabel(slot: string, withDate = false) {
+  const date = new Date(slot);
+  const time = `${two(date.getHours())}:${two(date.getMinutes())}`;
+  return withDate ? `${two(date.getMonth() + 1)}-${two(date.getDate())} ${time}` : time;
+}
+
+/** An x tick: `MM-DD` for a day; for an hour `HH:00`, with the date on the first tick and where the day changes. */
+function tick(slot: string, at: number, slots: string[], bucket: Bucket) {
+  if (bucket === "day") return slot.slice(5);
+  // `at` counts the drawn ticks (recharts thins them), so the previous slot comes from the slot list.
+  const slotAt = slots.indexOf(slot);
+  const changed = at === 0 || slotAt <= 0 || new Date(slot).getDate() !== new Date(slots[slotAt - 1]).getDate();
+  return hourLabel(slot, changed);
+}
+
+const EMPTY: Set<string> = new Set();
 
 export type ChartView = "stacked" | "share" | "ranked";
 const VIEWS: { value: ChartView; label: string }[] = [
@@ -51,9 +70,11 @@ export interface UsageChartProps {
   dimLabel: string;
   /** `day` grouping has one series: the share and ranked views say nothing there. */
   singleSeries?: boolean;
-  /** First and last UTC day drawn (`YYYY-MM-DD`), both inclusive. Every day in between gets a slot. */
-  from: string;
-  to: string;
+  /** Every slot of the range, in order (see `bucketSlots`): local days or ISO hour instants. */
+  slots: string[];
+  bucket: Bucket;
+  /** The range as text, with its time zone: the line under the title. */
+  rangeLabel: string;
   metric: UsageMetric;
   onMetricChange: (metric: UsageMetric) => void;
   /** The metrics offered; with one the toggle is hidden (the Cost lens draws cost only). */
@@ -67,16 +88,25 @@ export interface UsageChartProps {
   footer?: ReactNode;
 }
 
-export function UsageChart({ rows, labelOf, dimLabel, singleSeries, from, to, metric, onMetricChange, metrics = METRICS, loading, error, onRetry, empty = "No usage in this period.", title = "Usage by day", footer }: UsageChartProps) {
-  const days = useMemo(() => daysBetween(from, to), [from, to]);
-  const built = useMemo(() => buildSeries(rows, days, metric, labelOf), [rows, days, metric, labelOf]);
+export function UsageChart({ rows, labelOf, dimLabel, singleSeries, slots: days, bucket, rangeLabel, metric, onMetricChange, metrics = METRICS, loading, error, onRetry, empty = "No usage in this period.", title = "Usage by day", footer }: UsageChartProps) {
+  const built = useMemo(() => buildSeries(rows, days, metric, labelOf, bucket), [rows, days, metric, labelOf, bucket]);
   const [pickedView, setView] = useState<ChartView>("stacked");
   const view = singleSeries ? "stacked" : pickedView;
   const [open, setOpen] = useState(false);
   const id = useId();
   const { series } = built;
   const config: ChartConfig = Object.fromEntries(series.map((s, i) => [`s${i}`, { label: s.name, color: paint(s.slot) }]));
-  const grandTotal = series.reduce((sum, s) => sum + s.total, 0);
+  // Hidden series are per set of names: another metric, grouping or range starts with everything shown.
+  const namesKey = series.map((s) => s.name).join("\u0000");
+  const [hiddenState, setHiddenState] = useState<{ key: string; names: Set<string> }>({ key: "", names: new Set() });
+  const hidden = hiddenState.key === namesKey ? hiddenState.names : EMPTY;
+  const toggle = (name: string) => {
+    const next = new Set(hidden);
+    if (!next.delete(name)) next.add(name);
+    setHiddenState({ key: namesKey, names: next });
+  };
+  const shown = series.filter((s) => !hidden.has(s.name));
+  const grandTotal = shown.reduce((sum, s) => sum + s.total, 0);
 
   let body: ReactNode;
   if (error) {
@@ -101,23 +131,39 @@ export function UsageChart({ rows, labelOf, dimLabel, singleSeries, from, to, me
   } else {
     body = (
       <div className="grid gap-3">
-        <ul className="m-0 flex list-none flex-wrap gap-x-3 gap-y-1 p-0 text-xs" aria-label="Chart series" data-testid="usage-chart-legend">
-          {series.map((s) => (
-            <li key={s.name} data-series={s.name} className="flex items-center gap-1.5" title={s.members.length ? s.members.join(", ") : undefined}>
-              <span aria-hidden="true" className="size-2.5 shrink-0 rounded-sm" style={{ background: paint(s.slot) }} />
-              <span className="[overflow-wrap:anywhere]">{s.name}</span>
-            </li>
-          ))}
-        </ul>
+        <div className="flex flex-wrap items-center gap-x-1 gap-y-1">
+          <ul className="m-0 flex list-none flex-wrap gap-x-1 gap-y-1 p-0 text-xs" aria-label="Chart series" data-testid="usage-chart-legend">
+            {series.map((s) => {
+              const visible = !hidden.has(s.name);
+              return (
+                <li key={s.name} data-series={s.name} title={s.members.length ? s.members.join(", ") : undefined}>
+                  <Button type="button" variant="ghost" size="sm" aria-pressed={visible} className="h-6 gap-1.5 px-1.5 text-xs font-normal" onClick={() => toggle(s.name)}>
+                    <span aria-hidden="true" className={`size-2.5 shrink-0 rounded-sm ${visible ? "" : "opacity-30"}`} style={{ background: paint(s.slot) }} />
+                    <span className={`[overflow-wrap:anywhere] ${visible ? "" : "text-muted-foreground line-through"}`}>{s.name}</span>
+                  </Button>
+                </li>
+              );
+            })}
+          </ul>
+          {hidden.size > 0 && (
+            <Button type="button" variant="ghost" size="sm" className="h-6 px-1.5 text-xs" data-testid="usage-chart-show-all" onClick={() => setHiddenState({ key: namesKey, names: new Set() })}>
+              Show all
+            </Button>
+          )}
+        </div>
         {series.length === 0 ? (
           <p className="m-0 py-8 text-center text-sm text-muted-foreground" data-testid="usage-chart-empty">
             Nothing to draw: no request in this range has a price.
           </p>
+        ) : shown.length === 0 ? (
+          <p className="m-0 py-8 text-center text-sm text-muted-foreground" data-testid="usage-chart-hidden">
+            All series hidden.
+          </p>
         ) : (
-          <div role="img" aria-label={`${METRIC_LABEL[metric]} by ${dimLabel}, ${from} to ${to}`} data-testid="usage-chart-plot" data-view={view}>
-            {view === "stacked" && <Stacked series={series} days={days} config={config} metric={metric} />}
-            {view === "share" && <Share series={series} metric={metric} total={grandTotal} />}
-            {view === "ranked" && <Ranked series={series} metric={metric} />}
+          <div role="img" aria-label={`${METRIC_LABEL[metric]} by ${dimLabel}, ${rangeLabel}`} data-testid="usage-chart-plot" data-view={view}>
+            {view === "stacked" && <Stacked series={series} hidden={hidden} days={days} bucket={bucket} config={config} metric={metric} />}
+            {view === "share" && <Share series={shown} metric={metric} total={grandTotal} />}
+            {view === "ranked" && <Ranked series={shown} metric={metric} />}
           </div>
         )}
         {metric === "cost" && (built.unpriced.length > 0 || built.unknown > 0) && (
@@ -137,7 +183,7 @@ export function UsageChart({ rows, labelOf, dimLabel, singleSeries, from, to, me
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead className="px-2">Day (UTC)</TableHead>
+                      <TableHead className="px-2">{bucket === "hour" ? "Hour" : "Day"}</TableHead>
                       {series.map((s) => (
                         <TableHead key={s.name} className="px-2 text-right">
                           {s.name}
@@ -149,7 +195,7 @@ export function UsageChart({ rows, labelOf, dimLabel, singleSeries, from, to, me
                   <TableBody>
                     {days.map((day, at) => (
                       <TableRow key={day}>
-                        <TableCell className="px-2 whitespace-nowrap">{day}</TableCell>
+                        <TableCell className="px-2 whitespace-nowrap">{bucket === "hour" ? hourLabel(day, true) : day}</TableCell>
                         {series.map((s) => (
                           <TableCell key={s.name} className="px-2 text-right tabular-nums">
                             {exact(s.cells[at], metric)}
@@ -172,11 +218,11 @@ export function UsageChart({ rows, labelOf, dimLabel, singleSeries, from, to, me
     <Card data-testid="usage-chart" data-metric={metric} data-view={view}>
       <CardHeader className="gap-2">
         <div className="flex flex-wrap items-start justify-between gap-2">
-          <div className="min-w-0">
+          <div className="flex min-w-0 flex-col gap-1.5">
             <CardTitle>{title}</CardTitle>
-            <CardDescription>
+            <CardDescription className="text-xs">
               <span data-testid="usage-chart-range" className="whitespace-nowrap">
-                {from} – {to} (UTC)
+                {rangeLabel}
               </span>{" "}
               · by {dimLabel.toLowerCase()}
             </CardDescription>
@@ -194,7 +240,7 @@ export function UsageChart({ rows, labelOf, dimLabel, singleSeries, from, to, me
 }
 
 /** The tooltip's rows: only the series the day has, the Other members named, and the total. */
-function Tip({ active, payload, label, series, metric, day }: { active?: boolean; payload?: { dataKey?: string | number; value?: number; name?: string | number; color?: string; payload?: Record<string, unknown> }[]; label?: string; series: Series[]; metric: UsageMetric; day: boolean }) {
+function Tip({ active, payload, label, series, metric, day, bucket }: { active?: boolean; payload?: { dataKey?: string | number; value?: number; name?: string | number; color?: string; payload?: Record<string, unknown> }[]; label?: string; series: Series[]; metric: UsageMetric; day: boolean; bucket?: Bucket }) {
   // Share and ranked views have one value per slice: its name is the slice's, not the metric's.
   const rows = (payload ?? [])
     .filter((item) => Number(item.value) > 0)
@@ -208,7 +254,7 @@ function Tip({ active, payload, label, series, metric, day }: { active?: boolean
       active={active && rows.length > 0}
       payload={rows}
       label={label}
-      labelFormatter={(value) => (day ? `${value} (UTC)` : value)}
+      labelFormatter={(value) => (day && bucket === "hour" ? hourLabel(String(value), true) : value)}
       formatter={(value) => exact(Number(value), metric)}
       footer={
         <>
@@ -231,18 +277,20 @@ function Tip({ active, payload, label, series, metric, day }: { active?: boolean
   );
 }
 
-function Stacked({ series, days, config, metric }: { series: Series[]; days: string[]; config: ChartConfig; metric: UsageMetric }) {
+function Stacked({ series, hidden, days, bucket, config, metric }: { series: Series[]; hidden: Set<string>; days: string[]; bucket: Bucket; config: ChartConfig; metric: UsageMetric }) {
   const data = days.map((day, at) => ({ day, ...Object.fromEntries(series.map((s, i) => [`s${i}`, s.cells[at]])) }));
   return (
     <ChartContainer config={config} className="aspect-auto h-[240px] w-full">
       <BarChart data={data} accessibilityLayer margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
         <CartesianGrid vertical={false} />
-        <XAxis dataKey="day" tickLine={false} axisLine={false} minTickGap={24} tickFormatter={(day: string) => day.slice(5)} />
+        <XAxis dataKey="day" tickLine={false} axisLine={false} minTickGap={24} tickFormatter={(slot: string, at: number) => tick(slot, at, days, bucket)} />
         <YAxis tickLine={false} axisLine={false} width={56} tickFormatter={(value: number) => axisLabel(value, metric)} />
-        <ChartTooltip content={<Tip series={series} metric={metric} day />} />
-        {series.map((s, i) => (
-          <Bar key={s.name} dataKey={`s${i}`} name={s.name} stackId="usage" fill={`var(--color-s${i})`} isAnimationActive={false} maxBarSize={26} />
-        ))}
+        <ChartTooltip content={<Tip series={series} metric={metric} day bucket={bucket} />} />
+        <BarStack radius={[4, 4, 0, 0]}>
+          {series.map((s, i) => (
+            <Bar key={s.name} dataKey={`s${i}`} name={s.name} hide={hidden.has(s.name)} fill={`var(--color-s${i})`} isAnimationActive={false} maxBarSize={26} />
+          ))}
+        </BarStack>
       </BarChart>
     </ChartContainer>
   );
