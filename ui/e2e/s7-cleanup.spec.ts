@@ -131,16 +131,18 @@ test("screenshots: the whole matrix, desktop and 390 px, light and dark", async 
     // The usage chart: its three metrics states and its data table.
     await page.goto("/usage");
     await expect(chart).toBeVisible();
-    await expect(page.getByTestId("usage-day")).toHaveCount(30);
+    await expect(page.getByTestId("usage-chart-plot")).toBeVisible();
     await chartShot(`s7-${label}-usage-chart`);
-    const metricButton = (name: string) => page.getByTestId("usage-chart-metric").getByRole("button", { name, exact: true });
-    await metricButton("Cost").click();
+    const lensButton = (name: string) => page.getByTestId("usage-lens").getByRole("button", { name, exact: true });
+    await lensButton("Cost").click();
     await page.waitForTimeout(300);
     await chartShot(`s7-${label}-usage-chart-cost`);
-    await metricButton("Tokens").click();
+    await lensButton("Usage").click();
     // Hover after scrolling the card into view: scrolling afterwards would move the pointer off the bar.
     await chart.scrollIntoViewIfNeeded();
-    await page.getByTestId("usage-day").last().hover();
+    await page.mouse.move(2, 2);
+    await page.locator("[data-testid=usage-chart] svg.recharts-surface").first().hover({ position: { x: 600, y: 100 } });
+    await page.waitForTimeout(100);
     await page.waitForTimeout(250);
     await chartShot(`s7-${label}-usage-chart-tooltip`);
     await page.getByLabel("From").fill(new Date(Date.now() - 6 * 86_400_000).toISOString().slice(0, 10));

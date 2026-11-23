@@ -1618,6 +1618,14 @@ class Router(TimestampMixin, Base):
         CheckConstraint(
             "(sticky = 'header') = (sticky_header IS NOT NULL)", name="sticky_header_iff"
         ),
+        CheckConstraint(
+            "session_affinity OR session_affinity_header IS NULL",
+            name="session_affinity_header_iff",
+        ),
+        CheckConstraint(
+            "session_affinity_header IS NULL OR session_affinity_header ~ '^x-[a-z0-9-]+-id$'",
+            name="session_affinity_header_format",
+        ),
         CheckConstraint("plugin_timeout_ms >= 0", name="plugin_timeout_nonneg"),
     )
 
@@ -1653,6 +1661,14 @@ class Router(TimestampMixin, Base):
     )
     # Request header hashed when sticky = header (lower-case HTTP token).
     sticky_header: Mapped[str | None] = mapped_column(String(200))
+    # Route every request with a session id to the same member model (proto
+    # Router.session_affinity); valid with or without a traffic split.
+    session_affinity: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    # Extra request header read as a session id after `x-lumewarp-id`; only valid with
+    # session_affinity and lower-case `x-<name>-id` (proto Router.session_affinity_header).
+    session_affinity_header: Mapped[str | None] = mapped_column(String(200))
     # How long one strategy `pick` (a WASM plugin) may run before the gateway cancels it
     # (proto Router.plugin_timeout_ms). 0 = the gateway default, 60 s.
     plugin_timeout_ms: Mapped[int] = mapped_column(

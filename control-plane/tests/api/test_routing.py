@@ -170,6 +170,64 @@ def test_routing_validation(client) -> None:
     assert "duplicate" in resp.json()["error"]["message"]
 
 
+def test_router_session_affinity_round_trips(client) -> None:
+    up = _upstream(client)
+    model = _model(client, up.json()["id"]).json()
+    router = client.post(
+        "/api/v1/routers",
+        json={
+            "name": f"alias-{suffix()}",
+            "members": [{"model_id": model["id"]}],
+            "session_affinity": True,
+            "session_affinity_header": "X-Conversation-Id",
+        },
+        headers=ADMIN_AUTH,
+    )
+    assert router.status_code == 201, router.text
+    body = router.json()
+    assert body["session_affinity"] is True
+    # The header is stored lower-case, like sticky_header.
+    assert body["session_affinity_header"] == "x-conversation-id"
+    read = client.get(f"/api/v1/routers/{body['id']}", headers=ADMIN_AUTH)
+    assert read.status_code == 200 and read.json()["session_affinity"] is True
+
+    # Turning affinity off drops the header unless the body names one.
+    off = client.patch(
+        f"/api/v1/routers/{body['id']}", json={"session_affinity": False}, headers=ADMIN_AUTH
+    )
+    assert off.status_code == 200, off.text
+    assert off.json()["session_affinity"] is False
+    assert off.json()["session_affinity_header"] is None
+
+    # A header without the switch is refused, on create and on PATCH.
+    header_only = client.patch(
+        f"/api/v1/routers/{body['id']}",
+        json={"session_affinity_header": "x-session-id"},
+        headers=ADMIN_AUTH,
+    )
+    assert header_only.status_code == 422
+    assert "session_affinity_header" in header_only.json()["error"]["message"]
+    created_header_only = client.post(
+        "/api/v1/routers",
+        json={
+            "name": f"alias-{suffix()}",
+            "members": [{"model_id": model["id"]}],
+            "session_affinity_header": "x-session-id",
+        },
+        headers=ADMIN_AUTH,
+    )
+    assert created_header_only.status_code == 422
+
+    # The format is the gateway's: lower-case x-<name>-id.
+    for bad in ("x-session", "session-id", "x--id", "x-session id"):
+        response = client.patch(
+            f"/api/v1/routers/{body['id']}",
+            json={"session_affinity": True, "session_affinity_header": bad},
+            headers=ADMIN_AUTH,
+        )
+        assert response.status_code == 422, bad
+
+
 def test_unique_names_conflict(client) -> None:
     name = f"up-{suffix()}"
     first = _upstream(client, name=name)

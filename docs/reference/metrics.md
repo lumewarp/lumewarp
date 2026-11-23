@@ -24,6 +24,9 @@ the whole process, so counters are never reset by a config change.
 | `lumewarp_model_healthy` | Gauge | `model`; chat check 1 healthy, 0 unhealthy (1 without `chat_check`) |
 | `lumewarp_in_flight_requests` | Gauge | `model` |
 | `lumewarp_split_requests_total` | Counter | `router`, `split`; requests assigned to a traffic split. |
+| `lumewarp_session_affinity_total` | Counter | `router`, `result` (`hash`, `override`, `moved`, `none`); how a session-affinity router picked a member. |
+| `lumewarp_session_affinity_overrides` | Gauge | None; live session-affinity overrides in this process (expired entries are pruned when scraped). |
+| `lumewarp_session_affinity_sync_errors_total` | Counter | `reason` (`connect`, `timeout`, `script`); override-exchange failures with Redis, only with a shared-limits Redis. |
 | `lumewarp_vllm_queue_depth` | Gauge | `model`; last scraped `vllm:num_requests_waiting`. |
 | `lumewarp_vllm_kv_cache_usage` | Gauge | `model`; last scraped KV-cache usage, 0..1. |
 | `lumewarp_vllm_scrape_failures_total` | Counter | `upstream`; failed or incomplete vLLM metrics scrapes. |
@@ -44,7 +47,10 @@ the whole process, so counters are never reset by a config change.
 | `lumewarp_shared_limits_scopes` | Gauge | None; scopes in the last sync. |
 
 The `lumewarp_shared_limits_*` series exist only when
-`--shared-limits-redis-url` is set and carry no scope or key labels. The config-stream
+`--shared-limits-redis-url` is set and carry no scope or key labels. The same
+URL, namespace and interval carry the session-affinity override exchange;
+`lumewarp_session_affinity_sync_errors_total` exists only then too. The
+config-stream
 series move in control-plane mode; `lumewarp_config_info` is
 set only in standalone mode. Usage event counters and queue depth move in
 control-plane mode. Token and spend series move in both modes whenever the

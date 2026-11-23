@@ -716,6 +716,7 @@ mod tests {
             crate::runtime::EnvOptions {
                 id_key: Some(crate::a2a_ids::IdKey::from_secret(vec![7u8; 32]).unwrap()),
                 public_url: Some("https://gw.example.test".into()),
+                affinity: Default::default(),
             },
         );
         let slot: Snapshot = Arc::new(ArcSwapOption::empty());
@@ -814,6 +815,7 @@ mod tests {
             crate::runtime::EnvOptions {
                 id_key: Some(crate::a2a_ids::IdKey::from_secret(vec![7u8; 32]).unwrap()),
                 public_url: None,
+                affinity: Default::default(),
             },
         );
         let routing_table = RoutingTable::compile(

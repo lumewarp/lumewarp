@@ -605,6 +605,10 @@ async def compile_zone(
             if r.sticky is not StickyBy.NONE:
                 warnings.append(f"router {r.name!r}: sticky without a traffic split ignored")
             router.members.extend(_wire_members(members_of_router, model_name))
+        # Session affinity is valid with or without a traffic split.
+        router.session_affinity = r.session_affinity
+        if r.session_affinity_header:
+            router.session_affinity_header = r.session_affinity_header
         if r.retry_enabled:
             router.retry.CopyFrom(
                 pb.RetryPolicy(

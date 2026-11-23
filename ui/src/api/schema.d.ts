@@ -1395,11 +1395,18 @@ export interface paths {
          * Get Usage
          * @description Aggregate usage within the caller's existing team/key permission scope.
          *
-         *     `day,requested` is the default; `requested` is the name the client called, so a renamed
-         *     model, alias or router appears as separate before/after called names. Only an
-         *     installation admin may group or filter by `model`, `upstream_model`, `alias` or `router`
-         *     and their ids/`_missing` variants; any other caller gets 403 `routing_detail_forbidden`
-         *     and never receives `served_by`, `via_aliases`, `via_routers` or `upstream_model(s)`.
+         *     `day,requested` is the default; `requested` is the literal name the client called, so a
+         *     renamed model, alias or router appears as separate before/after names. `called` groups
+         *     by the catalog item instead (the alias, else the router, else the model, else the
+         *     literal), so a rename merges; it is visible to every caller, as are `status_class` and
+         *     `outcome`. Only an installation admin may group or filter by `model`, `upstream_model`,
+         *     `alias`, `router` or `fallback` and their ids/`_missing` variants; any other caller gets
+         *     403 `routing_detail_forbidden` and never receives `served_by`, `via_aliases`,
+         *     `via_routers` or `upstream_model(s)`.
+         *
+         *     Every row carries fallback/retry counts and p50/p95/p99 durations. The percentiles are
+         *     null on the monthly totals fast path, which stores no durations. `compare=previous`
+         *     adds the equal-length range immediately before `from` as ungrouped totals.
          *
          *     A plain member gets whole-team totals when neither `owner` nor `key` is grouped and no
          *     `user_id`/`service_account_id`/`key_id` filter is set. Grouping or filtering by owner or
@@ -1441,10 +1448,13 @@ export interface paths {
          * Get Usage Leaderboard
          * @description Rank called names, keys or owners inside the caller's readable teams.
          *
-         *     Rows are ordered by total tokens (input plus output) descending, then by spend; `rank`
-         *     restarts at 1 on each page. `by=requested` aggregates the name the client called across
-         *     the readable teams (a renamed model, alias or router shows as separate called names).
-         *     `by=key` and `by=owner` group within the team and return `team_id`.
+         *     Rows are ordered by total tokens (input plus output) descending, then by spend, or with
+         *     `order=cost` by spend, then by total tokens; `rank`
+         *     restarts at 1 on each page. `by=requested` aggregates the literal name the client called
+         *     across the readable teams (a renamed model, alias or router shows as separate names).
+         *     `by=called` groups the called catalog item instead (the alias, else the router, else the
+         *     model, else the literal), so a rename merges; it is visible to every caller. `by=key`
+         *     and `by=owner` group within the team and return `team_id`.
          *
          *     An installation admin ranks every team. Everyone else ranks only their readable teams;
          *     a plain member therefore sees another member in the ranking but not their identity:
@@ -4159,13 +4169,6 @@ export interface components {
             /** Next Cursor */
             next_cursor?: string | null;
         };
-        /** Page[UsageRowOut] */
-        Page_UsageRowOut_: {
-            /** Items */
-            items: components["schemas"]["UsageRowOut"][];
-            /** Next Cursor */
-            next_cursor?: string | null;
-        };
         /** Page[UserOut] */
         Page_UserOut_: {
             /** Items */
@@ -4643,6 +4646,17 @@ export interface components {
              */
             sticky_header?: string | null;
             /**
+             * Session Affinity
+             * @description Route every request with a session id to the same member model, with or without a traffic split.
+             * @default false
+             */
+            session_affinity: boolean;
+            /**
+             * Session Affinity Header
+             * @description Extra request header read as a session id after `x-lumewarp-id`; must look like `x-<name>-id` and needs `session_affinity`.
+             */
+            session_affinity_header?: string | null;
+            /**
              * Plugin Timeout Ms
              * @description WASM strategy only: how long one pick may run, in ms; 0 = the gateway default (60 s).
              * @default 0
@@ -4721,6 +4735,16 @@ export interface components {
             sticky: components["schemas"]["StickyBy"];
             /** Sticky Header */
             sticky_header: string | null;
+            /**
+             * Session Affinity
+             * @description Route every request with a session id to the same member model.
+             */
+            session_affinity: boolean;
+            /**
+             * Session Affinity Header
+             * @description Extra request header read as a session id after `x-lumewarp-id`; null = none.
+             */
+            session_affinity_header: string | null;
             /**
              * Plugin Timeout Ms
              * @description One strategy call's timeout in ms; 0 = the gateway's 60 s default.
@@ -4806,6 +4830,16 @@ export interface components {
              * @description Header whose value is hashed; required exactly when `sticky` is `header`.
              */
             sticky_header?: string | null;
+            /**
+             * Session Affinity
+             * @description Route every request with a session id to the same member model, with or without a traffic split.
+             */
+            session_affinity?: boolean | null;
+            /**
+             * Session Affinity Header
+             * @description Extra request header read as a session id after `x-lumewarp-id`; must look like `x-<name>-id` and needs `session_affinity`.
+             */
+            session_affinity_header?: string | null;
             /**
              * Plugin Timeout Ms
              * @description WASM strategy only: how long one pick may run, in ms; 0 = the gateway default (60 s).
@@ -5656,9 +5690,19 @@ export interface components {
             label: string;
             /**
              * Requested
-             * @description The called name; only for `by=requested`.
+             * @description The literal called name; only for `by=requested`.
              */
             requested?: string | null;
+            /**
+             * Called
+             * @description The called catalog item's current name; only for `by=called`.
+             */
+            called?: string | null;
+            /**
+             * Called Kind
+             * @description What the called item is; only for `by=called`.
+             */
+            called_kind?: ("model" | "alias" | "router" | "unknown") | null;
             /**
              * Team Id
              * @description The row's team for `by=key` and `by=owner`; null for `by=requested`.
@@ -5721,6 +5765,18 @@ export interface components {
             name: string;
         };
         /**
+         * UsagePage
+         * @description One page of usage rows plus the previous range's ungrouped totals.
+         */
+        UsagePage: {
+            /** Items */
+            items: components["schemas"]["UsageRowOut"][];
+            /** Next Cursor */
+            next_cursor?: string | null;
+            /** @description Ungrouped totals of the equal-length range immediately before `from`; null unless `compare=previous`. */
+            previous?: components["schemas"]["UsageTotalsOut"] | null;
+        };
+        /**
          * UsageRowOut
          * @description Aggregated usage with current catalog names and immutable upstream names.
          *
@@ -5730,11 +5786,18 @@ export interface components {
          *     alias/router grouping collects its refs and Served by; upstream-model grouping
          *     collects Served by. Default/scope-only grouping does not collect catalog refs.
          *
+         *     `called` is the catalog identity of what the client called (the alias, else the
+         *     router, else the model, else the literal `requested`), labelled with its current
+         *     name; `called_kind` says which and `called_names` lists every literal spelling
+         *     seen, so a rename merges. `status_class` buckets the HTTP status, `outcome` is the
+         *     gateway outcome and `fallback` is the grouped fallback flag.
+         *
          *     `error_count` and `total_duration_ms` describe how the group's requests ended
          *     (an error outcome, or a 4xx/5xx status that is not a client cancellation;
          *     summed duration, so the mean is the sum over `requests`). The LLM tabs
          *     ignore them; the MCP and A2A tabs read them in place of tokens and cost. The
-         *     monthly totals fast path (LLM requests only) reports both as 0.
+         *     monthly totals fast path (LLM requests only) reports both as 0, and its
+         *     percentile amounts as null.
          */
         UsageRowOut: {
             /**
@@ -5761,6 +5824,21 @@ export interface components {
             tool?: string | null;
             /** Requested */
             requested?: string | null;
+            /**
+             * Called
+             * @description Current name of the called catalog item; only when `called` is grouped. An unknown or rejected name keeps its literal spelling.
+             */
+            called?: string | null;
+            /**
+             * Called Kind
+             * @description What the called name is: `alias` wins over the `router` behind it, then `model`; `unknown` when no live catalog item matched.
+             */
+            called_kind?: ("model" | "alias" | "router" | "unknown") | null;
+            /**
+             * Called Names
+             * @description Literal called spellings in the group, so a rename merges into one row.
+             */
+            called_names?: string[];
             /** Model */
             model?: string | null;
             /** Model Id */
@@ -5775,6 +5853,18 @@ export interface components {
             router?: string | null;
             /** Router Id */
             router_id?: string | null;
+            /**
+             * Status Class
+             * @description HTTP status bucket; only when `status_class` is grouped. 429 is 4xx.
+             */
+            status_class?: ("2xx" | "4xx" | "5xx" | "other") | null;
+            /** @description Gateway request outcome; only when `outcome` is grouped. */
+            outcome?: components["schemas"]["RequestOutcome"] | null;
+            /**
+             * Fallback
+             * @description The grouped fallback flag; only when `fallback` is grouped.
+             */
+            fallback?: boolean | null;
             /** Upstream Models */
             upstream_models?: string[];
             /** Via Aliases */
@@ -5814,12 +5904,115 @@ export interface components {
              * @default 0
              */
             total_duration_ms: number;
+            /**
+             * Fallback Count
+             * @description Requests served by a fallback model.
+             * @default 0
+             */
+            fallback_count: number;
+            /**
+             * Retried Count
+             * @description Requests with more than one upstream attempt.
+             * @default 0
+             */
+            retried_count: number;
+            /**
+             * P50 Duration Ms
+             * @description Median request duration in ms; null on the monthly totals fast path.
+             */
+            p50_duration_ms?: number | null;
+            /**
+             * P95 Duration Ms
+             * @description 95th percentile request duration in ms; null on the monthly totals fast path.
+             */
+            p95_duration_ms?: number | null;
+            /**
+             * P99 Duration Ms
+             * @description 99th percentile request duration in ms; null on the monthly totals fast path.
+             */
+            p99_duration_ms?: number | null;
         };
         /**
          * UsageState
          * @enum {string}
          */
         UsageState: "unspecified" | "reported" | "missing" | "partial" | "invalid";
+        /**
+         * UsageTotalsOut
+         * @description Ungrouped amounts over one range (`compare=previous`).
+         */
+        UsageTotalsOut: {
+            /**
+             * Requests
+             * @description Requests in the range.
+             */
+            requests: number;
+            /**
+             * Prompt Tokens
+             * @description Summed input tokens.
+             */
+            prompt_tokens: number;
+            /**
+             * Completion Tokens
+             * @description Summed output tokens.
+             */
+            completion_tokens: number;
+            /**
+             * Total Tokens
+             * @description Input plus output tokens.
+             */
+            total_tokens: number;
+            /**
+             * Audio Ms
+             * @description Summed transcription audio duration in ms.
+             */
+            audio_ms: number;
+            /**
+             * Cost Nano Usd
+             * @description Summed cost in nano-USD.
+             */
+            cost_nano_usd: number;
+            /**
+             * Unknown Cost Count
+             * @description Requests whose cost is unknown.
+             */
+            unknown_cost_count: number;
+            /**
+             * Error Count
+             * @description Requests that failed (outcome or 4xx/5xx).
+             */
+            error_count: number;
+            /**
+             * Total Duration Ms
+             * @description Summed request duration in ms.
+             */
+            total_duration_ms: number;
+            /**
+             * Fallback Count
+             * @description Requests served by a fallback model.
+             */
+            fallback_count: number;
+            /**
+             * Retried Count
+             * @description Requests with more than one upstream attempt.
+             */
+            retried_count: number;
+            /**
+             * P50 Duration Ms
+             * @description Median request duration in ms; null when the range has no rows.
+             */
+            p50_duration_ms: number | null;
+            /**
+             * P95 Duration Ms
+             * @description 95th percentile request duration in ms; null when the range has no rows.
+             */
+            p95_duration_ms: number | null;
+            /**
+             * P99 Duration Ms
+             * @description 99th percentile request duration in ms; null when the range has no rows.
+             */
+            p99_duration_ms: number | null;
+        };
         /** UserCreate */
         UserCreate: {
             /**
@@ -12717,6 +12910,8 @@ export interface operations {
                 /** @description Only this zone; omitted reads every zone. */
                 zone?: string | null;
                 requested?: string | null;
+                /** @description Only rows whose called catalog item (or literal spelling) has this name; resolved like the `model` filter. */
+                called?: string | null;
                 model?: string | null;
                 upstream_model?: string | null;
                 alias?: string | null;
@@ -12730,6 +12925,8 @@ export interface operations {
                 router_missing?: boolean | null;
                 limit?: number;
                 cursor?: string | null;
+                /** @description `previous` adds the equal-length range immediately before `from` as ungrouped `previous` totals; omitted leaves it null. */
+                compare?: "previous" | null;
             };
             header?: never;
             path?: never;
@@ -12743,7 +12940,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Page_UsageRowOut_"];
+                    "application/json": components["schemas"]["UsagePage"];
                 };
             };
             /** @description Missing or invalid credentials */
@@ -12796,8 +12993,8 @@ export interface operations {
     getUsageLeaderboard: {
         parameters: {
             query: {
-                /** @description Board to rank: `requested` (called name), `key` (API key) or `owner` (user or service account). */
-                by: "requested" | "key" | "owner";
+                /** @description Board to rank: `requested` (literal called spelling), `called` (called catalog item, renames merged), `key` (API key) or `owner` (user or service account). */
+                by: "requested" | "called" | "key" | "owner";
                 /** @description Start of the range (inclusive); defaults to the start of the current UTC month. */
                 from?: string | null;
                 /** @description End of the range (exclusive); defaults to now. */
@@ -12810,6 +13007,8 @@ export interface operations {
                 zone?: string | null;
                 /** @description How many rows to return, 1 to 50; default 10. */
                 limit?: number;
+                /** @description What ranks the rows: `tokens` (total tokens, then spend; the default) or `cost` (spend, then total tokens). */
+                order?: "tokens" | "cost";
             };
             header?: never;
             path?: never;

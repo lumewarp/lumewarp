@@ -55,6 +55,12 @@ routers:
   #     - {name: canary, members: [{model: llama-vllm-next}], weight: 10}
   #   sticky: header               # none | header | team | key
   #   sticky_header: x-session-id
+  #   # Session affinity: the same session id (header x-lumewarp-id, then an
+  #   # extra header such as x-conversation-id, then the JSON body's session_id)
+  #   # lands on the same member model across every gateway; a session that had
+  #   # to move stays on the model it moved to while that model is healthy.
+  #   session_affinity: true
+  #   session_affinity_header: x-conversation-id
 
 # A second name for a model or a router, one level only. Names are unique across
 # models, aliases and routers, and a key's allowed_models lists the names it may

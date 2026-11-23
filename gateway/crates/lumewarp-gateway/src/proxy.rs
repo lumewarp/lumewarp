@@ -77,6 +77,28 @@ pub struct RequestFields<'a> {
     stream_options: Option<&'a RawValue>,
 }
 
+/// The top-level `session_id` of a JSON body when it is a string, read only
+/// for an affinity router whose request named no session header. Parsed apart
+/// from [`RequestFields`] so that any problem with it (another type, a
+/// duplicate key) is simply no session: the body is passed through untouched
+/// and a router without affinity never looks at the field.
+pub fn body_session_id(body: &[u8]) -> Option<Cow<'_, str>> {
+    #[derive(Deserialize)]
+    struct SessionField<'a> {
+        #[serde(default, borrow)]
+        session_id: Option<&'a RawValue>,
+    }
+    let raw = serde_json::from_slice::<SessionField>(body)
+        .ok()?
+        .session_id?;
+    match serde_json::from_str::<&str>(raw.get()) {
+        Ok(text) => Some(Cow::Borrowed(text)),
+        Err(_) => serde_json::from_str::<String>(raw.get())
+            .ok()
+            .map(Cow::Owned),
+    }
+}
+
 /// Keeps an explicit JSON `null` as `Some(raw null)`: plain `Option`
 /// deserialization would turn it into `None` and a splice would then add a
 /// duplicate key.
@@ -454,6 +476,13 @@ pub async fn forward(
         );
     }
     let router = &*called.target;
+    // Only an affinity router reads a session id; headers first, then the
+    // configured header, then the JSON body field.
+    let session = router.affinity.as_ref().and_then(|affinity| {
+        crate::affinity::session_hash(&parts.headers, affinity.header.as_ref(), || {
+            fields.is_some().then(|| body_session_id(&body)).flatten()
+        })
+    });
     let permit = match routing_table.runtime.limiters.admit(&caller) {
         Ok(permit) => permit,
         Err(limited) => {
@@ -479,7 +508,14 @@ pub async fn forward(
     }
     let mut skipped = Skipped::default();
     let Some((mut guard, initial_fallback, split)) = routing_table
-        .acquire_initial(called, endpoint, &caller, &parts.headers, &mut skipped)
+        .acquire_initial(
+            called,
+            endpoint,
+            &caller,
+            &parts.headers,
+            session,
+            &mut skipped,
+        )
         .await
     else {
         let handles = routing_table.rejected_model(&caller, &model, endpoint);
@@ -813,6 +849,7 @@ pub async fn forward(
                     headers,
                     &tried[..attempt],
                     split,
+                    session,
                     &mut skipped,
                 )
                 .await
@@ -1395,6 +1432,36 @@ mod tests {
         assert_eq!(
             fields.rewrite(body, br#""actual""#, None),
             expected.as_bytes()
+        );
+    }
+
+    #[test]
+    fn body_session_id_is_read_and_left_in_the_body() {
+        let body = br#"{"model":"public","session_id":"abc","extra":1}"#;
+        assert_eq!(body_session_id(body).as_deref(), Some("abc"));
+        // Only the model is spliced; the session id stays byte-identical.
+        let fields = RequestFields::parse(body).unwrap();
+        let rewritten =
+            String::from_utf8(fields.rewrite(body, br#""actual""#, None).to_vec()).unwrap();
+        assert_eq!(
+            rewritten,
+            r#"{"model":"actual","session_id":"abc","extra":1}"#
+        );
+        // A non-string value or a duplicate key is no session, never a rejected
+        // request: the body still parses and passes through.
+        for body in [
+            br#"{"model":"public","session_id":7}"#.as_slice(),
+            br#"{"model":"public","session_id":null}"#.as_slice(),
+            br#"{"model":"public","session_id":{"a":1}}"#.as_slice(),
+            br#"{"model":"public","session_id":"a","session_id":"b"}"#.as_slice(),
+        ] {
+            assert!(RequestFields::parse(body).is_ok());
+            assert!(body_session_id(body).is_none());
+        }
+        // An escaped string is still a string.
+        assert_eq!(
+            body_session_id(br#"{"model":"public","session_id":"a\nb"}"#).as_deref(),
+            Some("a\nb")
         );
     }
 

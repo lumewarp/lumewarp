@@ -13,8 +13,11 @@ import { signIn, VIEWER } from "./selfService";
  */
 
 const BREAK_GLASS = "e2e-break-glass-password";
-/** The JS a visitor downloads on arrival must stay at or under this many gzip-9 bytes. */
-const BUDGET = 250_000;
+/**
+ * The JS a visitor downloads on arrival must stay at or under this many gzip-9 bytes. Arrival is the Usage page, so
+ * its charts (recharts through shadcn `chart`, about 122 kB gzip-9 in the lazy chart chunk) are part of it.
+ */
+const BUDGET = 375_000;
 
 /** The JS files a page actually requested, by basename. */
 function jsRequests(page: Page) {

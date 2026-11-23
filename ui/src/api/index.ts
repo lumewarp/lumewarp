@@ -39,6 +39,7 @@ export type McpDiscover = Schemas["McpDiscoverOut"];
 export type CatalogEntry = Schemas["CatalogEntryOut"];
 export type CatalogKind = Schemas["CatalogKind"];
 export type UsageRow = Schemas["UsageRowOut"];
+export type UsageTotals = Schemas["UsageTotalsOut"];
 export type RequestRow = Schemas["RequestOut"];
 export type LeaderboardRow = Schemas["UsageLeaderboardRowOut"];
 export type RequestOutcome = Schemas["RequestOutcome"];
@@ -270,6 +271,12 @@ export const api = {
 
   usage: (query: UsageQuery) =>
     listAll((c) => unwrap(client.GET("/api/v1/usage", { params: { query: { ...query, ...q(c) } } }))),
+  /** The ungrouped totals of the range and, with `compare=previous`, of the equal-length range before it. */
+  usageTotals: (query: UsageQuery) =>
+    unwrap(client.GET("/api/v1/usage", { params: { query: { ...query, group_by: ",", compare: "previous", limit: 1 } } })).then((page) => ({
+      current: page.items[0] as UsageRow | undefined,
+      previous: page.previous ?? null,
+    })),
   /** The top rows of one ranking (called name, key or owner) over the readable teams. */
   usageLeaderboard: (query: LeaderboardQuery) =>
     unwrap(client.GET("/api/v1/usage/leaderboard", { params: { query } })).then((page) => page.items),

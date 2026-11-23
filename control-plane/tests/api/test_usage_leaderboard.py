@@ -9,14 +9,17 @@ import pytest
 from lumewarp_control_plane.models import TeamRole, TrafficKind
 from tests.api.helpers import ADMIN_AUTH, auth, usage_event, user_with_token
 from tests.factories import (
+    make_alias,
     make_key,
     make_member,
+    make_model,
     make_org,
     make_org_admin,
     make_service_account,
     make_team,
     make_user,
 )
+from tests.usage.test_catalog_provenance import rename_at
 
 START = datetime(2026, 3, 1, tzinfo=UTC)
 END = datetime(2026, 4, 1, tzinfo=UTC)
@@ -155,6 +158,24 @@ async def test_requested_board_ties_on_tokens_break_by_spend(client, committed) 
     assert all(row["unknown_cost_count"] == 0 for row in rows)
 
 
+async def test_order_cost_ranks_by_spend_then_tokens(client, committed) -> None:
+    world = await make_world(committed)
+    rows = board(client, by="requested", team_id=str(world.team.id), order="cost")
+    # Spend decides: m-model (1000) outranks c-model (500) despite fewer tokens.
+    assert [row["requested"] for row in rows] == [
+        "shared",
+        "m-model",
+        "c-model",
+        "s-model",
+        "t-model",
+    ]
+    assert [row["rank"] for row in rows] == [1, 2, 3, 4, 5]
+    # The top of a token board would miss a cheap-token, high-spend name; the cost board keeps it.
+    top = board(client, by="requested", team_id=str(world.team.id), order="cost", limit=2)
+    assert [row["requested"] for row in top] == ["shared", "m-model"]
+    assert leaderboard(client, by="requested", order="spend").status_code == 422
+
+
 async def test_key_board_names_only_readable_keys(client, committed) -> None:
     world = await make_world(committed)
     ranked_ids = [world.member_key.id, world.colleague_key.id, world.sa_key.id, world.admin_key.id]
@@ -241,6 +262,40 @@ async def test_owner_board_anonymises_unreadable_members(client, committed) -> N
             str(world.team_admin.id),
         ]
         assert all(row["is_me"] is False for row in rows)
+
+
+async def test_called_board_merges_renames(client, committed) -> None:
+    team = await make_team(committed)
+    member, member_token = await user_with_token(committed)
+    await make_member(committed, team, member)
+    key = await make_key(committed, team, await make_user(committed))
+    model_name = f"m-{uuid.uuid4().hex}"
+    old_name = f"old-{uuid.uuid4().hex}"
+    new_name = f"new-{uuid.uuid4().hex}"
+    model = await make_model(committed, model_name)
+    alias = await make_alias(committed, old_name, model)
+    first = usage_event(key, ts=TS, requested=old_name, prompt_tokens=10, completion_tokens=5)
+    first.alias, first.alias_id = old_name, alias.id
+    first.model, first.model_id = model_name, model.id
+    committed.add(first)
+    await rename_at(committed, alias, new_name)
+    second = usage_event(key, ts=TS, requested=new_name, prompt_tokens=20, completion_tokens=10)
+    second.alias, second.alias_id = new_name, alias.id
+    second.model, second.model_id = model_name, model.id
+    committed.add(second)
+    await committed.commit()
+
+    rows = board(client, by="called", team_id=str(team.id))
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row["called"], row["called_kind"], row["label"]) == (new_name, "alias", new_name)
+    assert row["requests"] == 2
+    assert row["total_tokens"] == 45
+    assert row["requested"] is None
+
+    # The called name is not routing detail: a plain member sees the same board.
+    member_rows = board(client, auth(member_token), by="called", team_id=str(team.id))
+    assert [(item["called"], item["total_tokens"]) for item in member_rows] == [(new_name, 45)]
 
 
 async def test_board_defaults_to_llm_and_kind_selects_the_protocol(client, committed) -> None:

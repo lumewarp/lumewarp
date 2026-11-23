@@ -58,7 +58,8 @@ TABLES = (*ENTITY_TABLES, *EDGE_TABLES, *TARGET_TABLES)
 # 7: routers carry `reasoning_default_level`.
 # 8: model deployments live in their own table, and upstreams + MCP servers + A2A agents
 #    carry their zone.
-FORMAT_VERSION = 8
+# 9: routers carry session affinity (`session_affinity`, `session_affinity_header`).
+FORMAT_VERSION = 9
 
 
 def _encode(value: Any) -> Any:

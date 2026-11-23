@@ -119,11 +119,18 @@ pub fn request_span(enabled: bool, headers: &HeaderMap, endpoint: &'static str) 
         fallback = empty,
         config_version = empty,
         status = empty,
-        stream = empty
+        stream = empty,
+        "lumewarp.affinity" = empty
     );
     let context = TraceContextPropagator::new().extract(&Headers(headers));
     let _ = span.set_parent(context);
     span
+}
+
+/// The affinity decision of this request: `hash`, `override`, `moved` or
+/// `none`. Recorded on the request span only; the session id never is.
+pub fn affinity(result: &'static str) {
+    tracing::Span::current().record("lumewarp.affinity", result);
 }
 
 pub fn inject(headers: &mut HeaderMap) {

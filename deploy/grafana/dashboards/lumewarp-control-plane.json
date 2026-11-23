@@ -1,9 +1,9 @@
 {
   "uid": "lumewarp-control-plane",
   "title": "Lumewarp / Control plane",
-  "description": "Control-plane metrics; panels stay empty until CP /metrics is scraped. No team, user or API-key dimensions.",
+  "description": "Config pipeline and ingestion health at a glance, per-zone and per-gateway state tables, compile and stream distributions, then authorization, key lifecycle and plugin trends. Panels stay empty until control-plane /metrics is scraped; there are no team, user or API-key dimensions.",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 3,
   "editable": true,
   "tags": [
     "lumewarp",
@@ -54,16 +54,815 @@
   "panels": [
     {
       "id": 1,
-      "title": "Compile duration p99",
-      "description": "",
-      "type": "timeseries",
+      "type": "row",
+      "title": "At a glance",
+      "description": "Config pipeline and ingestion health for the selected namespaces.",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "targets": []
+    },
+    {
+      "id": 2,
+      "title": "Connected gateway sessions",
+      "description": "Sessions on every control-plane replica; zero means no gateway can receive config.",
+      "type": "stat",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "x": 0,
-        "y": 0,
+        "y": 1,
+        "w": 4,
+        "h": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(lumewarp_cp_gateway_sessions{namespace=~\"${namespace:regex}\"})",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "sessions",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Outbox pending (worst zone)",
+      "description": "Highest per-zone backlog of undelivered config rows; the value is the database count, so replicas see the same number.",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 1,
+        "w": 4,
+        "h": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 100
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(lumewarp_cp_outbox_pending{namespace=~\"${namespace:regex}\"})",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "pending",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Compile failures in 1h",
+      "description": "Compiles that raised CompileError; the previous version stays current.",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 1,
+        "w": 4,
+        "h": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(lumewarp_cp_compile_failures_total{namespace=~\"${namespace:regex}\"}[1h]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "failures",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "NACKs in 1h",
+      "description": "Config updates a gateway refused. INVALID_CONFIG quarantines the version for the zone; UNSUPPORTED_FEATURE skips it for that gateway.",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 1,
+        "w": 4,
+        "h": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(lumewarp_cp_gateway_acks_total{namespace=~\"${namespace:regex}\",result=\"nack\"}[1h]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "nacks",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Usage events skipped in 1h",
+      "description": "Events rejected by per-event validation: malformed fields, a reused request id or a key mismatch.",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 1,
+        "w": 4,
+        "h": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(lumewarp_cp_usage_events_skipped_total{namespace=~\"${namespace:regex}\"}[1h]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "skipped",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Compiles / minute",
+      "description": "Committed compiles per minute; an unchanged snapshot is still compiled, so this is the loop rate, not the change rate.",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 20,
+        "y": 1,
+        "w": 4,
+        "h": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "none"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "none",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(lumewarp_cp_compile_duration_seconds_count{namespace=~\"${namespace:regex}\"}[$__rate_interval])) * 60",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "compiles/min",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "row",
+      "title": "Zones and gateways",
+      "description": "Instant tables for per-zone config state and per-gateway version.",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 7,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "targets": []
+    },
+    {
+      "id": 9,
+      "title": "Per-zone config state",
+      "description": "Latest published version, connected sessions and outbox backlog per zone. Sessions are summed across replicas; version and backlog use the maximum because every replica reports the same value.",
+      "type": "table",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false,
+            "filterable": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "fields": "",
+          "countRows": false
+        }
+      },
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "zone",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Time 1": true,
+              "Time 2": true,
+              "Time 3": true,
+              "Time 4": true,
+              "Time 5": true,
+              "Time 6": true,
+              "Time 7": true,
+              "Time 8": true
+            },
+            "renameByName": {
+              "zone": "Zone",
+              "Value #A": "Version",
+              "Value #B": "Sessions",
+              "Value #C": "Outbox pending",
+              "Value 1": "Version",
+              "Value 2": "Sessions",
+              "Value 3": "Outbox pending"
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (zone) (lumewarp_cp_config_version{namespace=~\"${namespace:regex}\"})",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{zone}}",
+          "format": "table",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (zone) (lumewarp_cp_gateway_sessions{namespace=~\"${namespace:regex}\"})",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{zone}}",
+          "format": "table",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "C",
+          "expr": "max by (zone) (lumewarp_cp_outbox_pending{namespace=~\"${namespace:regex}\"})",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{zone}}",
+          "format": "table",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "Gateways",
+      "description": "Active config version and stream state per gateway instance; a standalone YAML gateway reports version 0 and no stream.",
+      "type": "table",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false,
+            "filterable": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Stream connected"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "Disconnected",
+                        "color": "red",
+                        "index": 0
+                      },
+                      "1": {
+                        "text": "Connected",
+                        "color": "green",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Config version"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "fields": "",
+          "countRows": false
+        }
+      },
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "instance",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Time 1": true,
+              "Time 2": true,
+              "Time 3": true,
+              "Time 4": true,
+              "Time 5": true,
+              "Time 6": true,
+              "Time 7": true,
+              "Time 8": true
+            },
+            "renameByName": {
+              "instance": "Gateway",
+              "Value #A": "Config version",
+              "Value #B": "Stream connected",
+              "Value 1": "Config version",
+              "Value 2": "Stream connected"
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "lumewarp_config_version{namespace=~\"${namespace:regex}\"}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{instance}}",
+          "format": "table",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "B",
+          "expr": "lumewarp_config_stream_connected{namespace=~\"${namespace:regex}\"}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{instance}}",
+          "format": "table",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "row",
+      "title": "Compile",
+      "description": "How long the compiler takes and how it trends.",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "targets": []
+    },
+    {
+      "id": 12,
+      "title": "Compile duration distribution",
+      "description": "Histogram of committed compile durations, including compiles whose content is unchanged.",
+      "type": "heatmap",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 17,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "scaleDistribution": {
+              "type": "linear"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "calculate": true,
+        "calculation": {
+          "xBuckets": {
+            "mode": "size",
+            "value": "auto"
+          },
+          "yBuckets": {
+            "mode": "count",
+            "value": 20
+          }
+        },
+        "cellGap": 1,
+        "color": {
+          "mode": "scheme",
+          "scheme": "Oranges",
+          "fill": "dark-orange",
+          "scale": "exponential",
+          "exponent": 0.5,
+          "steps": 64
+        },
+        "legend": {
+          "show": true
+        },
+        "rowsFrame": {
+          "layout": "auto"
+        },
+        "tooltip": {
+          "mode": "single",
+          "showColorScale": false
+        },
+        "yAxis": {
+          "axisPlacement": "left",
+          "unit": "s",
+          "reverse": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (le) (rate(lumewarp_cp_compile_duration_seconds_bucket{namespace=~\"${namespace:regex}\"}[$__rate_interval]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{le}}",
+          "format": "heatmap",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "title": "Compile duration p99",
+      "description": "p99 of committed compiles.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 17,
         "w": 12,
         "h": 8
       },
@@ -74,14 +873,6 @@
           "color": {
             "mode": "palette-classic"
           },
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false
-          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -90,6 +881,14 @@
                 "value": null
               }
             ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
           }
         },
         "overrides": []
@@ -121,213 +920,24 @@
       ]
     },
     {
-      "id": 2,
-      "title": "Compile failures / second",
-      "description": "",
-      "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 0,
-        "w": 12,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "ops",
-          "min": 0,
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum(rate(lumewarp_cp_compile_failures_total{namespace=~\"${namespace:regex}\"}[$__rate_interval]))",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "legendFormat": "failures",
-          "range": true
-        }
-      ]
-    },
-    {
-      "id": 3,
-      "title": "Outbox pending",
-      "description": "",
-      "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
+      "id": 14,
+      "type": "row",
+      "title": "Config stream",
+      "description": "ACK/NACK and version movement between the control plane and its gateways.",
+      "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 8,
-        "w": 12,
-        "h": 8
+        "y": 25,
+        "w": 24,
+        "h": 1
       },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "min": 0,
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "lumewarp_cp_outbox_pending{namespace=~\"${namespace:regex}\"}",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "legendFormat": "{{instance}}",
-          "range": true
-        }
-      ]
+      "panels": [],
+      "targets": []
     },
     {
-      "id": 4,
-      "title": "Connected gateway sessions",
-      "description": "",
-      "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 8,
-        "w": 12,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "min": 0,
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "lumewarp_cp_gateway_sessions{namespace=~\"${namespace:regex}\"}",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "legendFormat": "{{instance}}",
-          "range": true
-        }
-      ]
-    },
-    {
-      "id": 5,
+      "id": 15,
       "title": "Gateway ACK / NACK rate",
-      "description": "",
+      "description": "Each valid ACK or NACK of a pending update; protocol errors are not counted.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -335,8 +945,8 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 16,
-        "w": 12,
+        "y": 26,
+        "w": 8,
         "h": 8
       },
       "fieldConfig": {
@@ -346,14 +956,6 @@
           "color": {
             "mode": "palette-classic"
           },
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false
-          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -362,6 +964,14 @@
                 "value": null
               }
             ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
           }
         },
         "overrides": []
@@ -393,18 +1003,18 @@
       ]
     },
     {
-      "id": 6,
+      "id": 16,
       "title": "Config versions",
-      "description": "Gateway version and CP published version; standalone gateway version is zero.",
+      "description": "Gateway active version and control-plane published version; a standalone gateway reports zero.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
-        "x": 12,
-        "y": 16,
-        "w": 12,
+        "x": 8,
+        "y": 26,
+        "w": 8,
         "h": 8
       },
       "fieldConfig": {
@@ -414,14 +1024,6 @@
           "color": {
             "mode": "palette-classic"
           },
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false
-          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -430,6 +1032,14 @@
                 "value": null
               }
             ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
           }
         },
         "overrides": []
@@ -465,32 +1075,49 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "{{job}} {{instance}}",
+          "legendFormat": "{{zone}}",
           "range": true
         }
       ]
     },
     {
-      "id": 7,
-      "title": "Usage ingestion / second",
-      "description": "",
+      "id": 17,
+      "title": "Outbox pending",
+      "description": "Undelivered config rows per zone; one COUNT every 5 s, never per scrape.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
-        "x": 0,
-        "y": 24,
-        "w": 12,
+        "x": 16,
+        "y": 26,
+        "w": 8,
         "h": 8
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "ops",
+          "unit": "short",
           "min": 0,
           "color": {
             "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 100
+              }
+            ]
           },
           "custom": {
             "drawStyle": "line",
@@ -499,6 +1126,72 @@
             "fillOpacity": 8,
             "showPoints": "never",
             "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "lumewarp_cp_outbox_pending{namespace=~\"${namespace:regex}\"}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{zone}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "type": "row",
+      "title": "Sessions and ingestion",
+      "description": "Stream connections and usage-event intake.",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 34,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "targets": []
+    },
+    {
+      "id": 19,
+      "title": "Connected gateway sessions",
+      "description": "Sessions per control-plane instance.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 35,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
           },
           "thresholds": {
             "mode": "absolute",
@@ -508,6 +1201,82 @@
                 "value": null
               }
             ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "lumewarp_cp_gateway_sessions{namespace=~\"${namespace:regex}\"}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{instance}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "title": "Usage ingestion / second",
+      "description": "Events accepted by a committed UsageService.Report.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 35,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
           }
         },
         "overrides": []
@@ -539,18 +1308,18 @@
       ]
     },
     {
-      "id": 8,
+      "id": 21,
       "title": "Usage skipped / second",
-      "description": "",
+      "description": "Per-event validation failures, by reason.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
-        "x": 12,
-        "y": 24,
-        "w": 12,
+        "x": 16,
+        "y": 35,
+        "w": 8,
         "h": 8
       },
       "fieldConfig": {
@@ -560,14 +1329,6 @@
           "color": {
             "mode": "palette-classic"
           },
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false
-          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -576,6 +1337,14 @@
                 "value": null
               }
             ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
           }
         },
         "overrides": []
@@ -607,9 +1376,24 @@
       ]
     },
     {
-      "id": 9,
+      "id": 22,
+      "type": "row",
+      "title": "Authz and keys",
+      "description": "Authorization decisions and key lifecycle.",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 43,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "targets": []
+    },
+    {
+      "id": 23,
       "title": "Authorization decisions / second",
-      "description": "",
+      "description": "Every Authorizer.check and item of batch_check, by backend and decision.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -617,8 +1401,8 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 32,
-        "w": 12,
+        "y": 44,
+        "w": 8,
         "h": 8
       },
       "fieldConfig": {
@@ -628,14 +1412,6 @@
           "color": {
             "mode": "palette-classic"
           },
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false
-          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -644,6 +1420,14 @@
                 "value": null
               }
             ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
           }
         },
         "overrides": []
@@ -675,18 +1459,18 @@
       ]
     },
     {
-      "id": 10,
+      "id": 24,
       "title": "Suspended keys / second",
-      "description": "",
+      "description": "Keys moved from active to suspended, by reason.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
-        "x": 12,
-        "y": 32,
-        "w": 12,
+        "x": 8,
+        "y": 44,
+        "w": 8,
         "h": 8
       },
       "fieldConfig": {
@@ -696,14 +1480,6 @@
           "color": {
             "mode": "palette-classic"
           },
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false
-          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -712,6 +1488,14 @@
                 "value": null
               }
             ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
           }
         },
         "overrides": []
@@ -743,18 +1527,18 @@
       ]
     },
     {
-      "id": 11,
+      "id": 25,
       "title": "Key reconciliation age",
-      "description": "Freshness budget 15 minutes; zero timestamp means no successful reconciliation.",
+      "description": "Seconds since the key reconciler's last fully successful step; a zero timestamp means it never succeeded.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
-        "x": 0,
-        "y": 40,
-        "w": 12,
+        "x": 16,
+        "y": 44,
+        "w": 8,
         "h": 8
       },
       "fieldConfig": {
@@ -764,6 +1548,23 @@
           "color": {
             "mode": "palette-classic"
           },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 900
+              },
+              {
+                "color": "red",
+                "value": 1800
+              }
+            ]
+          },
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "linear",
@@ -771,15 +1572,6 @@
             "fillOpacity": 8,
             "showPoints": "never",
             "spanNulls": false
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
           }
         },
         "overrides": []
@@ -811,18 +1603,33 @@
       ]
     },
     {
-      "id": 12,
+      "id": 26,
+      "type": "row",
+      "title": "Gateways and plugins",
+      "description": "Stream connectivity, compile failures and plugin descriptors the control plane ignored.",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 52,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "targets": []
+    },
+    {
+      "id": 27,
       "title": "Gateway stream connected",
-      "description": "0 disconnected, 1 connected. Standalone YAML mode always shows zero.",
+      "description": "0 disconnected, 1 connected; standalone YAML mode always shows zero.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
-        "x": 12,
-        "y": 40,
-        "w": 12,
+        "x": 0,
+        "y": 53,
+        "w": 8,
         "h": 8
       },
       "fieldConfig": {
@@ -832,6 +1639,19 @@
           "color": {
             "mode": "palette-classic"
           },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "linear",
@@ -839,15 +1659,6 @@
             "fillOpacity": 8,
             "showPoints": "never",
             "spanNulls": false
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
           }
         },
         "overrides": []
@@ -879,18 +1690,18 @@
       ]
     },
     {
-      "id": 13,
-      "title": "Hello plugins ignored / second",
-      "description": "Plugin descriptors and capabilities a gateway reported past the per-gateway limit or with an invalid name, by kind.",
+      "id": 28,
+      "title": "Compile failures / second",
+      "description": "Compiles that raised CompileError; the previous version stays current.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
-        "x": 0,
-        "y": 48,
-        "w": 12,
+        "x": 8,
+        "y": 53,
+        "w": 8,
         "h": 8
       },
       "fieldConfig": {
@@ -900,6 +1711,15 @@
           "color": {
             "mode": "palette-classic"
           },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "linear",
@@ -907,6 +1727,57 @@
             "fillOpacity": 8,
             "showPoints": "never",
             "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(lumewarp_cp_compile_failures_total{namespace=~\"${namespace:regex}\"}[$__rate_interval]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "failures",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 29,
+      "title": "Hello plugins ignored / second",
+      "description": "Plugin descriptors and capabilities reported past the per-gateway limit or with an invalid name, by kind.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 53,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
           },
           "thresholds": {
             "mode": "absolute",
@@ -916,6 +1787,14 @@
                 "value": null
               }
             ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
           }
         },
         "overrides": []

@@ -26,6 +26,7 @@ use lumewarp_router_api::{
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 
 use crate::{
+    affinity::{self},
     auth::Caller,
     balance::{self, Latency, Scrape, VllmLoad},
     health::{Breaker, Probe, Target},
@@ -125,12 +126,7 @@ impl CandidateSource for PoolSource<'_> {
         self.pool.first_member + i
     }
     fn weight(&self, i: usize) -> u64 {
-        self.pool.cumulative_weights[i]
-            - if i == 0 {
-                0
-            } else {
-                self.pool.cumulative_weights[i - 1]
-            }
+        self.pool.weight(i)
     }
     fn in_flight(&self, i: usize) -> usize {
         self.pool.models[i].in_flight.load(Ordering::Relaxed)
@@ -147,6 +143,47 @@ impl CandidateSource for PoolSource<'_> {
     }
     fn weighted_index(&self, draw: u64) -> usize {
         self.pool.weighted_index(draw)
+    }
+}
+
+/// `lumewarp_session_affinity_total{result}` values, indexed as in
+/// [`crate::metrics::AFFINITY_RESULTS`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AffinityResult {
+    Hash,
+    Override,
+    Moved,
+    None,
+}
+
+impl AffinityResult {
+    fn index(self) -> usize {
+        match self {
+            Self::Hash => 0,
+            Self::Override => 1,
+            Self::Moved => 2,
+            Self::None => 3,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        crate::metrics::AFFINITY_RESULTS[self.index()]
+    }
+}
+
+/// What one router needs at request time for session affinity: its interning
+/// id, the extra header to read, and the pre-registered result counters.
+pub struct Affinity {
+    pub id: u32,
+    pub name: Arc<str>,
+    pub header: Option<HeaderName>,
+    counters: [Counter; crate::metrics::AFFINITY_RESULTS.len()],
+}
+
+impl Affinity {
+    fn settled(&self, result: AffinityResult) {
+        self.counters[result.index()].inc();
+        crate::telemetry::affinity(result.label());
     }
 }
 
@@ -274,6 +311,9 @@ pub struct Router {
     split_requests: Vec<Counter>,
     sticky: StickyBy,
     sticky_header: Option<HeaderName>,
+    /// `Some` when the router sets `session_affinity`; the session itself is
+    /// read per request by the proxy.
+    pub affinity: Option<Arc<Affinity>>,
     strategy: CompiledStrategy,
     strategy_headers: Vec<String>,
     pub retry: Option<RetryPolicy>,
@@ -348,6 +388,7 @@ impl Router {
             split_requests: Vec::new(),
             sticky: StickyBy::None,
             sticky_header: None,
+            affinity: None,
             strategy: CompiledStrategy::Builtin(Builtin::Weighted),
             strategy_headers: Vec::new(),
             retry: None,
@@ -388,26 +429,28 @@ impl Router {
     }
 
     /// Picks the split for a request: by the sticky hash when the router is
-    /// sticky and the request carries the input, else by a random draw.
+    /// sticky and the request carries the input, by the session hash when the
+    /// router has session affinity, else by a random draw.
     /// Allocation-free: the header value / ids are hashed in place.
-    pub fn split_for(&self, headers: &HeaderMap, caller: &Caller) -> usize {
+    pub fn split_for(&self, headers: &HeaderMap, caller: &Caller, session: Option<u64>) -> usize {
         if self.pools.len() <= 1 {
             return 0;
         }
-        let key: Option<&[u8]> = match (self.sticky, caller) {
+        let hash: Option<u64> = match (self.sticky, caller) {
             (StickyBy::Header, _) => self
                 .sticky_header
                 .as_ref()
                 .and_then(|name| headers.get(name))
-                .map(HeaderValue::as_bytes),
+                .map(|value| balance::sticky_hash(value.as_bytes())),
             (StickyBy::Team, Caller::Key(key)) if !key.team_id.is_empty() => {
-                Some(key.team_id.as_bytes())
+                Some(balance::sticky_hash(key.team_id.as_bytes()))
             }
-            (StickyBy::Key, Caller::Key(key)) => Some(key.key_id.as_bytes()),
+            (StickyBy::Key, Caller::Key(key)) => Some(balance::sticky_hash(key.key_id.as_bytes())),
+            (StickyBy::None, _) => session,
             _ => None,
         };
-        let draw = match key {
-            Some(key) => balance::scale(balance::sticky_hash(key), self.split_total),
+        let draw = match hash {
+            Some(hash) => balance::scale(hash, self.split_total),
             None => fastrand::u64(0..self.split_total),
         };
         self.split_cumulative.partition_point(|&w| w <= draw)
@@ -429,29 +472,82 @@ impl Pool {
         now: u64,
         strict: bool,
     ) -> PickStep {
-        let eligible = |i: usize| {
-            let d = &self.models[i];
-            !excluded.is_some_and(|tried| tried.contains(&d.label))
-                && (excluded.is_none() || d.breaker.retry_after.load(Ordering::Relaxed) <= now)
-                && if strict {
-                    d.healthy.load(Ordering::Acquire)
-                        && d.model_healthy.load(Ordering::Acquire)
-                        && (d.circuit.is_none() || d.breaker.available(now))
-                } else {
-                    // Failing open never piles onto a half-open trial: the
-                    // pick could not be admitted, while another candidate can.
-                    d.circuit.is_none() || !d.breaker.trial_in_progress()
-                }
-        };
+        let eligible = |i: usize| model_eligible(&self.models[i], excluded, now, strict);
         let source = PoolSource { pool: self, now };
         let candidates = Candidates::new(&source, &eligible);
         strategy.pick_step(req, &candidates, &mut ThreadRng)
+    }
+
+    fn weight(&self, i: usize) -> u64 {
+        self.cumulative_weights[i]
+            - if i == 0 {
+                0
+            } else {
+                self.cumulative_weights[i - 1]
+            }
+    }
+
+    /// The member a session hash selects: weighted rendezvous hashing over the
+    /// eligible members. `moved` is true when the unfiltered best member was
+    /// ineligible, so the caller records an override. Allocation-free.
+    fn affinity_pick(
+        &self,
+        session: u64,
+        excluded: Option<&[LabelId]>,
+        now: u64,
+        strict: bool,
+    ) -> Option<(usize, bool)> {
+        let mut ideal: Option<(usize, f64)> = None;
+        let mut best: Option<(usize, f64)> = None;
+        for i in 0..self.models.len() {
+            let weight = self.weight(i);
+            if weight == 0 {
+                continue;
+            }
+            let score = affinity_score(session, &self.models[i].name, weight);
+            if ideal.is_none_or(|(_, best)| score > best) {
+                ideal = Some((i, score));
+            }
+            if model_eligible(&self.models[i], excluded, now, strict)
+                && best.is_none_or(|(_, best)| score > best)
+            {
+                best = Some((i, score));
+            }
+        }
+        let (index, _) = best?;
+        let moved = ideal.is_some_and(|(ideal, _)| ideal != index);
+        Some((index, moved))
     }
 
     fn weighted_index(&self, draw: u64) -> usize {
         self.cumulative_weights
             .partition_point(|&weight| weight <= draw)
     }
+}
+
+/// A candidate a strategy (or affinity) may pick right now. `strict` is the
+/// fail-closed pass; the second pass fails open without piling onto a trial.
+fn model_eligible(d: &Model, excluded: Option<&[LabelId]>, now: u64, strict: bool) -> bool {
+    !excluded.is_some_and(|tried| tried.contains(&d.label))
+        && (excluded.is_none() || d.breaker.retry_after.load(Ordering::Relaxed) <= now)
+        && if strict {
+            d.healthy.load(Ordering::Acquire)
+                && d.model_healthy.load(Ordering::Acquire)
+                && (d.circuit.is_none() || d.breaker.available(now))
+        } else {
+            d.circuit.is_none() || !d.breaker.trial_in_progress()
+        }
+}
+
+/// Weighted rendezvous hash score: `weight / -ln(u)` with
+/// `u = sticky_hash(session_hash ‖ 0x00 ‖ model)` mapped into (0, 1). The
+/// largest score wins, so a member keeps its fair share of sessions and the
+/// answer is identical on every process.
+fn affinity_score(session: u64, model: &str, weight: u64) -> f64 {
+    let hash = balance::sticky_hash_parts(&[&session.to_le_bytes(), &[0], model.as_bytes()]);
+    // 53 bits of mantissa: u = (v + 0.5) / 2^53, always strictly between 0 and 1.
+    let u = ((hash >> 11) as f64 + 0.5) / 9_007_199_254_740_992.0;
+    weight as f64 / -u.ln()
 }
 
 pub struct InFlight {
@@ -881,6 +977,17 @@ impl RoutingTable {
                     HeaderName::from_bytes(r.sticky_header.as_bytes())
                         .expect("validated sticky_header")
                 }),
+                affinity: r.session_affinity.then(|| {
+                    Arc::new(Affinity {
+                        id: runtime.affinity.router_id(&r.name),
+                        name: r.name.as_str().into(),
+                        header: (!r.session_affinity_header.is_empty()).then(|| {
+                            HeaderName::from_bytes(r.session_affinity_header.as_bytes())
+                                .expect("validated session_affinity_header")
+                        }),
+                        counters: metrics.affinity_handles(&r.name),
+                    })
+                }),
                 strategy,
                 strategy_headers,
                 retry: r.retry.clone(),
@@ -1085,6 +1192,7 @@ impl RoutingTable {
             endpoint,
             caller,
             &HeaderMap::new(),
+            None,
             &mut Skipped::default(),
         ))
         .expect("test router has an available model")
@@ -1100,16 +1208,22 @@ impl RoutingTable {
         endpoint: usize,
         caller: &Caller,
         headers: &HeaderMap,
+        session: Option<u64>,
         skipped: &mut Skipped,
     ) -> Option<(InFlight, Option<&'a Counter>, usize)> {
         let router = &*called.target;
-        let split = router.split_for(headers, caller);
+        let split = router.split_for(headers, caller, session);
         if let Some(counter) = router.split_requests.get(split) {
             counter.inc();
         }
+        if session.is_none() {
+            if let Some(affinity) = &router.affinity {
+                affinity.settled(AffinityResult::None);
+            }
+        }
         if let Some(guard) = self
             .acquire_from(
-                called, router, split, endpoint, caller, headers, None, false, skipped,
+                called, router, split, endpoint, caller, headers, None, false, session, skipped,
             )
             .await
         {
@@ -1118,7 +1232,7 @@ impl RoutingTable {
         for (fallback, counter) in &router.fallbacks {
             if let Some(guard) = self
                 .acquire_from(
-                    called, fallback, 0, endpoint, caller, headers, None, false, skipped,
+                    called, fallback, 0, endpoint, caller, headers, None, false, session, skipped,
                 )
                 .await
             {
@@ -1126,7 +1240,7 @@ impl RoutingTable {
             }
         }
         self.acquire_from(
-            called, router, split, endpoint, caller, headers, None, true, skipped,
+            called, router, split, endpoint, caller, headers, None, true, session, skipped,
         )
         .await
         .map(|guard| (guard, None, split))
@@ -1144,6 +1258,7 @@ impl RoutingTable {
         headers: &HeaderMap,
         tried: &[LabelId],
         split: usize,
+        session: Option<u64>,
         skipped: &mut Skipped,
     ) -> Option<(InFlight, Option<&'a Counter>)> {
         let router = &*called.target;
@@ -1159,6 +1274,7 @@ impl RoutingTable {
                         headers,
                         Some(excluded),
                         !strict,
+                        session,
                         skipped,
                     )
                     .await
@@ -1176,6 +1292,7 @@ impl RoutingTable {
                             headers,
                             Some(excluded),
                             !strict,
+                            session,
                             skipped,
                         )
                         .await
@@ -1199,6 +1316,7 @@ impl RoutingTable {
         headers: &HeaderMap,
         excluded: Option<&[LabelId]>,
         fail_open: bool,
+        session: Option<u64>,
         skipped: &mut Skipped,
     ) -> Option<InFlight> {
         let now = clock::mono_ms();
@@ -1217,13 +1335,13 @@ impl RoutingTable {
         // pool's pick is prepared inside a sync block and awaited afterwards.
         let mut model = self
             .pick_model(
-                root, router, split, team_id, key_id, headers, excluded, now, true,
+                root, router, split, team_id, key_id, headers, excluded, now, true, session,
             )
             .await;
         if model.is_none() && fail_open {
             model = self
                 .pick_model(
-                    root, router, split, team_id, key_id, headers, excluded, now, false,
+                    root, router, split, team_id, key_id, headers, excluded, now, false, session,
                 )
                 .await;
         }
@@ -1267,8 +1385,66 @@ impl RoutingTable {
         excluded: Option<&[LabelId]>,
         now: u64,
         strict: bool,
+        session: Option<u64>,
     ) -> Option<&'a Arc<Model>> {
+        let affinity = router.affinity.as_ref().zip(session);
+        // One wall-clock read per affinity pick (override TTL and override writes).
+        let wall = affinity.map(|_| affinity::now_ms());
+        let mut stale_override = false;
+        if let Some((affinity, session)) = affinity {
+            // A moved session stays on its override while that member is still
+            // eligible; the override is not tied to the split it moved in.
+            if let Some(name) = self.runtime.affinity.lookup(
+                affinity.id,
+                session,
+                wall.expect("affinity has a clock"),
+            ) {
+                let mut found = None;
+                for model in router.models() {
+                    if model.name.as_str() == name.as_ref()
+                        && model_eligible(model, excluded, now, strict)
+                    {
+                        found = Some(model);
+                        break;
+                    }
+                }
+                if let Some(model) = found {
+                    if excluded.is_none() {
+                        affinity.settled(AffinityResult::Override);
+                    }
+                    return Some(model);
+                }
+                // The override went ineligible: re-hash and move the override
+                // to the new member, even when that member is the ideal one.
+                stale_override = true;
+            }
+        }
         for pool in router.pool_order(split) {
+            if let Some((affinity, session)) = affinity {
+                if let Some((index, moved)) = pool.affinity_pick(session, excluded, now, strict) {
+                    let model = &pool.models[index];
+                    let moved = moved || stale_override;
+                    if moved && excluded.is_none() {
+                        self.runtime.affinity.remember(
+                            affinity.id,
+                            &affinity.name,
+                            session,
+                            &model.name,
+                            wall.expect("affinity has a clock"),
+                        );
+                    }
+                    if excluded.is_none() {
+                        affinity.settled(if moved {
+                            AffinityResult::Moved
+                        } else {
+                            AffinityResult::Hash
+                        });
+                    }
+                    return Some(model);
+                }
+                // No eligible member in this split; another split may have one.
+                continue;
+            }
             let step = {
                 let lookup = |name: &str| headers.get(name).map(HeaderValue::as_bytes);
                 let req = RequestInfo::new(
@@ -1789,6 +1965,7 @@ mod tests {
                 0,
                 &Caller::Anonymous,
                 &headers,
+                None,
                 &mut Skipped::default(),
             ))
             .unwrap()
@@ -2078,6 +2255,7 @@ mod tests {
             0,
             &Caller::Anonymous,
             &HeaderMap::new(),
+            None,
             &mut Skipped::default()
         ))
         .is_some());
@@ -2322,6 +2500,7 @@ mod tests {
                 0,
                 &Caller::Anonymous,
                 &HeaderMap::new(),
+                None,
                 &mut Skipped::default(),
             ))
             .unwrap();
@@ -2343,20 +2522,20 @@ mod tests {
         let mut canary = 0;
         for user in 0..10_000 {
             let h = headers(&format!("session-{user}"));
-            let first = router.split_for(&h, &anonymous);
+            let first = router.split_for(&h, &anonymous, None);
             for _ in 0..3 {
-                assert_eq!(router.split_for(&h, &anonymous), first);
+                assert_eq!(router.split_for(&h, &anonymous, None), first);
             }
             canary += usize::from(first == 1);
         }
         assert!((850..=1150).contains(&canary), "canary got {canary}");
         // Fixed-seed hash: the same session lands in the same split in every
         // process (golden value).
-        assert_eq!(router.split_for(&headers("session-1"), &anonymous), 0);
+        assert_eq!(router.split_for(&headers("session-1"), &anonymous, None), 0);
         // Missing header: not sticky, but still split by weight.
         let mut seen = [false; 2];
         for _ in 0..1000 {
-            seen[router.split_for(&HeaderMap::new(), &anonymous)] = true;
+            seen[router.split_for(&HeaderMap::new(), &anonymous, None)] = true;
         }
         assert_eq!(seen, [true, true]);
     }
@@ -2375,19 +2554,23 @@ mod tests {
         let k2 = Caller::Key(routing_table.keys[&hash("s2")].clone());
         let router = &routing_table.names["public"];
         let none = HeaderMap::new();
-        let team = router.split_for(&none, &k1);
+        let team = router.split_for(&none, &k1, None);
         for _ in 0..100 {
-            assert_eq!(router.split_for(&none, &k1), team);
-            assert_eq!(router.split_for(&none, &k2), team, "same team, same split");
+            assert_eq!(router.split_for(&none, &k1, None), team);
+            assert_eq!(
+                router.split_for(&none, &k2, None),
+                team,
+                "same team, same split"
+            );
         }
         s.routers[0].sticky = pb::StickyBy::Key as i32;
         let routing_table =
             RoutingTable::compile(&s, AuthMode::RequireKey, &Runtime::new()).unwrap();
         let router = &routing_table.names["public"];
         let k1 = Caller::Key(routing_table.keys[&hash("s1")].clone());
-        let first = router.split_for(&none, &k1);
+        let first = router.split_for(&none, &k1, None);
         for _ in 0..100 {
-            assert_eq!(router.split_for(&none, &k1), first);
+            assert_eq!(router.split_for(&none, &k1, None), first);
         }
     }
 
@@ -2399,13 +2582,14 @@ mod tests {
         // Find a session that the hash puts into the canary split.
         let h = (0..)
             .map(|i| headers(&format!("u{i}")))
-            .find(|h| router.split_for(h, &anonymous) == 1)
+            .find(|h| router.split_for(h, &anonymous, None) == 1)
             .unwrap();
         let (first, _, split) = block_on(routing_table.acquire_initial(
             router,
             0,
             &anonymous,
             &h,
+            None,
             &mut Skipped::default(),
         ))
         .unwrap();
@@ -2422,6 +2606,7 @@ mod tests {
                 &h,
                 &tried,
                 split,
+                None,
                 &mut Skipped::default(),
             ))
             .unwrap();
@@ -2436,10 +2621,150 @@ mod tests {
             &h,
             &tried,
             split,
+            None,
             &mut Skipped::default(),
         ))
         .unwrap();
         assert_eq!(next.model.name, "a", "then the other split");
+    }
+
+    fn affinity_snapshot() -> Snapshot {
+        let mut s = snapshot("weighted");
+        s.routers[0].session_affinity = true;
+        s.required_capabilities.push("session_affinity".into());
+        s
+    }
+
+    fn set_healthy(router: &Callable, name: &str, healthy: bool) {
+        for d in router.pools.iter().flat_map(|p| &p.models) {
+            if d.name == name {
+                d.model_healthy.store(healthy, Ordering::Release);
+            }
+        }
+    }
+
+    fn affinity_pick(table: &RoutingTable, session: Option<u64>) -> String {
+        let router = &table.names["public"];
+        let (guard, _, _) = block_on(table.acquire_initial(
+            router,
+            0,
+            &Caller::Anonymous,
+            &HeaderMap::new(),
+            session,
+            &mut Skipped::default(),
+        ))
+        .expect("a model is available");
+        guard.model.name.clone()
+    }
+
+    #[test]
+    fn affinity_picks_the_same_model_on_independent_routers() {
+        let s = affinity_snapshot();
+        let first = compile(&s);
+        let second = RoutingTable::compile(&s, AuthMode::Open, &Runtime::new()).unwrap();
+        let mut b = 0;
+        for i in 0..1000 {
+            let session = balance::sticky_hash(format!("session-{i}").as_bytes());
+            let name = affinity_pick(&first, Some(session));
+            assert_eq!(
+                name,
+                affinity_pick(&second, Some(session)),
+                "session {i} differs between routers"
+            );
+            b += usize::from(name == "b");
+        }
+        // Weights 1:3, so "b" gets about three quarters of the sessions.
+        assert!((650..=850).contains(&b), "b got {b}");
+        // Without a session the existing strategy still serves both models.
+        let mut seen = [false; 2];
+        for _ in 0..100 {
+            let name = affinity_pick(&first, None);
+            seen[usize::from(name == "b")] = true;
+        }
+        assert_eq!(seen, [true, true]);
+        let text = first.runtime.encode_metrics().unwrap();
+        assert!(
+            text.contains("lumewarp_session_affinity_total{router=\"public\",result=\"none\"} 100"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_moved_session_stays_on_its_new_model() {
+        let table = compile(&affinity_snapshot());
+        let router = &table.names["public"];
+        let session = balance::sticky_hash(b"session-1");
+        let original = affinity_pick(&table, Some(session));
+        let other = if original == "a" { "b" } else { "a" };
+        set_healthy(router, &original, false);
+        assert_eq!(affinity_pick(&table, Some(session)), other);
+        set_healthy(router, &original, true);
+        for _ in 0..10 {
+            assert_eq!(
+                affinity_pick(&table, Some(session)),
+                other,
+                "does not flip back after recovery"
+            );
+        }
+        let text = table.runtime.encode_metrics().unwrap();
+        assert!(
+            text.contains("lumewarp_session_affinity_total{router=\"public\",result=\"moved\"} 1"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "lumewarp_session_affinity_total{router=\"public\",result=\"override\"} 10"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("lumewarp_session_affinity_overrides 1"),
+            "{text}"
+        );
+        // An ineligible override re-runs the hash over eligible members and
+        // moves the override again.
+        set_healthy(router, other, false);
+        assert_eq!(affinity_pick(&table, Some(session)), original);
+        set_healthy(router, other, true);
+        assert_eq!(affinity_pick(&table, Some(session)), original);
+    }
+
+    #[test]
+    fn affinity_pins_the_split_without_sticky() {
+        let mut s = split_snapshot(pb::StickyBy::None, "weighted");
+        s.routers[0].session_affinity = true;
+        s.required_capabilities.push("session_affinity".into());
+        let first = compile(&s);
+        let second = RoutingTable::compile(&s, AuthMode::Open, &Runtime::new()).unwrap();
+        let mut canary = 0;
+        for i in 0..1000 {
+            let session = balance::sticky_hash(format!("s{i}").as_bytes());
+            let split = first.names["public"].split_for(
+                &HeaderMap::new(),
+                &Caller::Anonymous,
+                Some(session),
+            );
+            assert_eq!(
+                split,
+                second.names["public"].split_for(
+                    &HeaderMap::new(),
+                    &Caller::Anonymous,
+                    Some(session),
+                ),
+                "session {i} split differs between routers"
+            );
+            assert_eq!(
+                split,
+                first.names["public"].split_for(
+                    &HeaderMap::new(),
+                    &Caller::Anonymous,
+                    Some(session),
+                )
+            );
+            canary += usize::from(split == 1);
+        }
+        // The canary split has weight 1 of 10.
+        assert!((50..=150).contains(&canary), "canary got {canary}");
     }
 
     #[test]
@@ -2692,15 +3017,23 @@ mod tests {
     #[test]
     fn load_aware_and_sticky_picks_do_not_allocate() {
         use crate::test_alloc::count;
-        for (sticky, strategy) in [
-            (pb::StickyBy::None, "lowest_latency"),
-            (pb::StickyBy::None, "vllm_load"),
-            (pb::StickyBy::Header, "lowest_latency"),
-            (pb::StickyBy::Header, "vllm_load"),
+        for (sticky, strategy, affinity) in [
+            (pb::StickyBy::None, "lowest_latency", false),
+            (pb::StickyBy::None, "vllm_load", false),
+            (pb::StickyBy::Header, "lowest_latency", false),
+            (pb::StickyBy::Header, "vllm_load", false),
+            (pb::StickyBy::None, "lowest_latency", true),
+            (pb::StickyBy::None, "weighted", true),
         ] {
-            let routing_table = compile(&split_snapshot(sticky, strategy));
+            let mut s = split_snapshot(sticky, strategy);
+            if affinity {
+                s.routers[0].session_affinity = true;
+                s.required_capabilities.push("session_affinity".into());
+            }
+            let routing_table = compile(&s);
             let router = &routing_table.names["public"];
             let h = headers("session-1");
+            let session = affinity.then(|| balance::sticky_hash(b"session-1"));
             for d in router.pools.iter().flat_map(|p| &p.models) {
                 d.latency.success(Duration::from_millis(1));
                 d.load.set(1.0, 0.5, clock::mono_ms());
@@ -2712,6 +3045,7 @@ mod tests {
                     0,
                     &Caller::Anonymous,
                     &h,
+                    session,
                     &mut Skipped::default(),
                 )));
                 drop(routing_table.acquire(router, 0, &Caller::Anonymous));
@@ -2722,11 +3056,12 @@ mod tests {
                     0,
                     &Caller::Anonymous,
                     &h,
+                    session,
                     &mut Skipped::default(),
                 ))
             });
             drop(guard);
-            assert_eq!(warm, (0, 0), "{sticky:?} {strategy:?}");
+            assert_eq!(warm, (0, 0), "{sticky:?} {strategy:?} affinity={affinity}");
             let tried = [router.pools[1].models[0].label];
             let (retry, guard) = count(|| {
                 block_on(routing_table.retry(
@@ -2736,11 +3071,16 @@ mod tests {
                     &h,
                     &tried,
                     1,
+                    session,
                     &mut Skipped::default(),
                 ))
             });
             drop(guard);
-            assert_eq!(retry, (0, 0), "retry {sticky:?} {strategy:?}");
+            assert_eq!(
+                retry,
+                (0, 0),
+                "retry {sticky:?} {strategy:?} affinity={affinity}"
+            );
         }
     }
 
@@ -2775,6 +3115,7 @@ mod tests {
                 0,
                 &Caller::Anonymous,
                 &HeaderMap::new(),
+                None,
                 &mut Skipped::default(),
             ))
             .expect("fails open onto the model without a running trial");
@@ -2813,9 +3154,15 @@ mod tests {
             let mut skipped = Skipped::default();
             // Strict selection fails everywhere (fallback included), then
             // fails open; retries consider the same open candidates again.
-            let (guard, _, split) =
-                block_on(routing_table.acquire_initial(router, 0, &anonymous, &h, &mut skipped))
-                    .unwrap();
+            let (guard, _, split) = block_on(routing_table.acquire_initial(
+                router,
+                0,
+                &anonymous,
+                &h,
+                None,
+                &mut skipped,
+            ))
+            .unwrap();
             let tried = [guard.model.label];
             for _ in 0..3 {
                 drop(block_on(routing_table.retry(
@@ -2825,6 +3172,7 @@ mod tests {
                     &h,
                     &tried,
                     split,
+                    None,
                     &mut skipped,
                 )));
             }
@@ -3046,6 +3394,7 @@ mod tests {
             &HeaderMap::new(),
             &tried,
             0,
+            None,
             &mut Skipped::default(),
         ))
         .unwrap();
@@ -3071,6 +3420,7 @@ mod tests {
             0,
             &Caller::Anonymous,
             &HeaderMap::new(),
+            None,
             &mut Skipped::default(),
         ))
         .unwrap();

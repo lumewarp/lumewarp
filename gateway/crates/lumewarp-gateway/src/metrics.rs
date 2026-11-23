@@ -120,6 +120,11 @@ pub const PLUGIN_KINDS: [&str; 4] = [
 #[allow(dead_code)] // wired by the MCP/A2A proxy (W2)
 pub const PLUGIN_RESULTS: [&str; 4] = ["ok", "error", "timeout", "trap"];
 
+/// `lumewarp_session_affinity_total{result}`. `hash` is the stateless
+/// rendezvous pick, `override` a remembered move, `moved` the pick that caused
+/// the move, and `none` an affinity router without a session id.
+pub const AFFINITY_RESULTS: [&str; 4] = ["hash", "override", "moved", "none"];
+
 /// `lumewarp_upstream_auth_total{result}`. `cached` means the gateway reused a
 /// plugin result without entering the sandbox; `ok` means a WASM call answered.
 pub const UPSTREAM_AUTH_RESULTS: [&str; 7] = [
@@ -216,6 +221,15 @@ struct RouterLabels {
 struct SplitLabels {
     router: String,
     split: String,
+}
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct AffinityLabels {
+    router: String,
+    result: &'static str,
+}
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct AffinitySyncLabels {
+    reason: &'static str,
 }
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct UpstreamLabels {
@@ -488,6 +502,11 @@ pub struct Metrics {
     healthy: Family<UpstreamLabels, Gauge>,
     model_healthy: Family<ModelLabels, Gauge>,
     splits: Family<SplitLabels, Counter>,
+    affinity: Family<AffinityLabels, Counter>,
+    affinity_overrides: Gauge,
+    /// Redis-sync failures of the affinity override table; only with shared
+    /// limits, like the table's exchange.
+    affinity_sync_errors: Option<Family<AffinitySyncLabels, Counter>>,
     vllm_queue: Family<ModelLabels, Gauge>,
     vllm_kv: Family<ModelLabels, Gauge<f64, AtomicU64>>,
     vllm_scrape_failures: Family<UpstreamLabels, Counter>,
@@ -546,6 +565,8 @@ impl Metrics {
         let healthy = Family::default();
         let model_healthy = Family::default();
         let splits = Family::default();
+        let affinity = Family::default();
+        let affinity_overrides = Gauge::default();
         let vllm_queue = Family::default();
         let vllm_kv = Family::default();
         let vllm_scrape_failures = Family::default();
@@ -577,6 +598,28 @@ impl Metrics {
             "lumewarp_split_requests",
             "Requests assigned to a traffic split",
             splits.clone(),
+        );
+        let affinity_sync_errors = shared_limits.then(|| {
+            let errors = Family::<AffinitySyncLabels, Counter>::default();
+            for reason in ["connect", "timeout", "script"] {
+                drop(errors.get_or_create(&AffinitySyncLabels { reason }));
+            }
+            registry.register(
+                "lumewarp_session_affinity_sync_errors",
+                "Failed session-affinity override exchanges with Redis, by reason (never registered without Redis)",
+                errors.clone(),
+            );
+            errors
+        });
+        registry.register(
+            "lumewarp_session_affinity",
+            "Requests with session affinity by router and result (hash, override, moved, none)",
+            affinity.clone(),
+        );
+        registry.register(
+            "lumewarp_session_affinity_overrides",
+            "Live session-affinity overrides in this process",
+            affinity_overrides.clone(),
         );
         registry.register(
             "lumewarp_vllm_queue_depth",
@@ -858,6 +901,9 @@ impl Metrics {
             healthy,
             model_healthy,
             splits,
+            affinity,
+            affinity_overrides,
+            affinity_sync_errors,
             vllm_queue,
             vllm_kv,
             vllm_scrape_failures,
@@ -941,6 +987,33 @@ impl Metrics {
                 split: split.into(),
             })
             .clone()
+    }
+
+    /// Pre-registers the zero-valued result series of an affinity router and
+    /// returns their handles. Compile time only.
+    pub fn affinity_handles(&self, router: &str) -> [Counter; AFFINITY_RESULTS.len()] {
+        AFFINITY_RESULTS.map(|result| {
+            self.affinity
+                .get_or_create(&AffinityLabels {
+                    router: router.into(),
+                    result,
+                })
+                .clone()
+        })
+    }
+
+    /// Scrape-time: live overrides after the expired ones were pruned.
+    pub fn session_affinity_overrides(&self, overrides: usize) {
+        self.affinity_overrides
+            .set(i64::try_from(overrides).unwrap_or(i64::MAX));
+    }
+
+    /// Only with a shared-limits Redis: the affinity exchange failed for
+    /// `reason` (`connect`, `timeout` or `script`).
+    pub fn session_affinity_sync_error(&self, reason: &'static str) {
+        if let Some(errors) = &self.affinity_sync_errors {
+            errors.get_or_create(&AffinitySyncLabels { reason }).inc();
+        }
     }
 
     pub fn vllm_gauges(&self, model: &str) -> (Gauge, Gauge<f64, AtomicU64>) {

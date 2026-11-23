@@ -1,9 +1,9 @@
 {
   "uid": "lumewarp-overview",
   "title": "Lumewarp / Overview",
-  "description": "Traffic and accounting follow team/requested filters. Histograms have no team label; overhead and upstream errors have no requested label. Spend is team-only.",
+  "description": "At-a-glance traffic, error budget, latency distribution and spend for the selected range, followed by the per-name trends. Traffic and tokens follow the team and requested filters; histograms have no team label and spend is team-only.",
   "schemaVersion": 39,
-  "version": 2,
+  "version": 3,
   "editable": true,
   "tags": [
     "lumewarp",
@@ -96,8 +96,874 @@
   "panels": [
     {
       "id": 1,
+      "type": "row",
+      "title": "At a glance",
+      "description": "Headline numbers for the selected range; every tile carries a sparkline over the same range.",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "targets": []
+    },
+    {
+      "id": 2,
       "title": "Requests / second",
-      "description": "",
+      "description": "LLM-endpoint requests per second summed over every gateway, filtered by requested name and team.",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 4,
+        "h": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0,
+          "color": {
+            "mode": "none"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "none",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(lumewarp_requests_total{namespace=~\"${namespace:regex}\",requested=~\"${requested:regex}\",team=~\"${team:regex}\",endpoint=~\"chat_completions|completions|responses|embeddings|audio_transcriptions|audio_translations|decisions|systemone\"}[$__rate_interval]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "requests/s",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "5xx ratio",
+      "description": "Share of 5xx responses across the LLM endpoints; the alert budget is 5% at 1 request/s or more.",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 1,
+        "w": 4,
+        "h": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.01
+              },
+              {
+                "color": "red",
+                "value": 0.05
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(lumewarp_requests_total{namespace=~\"${namespace:regex}\",requested=~\"${requested:regex}\",team=~\"${team:regex}\",endpoint=~\"chat_completions|completions|responses|embeddings|audio_transcriptions|audio_translations|decisions|systemone\",status=~\"5..\"}[$__rate_interval])) / sum(rate(lumewarp_requests_total{namespace=~\"${namespace:regex}\",requested=~\"${requested:regex}\",team=~\"${team:regex}\",endpoint=~\"chat_completions|completions|responses|embeddings|audio_transcriptions|audio_translations|decisions|systemone\"}[$__rate_interval]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "5xx",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Gateway overhead p99",
+      "description": "p99 of gateway processing time, excluding uploads and upstream waiting. Operational alert budget: 10 ms.",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 1,
+        "w": 4,
+        "h": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.005
+              },
+              {
+                "color": "red",
+                "value": 0.01
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(lumewarp_gateway_overhead_seconds_bucket{namespace=~\"${namespace:regex}\"}[$__rate_interval])))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "p99",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Stream TTFT p99",
+      "description": "p99 of handler entry to the first nonempty stream frame. The alert budget is 5 s.",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 1,
+        "w": 4,
+        "h": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(lumewarp_ttft_seconds_bucket{namespace=~\"${namespace:regex}\",requested=~\"${requested:regex}\"}[$__rate_interval])))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "p99",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Tokens / second",
+      "description": "Input and output tokens per second for the selected requested names and teams.",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 1,
+        "w": 4,
+        "h": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "none"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "none",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(lumewarp_tokens_total{namespace=~\"${namespace:regex}\",requested=~\"${requested:regex}\",team=~\"${team:regex}\"}[$__rate_interval]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "tokens/s",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Spend in range",
+      "description": "All models: spend has only a team label, so the requested-name filter does not apply.",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 20,
+        "y": 1,
+        "w": 4,
+        "h": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "min": 0,
+          "color": {
+            "mode": "none"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "none",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(lumewarp_spend_total{namespace=~\"${namespace:regex}\",team=~\"${team:regex}\"}[$__range]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "spend",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "row",
+      "title": "Errors and latency",
+      "description": "Distribution and error-budget views that a line chart hides.",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 6,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "targets": []
+    },
+    {
+      "id": 9,
+      "title": "5xx ratio",
+      "description": "Same ratio as the tile above, on a 0-10% scale with the alert budget marked at 5%.",
+      "type": "gauge",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 7,
+        "w": 6,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 0.1,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.01
+              },
+              {
+                "color": "red",
+                "value": 0.05
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "sizing": "auto",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(lumewarp_requests_total{namespace=~\"${namespace:regex}\",requested=~\"${requested:regex}\",team=~\"${team:regex}\",endpoint=~\"chat_completions|completions|responses|embeddings|audio_transcriptions|audio_translations|decisions|systemone\",status=~\"5..\"}[$__rate_interval])) / sum(rate(lumewarp_requests_total{namespace=~\"${namespace:regex}\",requested=~\"${requested:regex}\",team=~\"${team:regex}\",endpoint=~\"chat_completions|completions|responses|embeddings|audio_transcriptions|audio_translations|decisions|systemone\"}[$__rate_interval]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "5xx",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "End-to-end latency distribution",
+      "description": "Request-duration buckets over time for the selected requested names; the histogram has no team label.",
+      "type": "heatmap",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 7,
+        "w": 12,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "scaleDistribution": {
+              "type": "linear"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "calculate": true,
+        "calculation": {
+          "xBuckets": {
+            "mode": "size",
+            "value": "auto"
+          },
+          "yBuckets": {
+            "mode": "count",
+            "value": 20
+          }
+        },
+        "cellGap": 1,
+        "color": {
+          "mode": "scheme",
+          "scheme": "Oranges",
+          "fill": "dark-orange",
+          "scale": "exponential",
+          "exponent": 0.5,
+          "steps": 64
+        },
+        "legend": {
+          "show": true
+        },
+        "rowsFrame": {
+          "layout": "auto"
+        },
+        "tooltip": {
+          "mode": "single",
+          "showColorScale": false
+        },
+        "yAxis": {
+          "axisPlacement": "left",
+          "unit": "s",
+          "reverse": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (le) (rate(lumewarp_request_duration_seconds_bucket{namespace=~\"${namespace:regex}\",requested=~\"${requested:regex}\"}[$__rate_interval]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{le}}",
+          "format": "heatmap",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "title": "Traffic by endpoint",
+      "description": "Share of requests per endpoint, including transcription and decision endpoints.",
+      "type": "piechart",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 7,
+        "w": 6,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "pieType": "donut",
+        "displayLabels": [
+          "percent"
+        ],
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "values": [
+            "value",
+            "percent"
+          ]
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (endpoint) (rate(lumewarp_requests_total{namespace=~\"${namespace:regex}\",requested=~\"${requested:regex}\",team=~\"${team:regex}\"}[$__rate_interval]))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{endpoint}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "row",
+      "title": "Top names and teams",
+      "description": "Ranked leaders instead of a line per series.",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 14,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "targets": []
+    },
+    {
+      "id": 13,
+      "title": "Top called names by RPS",
+      "description": "Ten busiest requested names over the last rate interval.",
+      "type": "bargauge",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 15,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "valueMode": "color",
+        "namePlacement": "auto",
+        "showUnfilled": true,
+        "sizing": "auto",
+        "minVizWidth": 8,
+        "minVizHeight": 16
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(10, sum by (requested) (rate(lumewarp_requests_total{namespace=~\"${namespace:regex}\",requested=~\"${requested:regex}\",team=~\"${team:regex}\",endpoint=~\"chat_completions|completions|responses|embeddings|audio_transcriptions|audio_translations|decisions|systemone\"}[$__rate_interval])))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{requested}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "title": "Top called names by tokens in range",
+      "description": "Token totals per requested name over the dashboard range.",
+      "type": "bargauge",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 15,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "valueMode": "color",
+        "namePlacement": "auto",
+        "showUnfilled": true,
+        "sizing": "auto",
+        "minVizWidth": 8,
+        "minVizHeight": 16
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(10, sum by (requested) (increase(lumewarp_tokens_total{namespace=~\"${namespace:regex}\",requested=~\"${requested:regex}\",team=~\"${team:regex}\"}[$__range])))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{requested}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "title": "Top teams by spend in range",
+      "description": "Spend is team-only: the gateway exports no requested-name cost, so this panel ignores the requested filter.",
+      "type": "bargauge",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 15,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "valueMode": "color",
+        "namePlacement": "auto",
+        "showUnfilled": true,
+        "sizing": "auto",
+        "minVizWidth": 8,
+        "minVizHeight": 16
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(10, sum by (team) (increase(lumewarp_spend_total{namespace=~\"${namespace:regex}\",team=~\"${team:regex}\"}[$__range])))",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "legendFormat": "{{team}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "type": "row",
+      "title": "Traffic over time",
+      "description": "The series views worth keeping: trends per requested name and error class.",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 23,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "targets": []
+    },
+    {
+      "id": 17,
+      "title": "Requests / second by requested name",
+      "description": "Per requested name, filtered by team; unknown names use the fixed label `unknown`.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -105,7 +971,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 0,
+        "y": 24,
         "w": 12,
         "h": 8
       },
@@ -116,14 +982,6 @@
           "color": {
             "mode": "palette-classic"
           },
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false
-          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -132,6 +990,14 @@
                 "value": null
               }
             ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
           }
         },
         "overrides": []
@@ -152,7 +1018,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (requested) (rate(lumewarp_requests_total{namespace=~\"${namespace:regex}\",requested=~\"${requested:regex}\",team=~\"${team:regex}\",endpoint=~\"chat_completions|completions|embeddings|models\"}[$__rate_interval]))",
+          "expr": "sum by (requested) (rate(lumewarp_requests_total{namespace=~\"${namespace:regex}\",requested=~\"${requested:regex}\",team=~\"${team:regex}\",endpoint=~\"chat_completions|completions|responses|embeddings|audio_transcriptions|audio_translations|decisions|systemone\"}[$__rate_interval]))",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -163,9 +1029,9 @@
       ]
     },
     {
-      "id": 2,
-      "title": "5xx ratio",
-      "description": "",
+      "id": 18,
+      "title": "5xx ratio by requested name",
+      "description": "Error share per requested name; 499 is a dropped handler and counts as an error here only if the status is 5xx.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -173,7 +1039,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 0,
+        "y": 24,
         "w": 12,
         "h": 8
       },
@@ -184,6 +1050,23 @@
           "color": {
             "mode": "palette-classic"
           },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.01
+              },
+              {
+                "color": "red",
+                "value": 0.05
+              }
+            ]
+          },
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "linear",
@@ -191,15 +1074,6 @@
             "fillOpacity": 8,
             "showPoints": "never",
             "spanNulls": false
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
           }
         },
         "overrides": []
@@ -220,7 +1094,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (requested) (rate(lumewarp_requests_total{namespace=~\"${namespace:regex}\",requested=~\"${requested:regex}\",team=~\"${team:regex}\",status=~\"5..\",endpoint=~\"chat_completions|completions|embeddings|models\"}[$__rate_interval])) / sum by (requested) (rate(lumewarp_requests_total{namespace=~\"${namespace:regex}\",requested=~\"${requested:regex}\",team=~\"${team:regex}\",endpoint=~\"chat_completions|completions|embeddings|models\"}[$__rate_interval]))",
+          "expr": "sum by (requested) (rate(lumewarp_requests_total{namespace=~\"${namespace:regex}\",requested=~\"${requested:regex}\",team=~\"${team:regex}\",endpoint=~\"chat_completions|completions|responses|embeddings|audio_transcriptions|audio_translations|decisions|systemone\",status=~\"5..\"}[$__rate_interval])) / sum by (requested) (rate(lumewarp_requests_total{namespace=~\"${namespace:regex}\",requested=~\"${requested:regex}\",team=~\"${team:regex}\",endpoint=~\"chat_completions|completions|responses|embeddings|audio_transcriptions|audio_translations|decisions|systemone\"}[$__rate_interval]))",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -231,9 +1105,9 @@
       ]
     },
     {
-      "id": 3,
+      "id": 19,
       "title": "End-to-end latency p99",
-      "description": "All teams: latency histogram has no team label.",
+      "description": "All teams: the latency histogram has no team label.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -241,7 +1115,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 8,
+        "y": 32,
         "w": 12,
         "h": 8
       },
@@ -252,14 +1126,6 @@
           "color": {
             "mode": "palette-classic"
           },
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false
-          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -268,6 +1134,14 @@
                 "value": null
               }
             ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
           }
         },
         "overrides": []
@@ -299,9 +1173,9 @@
       ]
     },
     {
-      "id": 4,
-      "title": "Gateway overhead p99",
-      "description": "All models and teams: overhead histogram only has endpoint labels. Operational alert budget: 10 ms.",
+      "id": 20,
+      "title": "Stream TTFT p99",
+      "description": "All teams: the TTFT histogram has no team label.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -309,7 +1183,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 8,
+        "y": 32,
         "w": 12,
         "h": 8
       },
@@ -320,14 +1194,6 @@
           "color": {
             "mode": "palette-classic"
           },
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false
-          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -336,6 +1202,14 @@
                 "value": null
               }
             ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
           }
         },
         "overrides": []
@@ -356,20 +1230,20 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.99, sum by (endpoint, le) (rate(lumewarp_gateway_overhead_seconds_bucket{namespace=~\"${namespace:regex}\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(lumewarp_ttft_seconds_bucket{namespace=~\"${namespace:regex}\",requested=~\"${requested:regex}\"}[$__rate_interval])))",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "legendFormat": "{{endpoint}}",
+          "legendFormat": "p99",
           "range": true
         }
       ]
     },
     {
-      "id": 5,
-      "title": "Stream TTFT p99",
-      "description": "All teams: TTFT histogram has no team label.",
+      "id": 21,
+      "title": "Tokens / second by direction",
+      "description": "Input and output tokens per requested name.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -377,24 +1251,16 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 16,
+        "y": 40,
         "w": 12,
         "h": 8
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "s",
+          "unit": "short",
           "min": 0,
           "color": {
             "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false
           },
           "thresholds": {
             "mode": "absolute",
@@ -404,57 +1270,6 @@
                 "value": null
               }
             ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "histogram_quantile(0.99, sum by (requested, le) (rate(lumewarp_ttft_seconds_bucket{namespace=~\"${namespace:regex}\",requested=~\"${requested:regex}\"}[$__rate_interval])))",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "legendFormat": "{{requested}}",
-          "range": true
-        }
-      ]
-    },
-    {
-      "id": 6,
-      "title": "Tokens / second",
-      "description": "",
-      "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 16,
-        "w": 12,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "ops",
-          "min": 0,
-          "color": {
-            "mode": "palette-classic"
           },
           "custom": {
             "drawStyle": "line",
@@ -463,15 +1278,6 @@
             "fillOpacity": 8,
             "showPoints": "never",
             "spanNulls": false
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
           }
         },
         "overrides": []
@@ -503,77 +1309,9 @@
       ]
     },
     {
-      "id": 7,
-      "title": "Spend / hour (all models)",
-      "description": "Spend has only a team label; requested-name selection cannot filter spend.",
-      "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 24,
-        "w": 12,
-        "h": 8
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "currencyUSD",
-          "min": 0,
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (team) (rate(lumewarp_spend_total{namespace=~\"${namespace:regex}\",team=~\"${team:regex}\"}[$__rate_interval])) * 3600",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "legendFormat": "{{team}}",
-          "range": true
-        }
-      ]
-    },
-    {
-      "id": 8,
+      "id": 22,
       "title": "Upstream errors / second",
-      "description": "All models and teams; captures broken 200 response streams as well as connection errors.",
+      "description": "All models: captures broken 200 response streams as well as connection errors.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -581,7 +1319,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 24,
+        "y": 40,
         "w": 12,
         "h": 8
       },
@@ -592,14 +1330,6 @@
           "color": {
             "mode": "palette-classic"
           },
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false
-          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -608,6 +1338,14 @@
                 "value": null
               }
             ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
           }
         },
         "overrides": []
@@ -639,9 +1377,24 @@
       ]
     },
     {
-      "id": 9,
+      "id": 23,
+      "type": "row",
+      "title": "Shared rate limits",
+      "description": "Present only on gateways configured with a shared-limits Redis.",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 48,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "targets": []
+    },
+    {
+      "id": 24,
       "title": "Shared rate limits (Redis)",
-      "description": "Fallback to per-process counting, sync p99 and sync errors; these series exist only on gateways with a shared-limits Redis.",
+      "description": "Fallback to per-process counting, sync p99 and sync errors; these series exist only with a shared-limits Redis.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -649,7 +1402,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 32,
+        "y": 49,
         "w": 24,
         "h": 8
       },
@@ -660,14 +1413,6 @@
           "color": {
             "mode": "palette-classic"
           },
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false
-          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -676,6 +1421,14 @@
                 "value": null
               }
             ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false
           }
         },
         "overrides": []

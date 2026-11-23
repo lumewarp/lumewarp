@@ -329,6 +329,15 @@ pub struct Router {
     pub sticky: StickyBy,
     #[serde(default)]
     pub sticky_header: String,
+    /// Route every request with a session id to the same member model (weighted
+    /// rendezvous hashing); a moved session stays on its new model while that
+    /// model is eligible. Capability `session_affinity`.
+    #[serde(default)]
+    pub session_affinity: bool,
+    /// Extra request header read as a session id after `x-lumewarp-id`; must
+    /// match `^x-[a-z0-9-]+-id$`. Empty = headers plus the body `session_id`.
+    #[serde(default)]
+    pub session_affinity_header: String,
     /// WASM strategies: how long one `pick` may run; 0 = 60 s.
     #[serde(default)]
     pub plugin_timeout_ms: u32,
@@ -1026,6 +1035,8 @@ impl Config {
                     StickyBy::Key => pb::StickyBy::Key,
                 } as i32,
                 sticky_header: r.sticky_header.clone(),
+                session_affinity: r.session_affinity,
+                session_affinity_header: r.session_affinity_header.clone(),
                 plugin_timeout_ms: r.plugin_timeout_ms,
                 reasoning_default_level: r.reasoning_default_level.clone(),
             })
@@ -1176,6 +1187,12 @@ impl Config {
                                 || r.sticky != StickyBy::None
                                 || !r.sticky_header.is_empty()
                         }),
+                    ),
+                    (
+                        "session_affinity",
+                        self.routers
+                            .iter()
+                            .any(|r| r.session_affinity || !r.session_affinity_header.is_empty()),
                     ),
                     (
                         "vllm_load",
@@ -1355,6 +1372,34 @@ routers:
             s.required_capabilities,
             ["traffic_split", "vllm_load", "strategy:vllm_load"]
         );
+    }
+
+    #[test]
+    fn session_affinity_yaml_compiles_its_capability() {
+        let (_, s) = Config::parse(
+            r#"
+routers:
+  - name: public
+    members: [{model: d}]
+    session_affinity: true
+    session_affinity_header: x-conversation-id
+"#,
+        )
+        .unwrap();
+        assert!(s.routers[0].session_affinity);
+        assert_eq!(s.routers[0].session_affinity_header, "x-conversation-id");
+        assert!(s
+            .required_capabilities
+            .contains(&"session_affinity".to_string()));
+        // The header alone still declares the capability; the gateway
+        // validation rejects the combination later.
+        let (_, s) = Config::parse(
+            r#"routers: [{name: public, members: [{model: d}], session_affinity_header: x-conversation-id}]"#,
+        )
+        .unwrap();
+        assert!(s
+            .required_capabilities
+            .contains(&"session_affinity".to_string()));
     }
 
     #[test]

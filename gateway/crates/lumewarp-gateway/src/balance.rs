@@ -466,10 +466,18 @@ pub fn label(raw: &str, key: &str) -> Option<String> {
 /// SplitMix64 finalizer for avalanche. Stable across processes, restarts and
 /// platforms (never `RandomState`).
 pub fn sticky_hash(bytes: &[u8]) -> u64 {
+    sticky_hash_parts(&[bytes])
+}
+
+/// [`sticky_hash`] over the concatenation of `parts`, hashed in place: no
+/// temporary buffer for a session id plus a member name.
+pub fn sticky_hash_parts(parts: &[&[u8]]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for &b in bytes {
-        h ^= u64::from(b);
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    for part in parts {
+        for &b in *part {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
     }
     h ^= h >> 30;
     h = h.wrapping_mul(0xbf58_476d_1ce4_e5b9);

@@ -74,6 +74,7 @@ def test_supported_capabilities_match_gateway() -> None:
         "health_check",
         "circuit_breaker",
         "traffic_split",
+        "session_affinity",
         "vllm_load",
         "rotation_grace",
         "encrypted_api_key",
@@ -269,6 +270,56 @@ async def test_sticky_team_key(factory, sticky, wire) -> None:
     assert list(snap.required_capabilities) == ["strategy:weighted", "traffic_split"]
 
 
+async def test_session_affinity(factory) -> None:
+    await seed_scope(factory)
+    async with factory() as s, s.begin():
+        plain = await add_router(s, "plain", [("a", None), ("b", None)])
+        plain.session_affinity = True
+        custom = await add_router(s, "custom", [("a", None)])
+        custom.session_affinity = True
+        custom.session_affinity_header = "x-conversation-id"
+    snap = (await compile_(factory)).snapshot
+    # Valid with no traffic split, and no traffic_split capability is implied.
+    assert router_of(snap, "plain").session_affinity
+    assert router_of(snap, "plain").session_affinity_header == ""
+    assert router_of(snap, "custom").session_affinity_header == "x-conversation-id"
+    assert "session_affinity" in snap.required_capabilities
+    assert "traffic_split" not in snap.required_capabilities
+
+
+async def test_session_affinity_with_traffic_split(factory) -> None:
+    await seed_scope(factory)
+    async with factory() as s, s.begin():
+        router = await add_router(s, "llama", [])
+        await add_router(s, "other", [("a", None), ("b", None)])
+        await _split(s, router, "one", 1, ["a"], 0)
+        await _split(s, router, "two", 1, ["b"], 1)
+        router.session_affinity = True
+    snap = (await compile_(factory)).snapshot
+    r = router_of(snap, "llama")
+    assert r.session_affinity and r.sticky == pb.STICKY_BY_NONE
+    assert list(snap.required_capabilities) == [
+        "session_affinity",
+        "strategy:weighted",
+        "traffic_split",
+    ]
+
+
+async def test_session_affinity_header_validation(factory) -> None:
+    await seed_scope(factory)
+    async with factory() as s, s.begin():
+        await add_router(s, "llama", [("a", None)])
+    snap = (await compile_(factory)).snapshot
+    snap.routers[0].session_affinity_header = "x-session-id"
+    snap.required_capabilities.append("session_affinity")
+    with pytest.raises(SnapshotInvalid, match="without session_affinity"):
+        validate_snapshot(snap, max_bytes=1 << 20, max_keys=10)
+    snap.routers[0].session_affinity = True
+    snap.routers[0].session_affinity_header = "X-Session-Id"
+    with pytest.raises(SnapshotInvalid, match="invalid session_affinity_header"):
+        validate_snapshot(snap, max_bytes=1 << 20, max_keys=10)
+
+
 async def test_split_without_valid_models_leaves_router_out(factory) -> None:
     await seed_scope(factory)
     async with factory() as s, s.begin():
@@ -318,6 +369,8 @@ async def test_all_capabilities_together(factory) -> None:
         deployment.chat_check_interval_ms = 30000
         deployment.chat_check_timeout_ms = 5000
         main.reasoning_default_level = "high"
+        main.session_affinity = True
+        main.session_affinity_header = "x-conversation-id"
     snap = (await compile_(factory)).snapshot
     assert list(snap.required_capabilities) == sorted(
         SUPPORTED_CAPABILITIES
@@ -542,6 +595,13 @@ INVALID = {
     "bad reasoning level": lambda s: setattr(
         s.routers[0], "reasoning_default_level", "not a level"
     ),
+    "affinity header without the switch": lambda s: setattr(
+        s.routers[0], "session_affinity_header", "x-session-id"
+    ),
+    "affinity header is not lower-case x-name-id": lambda s: (
+        setattr(s.routers[0], "session_affinity", True),
+        setattr(s.routers[0], "session_affinity_header", "X-Session-Id"),
+    ),
     "reasoning level outside the members": lambda s: (
         s.models[0].reasoning_effort.CopyFrom(
             pb.ReasoningEffort(
@@ -573,6 +633,8 @@ def test_validate_accepts_full_routing_snapshot() -> None:
     )
     r.sticky = pb.STICKY_BY_HEADER
     r.sticky_header = "x-session"
+    r.session_affinity = True
+    r.session_affinity_header = "x-conversation-id"
     r.reasoning_default_level = "none"
     r.retry.CopyFrom(pb.RetryPolicy(max_attempts=5, retry_on_status=[400, 599]))
     r.fallbacks.append("b")
