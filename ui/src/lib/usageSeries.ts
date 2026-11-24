@@ -18,6 +18,47 @@ export function amount(row: UsageRow, metric: UsageMetric): number {
   }
 }
 
+/** The chart's bucket: hours for a range of at most 48 h, local days beyond. */
+export type Bucket = "hour" | "day";
+
+const HOUR_MS = 3_600_000;
+/** A slot list is capped where the API's range limit is: 400 days touch at most 401 local dates. */
+const MAX_SLOTS = 401;
+
+export const bucketOf = (fromIso: string, toIso: string): Bucket => (Date.parse(toIso) - Date.parse(fromIso) <= 48 * HOUR_MS ? "hour" : "day");
+
+const pad = (n: number) => String(n).padStart(2, "0");
+const localDay = (date: Date) => `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+
+/**
+ * The slots of a range `[fromIso, toIso)` in the browser's zone: local calendar days (`YYYY-MM-DD`) or the
+ * instants of each local hour start (`toISOString()`, stepped 1 h on instants so a DST change cannot skip or
+ * repeat a slot). Empty for an invalid or inverted range.
+ */
+export function bucketSlots(fromIso: string, toIso: string, bucket: Bucket): string[] {
+  const start = new Date(fromIso);
+  const end = Date.parse(toIso);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end) || end <= start.getTime()) return [];
+  const out: string[] = [];
+  if (bucket === "hour") {
+    for (let time = new Date(start.getFullYear(), start.getMonth(), start.getDate(), start.getHours()).getTime(); time < end && out.length < MAX_SLOTS; time += HOUR_MS) out.push(new Date(time).toISOString());
+    return out;
+  }
+  const last = localDay(new Date(end - 1));
+  for (let i = 0; out.length < MAX_SLOTS; i++) {
+    const day = localDay(new Date(start.getFullYear(), start.getMonth(), start.getDate() + i));
+    out.push(day);
+    if (day >= last) break;
+  }
+  return out;
+}
+
+/** The slot a usage row falls in: its local `date`, or its `hour` instant normalised to `toISOString()`. */
+export function bucketKey(row: UsageRow, bucket: Bucket): string {
+  if (bucket === "day") return row.date ?? "";
+  return row.hour ? new Date(row.hour).toISOString() : "";
+}
+
 export interface Series {
   name: string;
   /** Palette slot 0-7, or null for Other. */
@@ -43,15 +84,15 @@ export interface Built {
 }
 
 /**
- * One series per name (`labelOf`), one cell per UTC day. The top eight by the metric keep a palette slot in rank
+ * One series per name (`labelOf`), one cell per slot (see `bucketSlots`). The top eight by the metric keep a palette slot in rank
  * order; the rest fold into Other. A name whose every cost is unknown is reported, not drawn as zero.
  */
-export function buildSeries(rows: UsageRow[] | undefined, days: string[], metric: UsageMetric, labelOf: (row: UsageRow) => string): Built {
+export function buildSeries(rows: UsageRow[] | undefined, days: string[], metric: UsageMetric, labelOf: (row: UsageRow) => string, bucket: Bucket = "day"): Built {
   const index = new Map(days.map((day, at) => [day, at]));
   const byName = new Map<string, { cells: number[]; total: number; priced: boolean; unknown: number }>();
   let requests = 0;
   for (const row of rows ?? []) {
-    const at = row.date ? index.get(row.date) : undefined;
+    const at = index.get(bucketKey(row, bucket));
     if (at === undefined) continue;
     const name = labelOf(row);
     let entry = byName.get(name);

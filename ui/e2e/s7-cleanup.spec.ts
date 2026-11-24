@@ -145,7 +145,7 @@ test("screenshots: the whole matrix, desktop and 390 px, light and dark", async 
     await page.waitForTimeout(100);
     await page.waitForTimeout(250);
     await chartShot(`s7-${label}-usage-chart-tooltip`);
-    await page.getByLabel("From").fill(new Date(Date.now() - 6 * 86_400_000).toISOString().slice(0, 10));
+    await page.getByLabel("From").fill(`${new Date(Date.now() - 6 * 86_400_000).toISOString().slice(0, 10)}T00:00`);
     await page.mouse.move(2, 2);
     await page.getByTestId("usage-chart-table-toggle").click();
     await page.waitForTimeout(250);

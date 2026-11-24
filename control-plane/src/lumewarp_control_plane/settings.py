@@ -138,6 +138,8 @@ class Settings(BaseSettings):
     oidc_client_id: str | None = None
     oidc_client_secret: SecretStr | None = None
     oidc_scopes: str = "openid email profile"
+    # The IdP's name on the login button ("Sign in with <name>"); unset shows "SSO".
+    sso_display_name: str | None = Field(default=None, max_length=64)
     # Externally visible base URL of the control plane, used to build the OIDC redirect
     # URI (<public_url>/api/v1/session/oidc/callback). Unset = derived from the request.
     public_url: str | None = None

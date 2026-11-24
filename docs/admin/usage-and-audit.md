@@ -13,6 +13,16 @@ type and status. The Admin UI header selects one zone; choose **All zones** to i
 The API's optional `zone` filter behaves the same way: omitted means all zones. `zone` is
 also a supported `group_by` dimension.
 
+`GET /api/v1/usage` takes an optional `tz` query parameter, an IANA time zone name such as
+`Asia/Taipei` (default `UTC`; an unknown name is 422). The `day` dimension is the calendar
+day in that zone, and each row's `date` is the corresponding local `YYYY-MM-DD`. The `hour`
+dimension buckets requests by the local clock hour in `tz` and returns the bucket start as
+the row's `hour`, an ISO 8601 datetime with a UTC offset (for example
+`2026-03-10T09:30:00Z`); a half-hour zone therefore starts an hour bucket on a `:30` UTC
+instant, and the two 01:00 hours of a daylight-saving fall-back stay two buckets. A request
+that groups by `hour` may span at most 31 days, otherwise it is 422. `compare=previous` keeps
+working with either dimension. The monthly team-totals fast path is used only for `tz=UTC`.
+
 Only an installation admin sees where a request was served: the `model`, `upstream_model`,
 `alias` and `router` dimensions, their ids and `_missing` filters, and the `served_by`,
 `via_aliases`, `via_routers` and `upstream_model(s)` provenance. Any other caller gets
@@ -22,7 +32,8 @@ groups by the name the client called (`called`, or `requested` as typed) togethe
 `team`, `owner`, `key`, `endpoint`, `model type`, `status_class`, `outcome`, `kind`,
 `target`, `method` and `tool`.
 
-**Called name is the default grouping for everyone.** The `called` dimension is the catalog
+**The called name is the default grouping for everyone**; the Admin UI labels it
+**Model**, whatever kind of name the client called. The `called` dimension is the catalog
 item the client called (an alias, else a router, else a model; a name that matched nothing
 stays the literal text), labelled with its current name and a `called_kind` of `model`,
 `alias`, `router` or `unknown`. A rename therefore merges into one row, and `called_names`
@@ -48,24 +59,32 @@ Grouped by `requested`, a renamed model, alias or router appears as separate row
 and after the rename, because usage stores the name the client sent; `called` merges them.
 The `requested` filter selects one exact spelling.
 
-![Usage by day, by called name](/screenshots/usage.png)
+![The Usage page, by model](/screenshots/usage.png)
+
+**From** and **To** are date and time pickers in the browser's time zone, and every request
+the page makes sends that zone as `tz`. **To** includes the chosen minute. The defaults are
+local midnight 29 days ago and now. The chart and the insight sparklines bucket by local
+hour when the range is at most 48 hours, and by local day otherwise.
 
 The filter bar matches the one on Requests: range, zone, team, model and **Group by** on one
-row, and upstream model, alias, router, endpoint and model type under **More filters**. The
+row on a wide screen, and upstream model, alias, router, endpoint and model type under **More filters**. The
 MCP and A2A tabs have the range, zone, team and **Group by** only. The routing-specific
 filters and group-by choices are only available to an installation admin.
 
-**Group by** offers Called name (the default), Served model, Called × served, As typed,
-Upstream model, Alias, Router, Endpoint, Model type, Status, Team, Owner, API key and Day;
-a member gets the ones that are not routing detail. With **All zones** each row also names
-its zone.
+**Group by** offers Model (the called name, the default), Served model, Model × served,
+As typed, Upstream model, Alias, Router, Endpoint, Model type, Status, Team, Owner, API key
+and Day; a member gets the ones that are not routing detail. With **All zones** each row also
+names its zone.
 
 The LLM tab has a **View** switch beside the tabs, **Usage** or **Cost** (kept per browser,
 Usage by default), that reshapes the whole tab.
 
 - **Usage** shows an insights row of requests, tokens, error rate, p95 latency and
   (installation admin only) fallback rate for the range, each with its change against the
-  previous range of the same length (`compare=previous`). The chart's metric is tokens, requests or errors, the
+  previous range of the same length (`compare=previous`), shown as an arrow and a percentage
+(percentage points for a rate), and a sparkline of the metric over the range behind it. p95
+latency and fallback rate have no sparkline with **All zones**, as a percentile cannot be
+merged across zones. The chart's metric is tokens, requests or errors, the
   leaderboards rank by tokens, and the table lists requests, tokens (with a bar), prompt and
   completion tokens, audio seconds, error share and p95.
 - **Cost** shows spend, average cost per request, cost per million tokens and the number of
@@ -75,25 +94,29 @@ Usage by default), that reshapes the whole tab.
   request and unpriced requests. The note about requests counted at $0 for lack of a price
   appears here.
 
-The page's leaderboards follow the same view. For a plain member, the **Keys** and **Users**
-boards appear only when one of the rows is their own; otherwise they would repeat the total
-under an anonymous label.
+The **Top 10** card follows the same view: a switch picks **Models**, **Keys** or **Users**,
+and each row lists tokens and requests in aligned columns (spend and requests in the Cost
+view) with a bar of the ranked value. Without a zone filter a name, key or user is one row
+across zones. Only an installation admin sees whether a model row is a model, an alias or a
+router. For a plain member, **Keys** and **Users** are offered only when one of the rows is
+their own; otherwise they would repeat the total under an anonymous label.
 
 ![The Cost view](/screenshots/usage-cost.png)
 
 **The chart follows the grouping.** Its series are the first non-day dimension of
-**Group by** (`group_by=day,<dimension>` with the page's filters; **Day** is a single
-series). The top eight series by the chosen metric keep a palette colour and the rest fold
+**Group by** (`group_by=day,<dimension>` or `hour,<dimension>` with the page's filters;
+**Day** is a single series). Click a legend entry to hide or show its series; **Show all**
+brings every series back. The top eight series by the chosen metric keep a palette colour and the rest fold
 into **Other**, whose names the tooltip and legend list. Except when grouped by **Day**, the chart type switches between
-stacked bars over UTC days, a share donut and ranked bars, and, on the Usage view, the
+stacked bars over local days or hours, a share donut and ranked bars, and, on the Usage view, the
 metric between tokens, requests and errors (kept per browser). A model with no price is named and left out of
 cost instead of being drawn as zero; **Show data table** lists the same numbers as text.
 
 On the Usage view the table adds the error share and p95 latency per row (p95 is empty where the answer came
-from the monthly totals, which hold no durations). A called-name row shows its kind and,
-with several spellings, lists them in a tooltip; an installation admin can open **Served
-by** on it for the called × served breakdown (served model, upstream model, fallback share,
-p95). **View** opens [Requests](./requests.md) on the same name, range and team. The MCP
+from the monthly totals, which hold no durations). A model row shows, to an installation
+admin, whether it is a model, an alias or a router and, with several spellings, lists them in a tooltip; an installation admin can open **Served
+by** on it for the model × served breakdown (served model, upstream model, fallback share,
+p95). **View** opens [Requests](./requests.md) on the same name, range (to the minute) and team. The MCP
 and A2A tabs add a status donut and ranked bars of the top servers, agents, methods or
 tools by requests or errors.
 
@@ -112,16 +135,18 @@ tracing backend ([Metrics, alerts and tracing](../operations/observability.md)).
 ## Leaderboard
 
 `GET /api/v1/usage/leaderboard` (`getUsageLeaderboard`) ranks the caller's readable teams by
-tokens or by spend. `zone` optionally restricts the results; omitted means every zone.
-Installation admins rank every team; everyone else only the teams they can read. `by`
-selects the board:
+tokens or by spend. `zone` optionally restricts the results; omitted means every zone and
+merges the zones: the same called name or owner is one row whose `zone` is null, with its
+tokens summed across zones. Passing `zone` keeps the board per zone, and each row then
+names that zone. Installation admins rank every team; everyone else only the teams they
+can read. `by` selects the board:
 
 | `by` | Ranks | Extra row fields |
 | --- | --- | --- |
-| `called` | The catalog items clients called, renames merged, summed across the readable teams in each zone (the Usage page's **Called names** board) | `zone`, `called`, `called_kind` |
-| `requested` | The names as typed, summed across the readable teams in each zone | `zone`, `requested` |
-| `key` | API keys, grouped within their team and zone | `zone`, `team_id`, `key` (when readable) |
-| `owner` | Users and service accounts, grouped within their team and zone | `zone`, `team_id`, `owner_kind`, `owner_id`, `is_me` |
+| `called` | The catalog items clients called, renames merged, summed across the readable teams (and, without a `zone` filter, every zone) | `zone` (null when merged), `called`, `called_kind` |
+| `requested` | The names as typed, summed across the readable teams (and, without a `zone` filter, every zone) | `zone` (null when merged), `requested` |
+| `key` | API keys, grouped within their team (and, with a `zone` filter, within that zone) | `zone` (null when merged), `team_id`, `key` (when readable) |
+| `owner` | Users and service accounts, grouped within their team (and, with a `zone` filter, within that zone) | `zone` (null when merged), `team_id`, `owner_kind`, `owner_id`, `is_me` |
 
 Rows are ordered by `total_tokens` descending, then `cost_nano_usd`, or with `order=cost` by
 `cost_nano_usd` descending, then `total_tokens` (the Usage page's **Cost** view), and numbered

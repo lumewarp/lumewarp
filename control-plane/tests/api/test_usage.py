@@ -42,6 +42,14 @@ def query(client, headers=ADMIN_AUTH, **params):
     )
 
 
+def window(client, start: datetime, end: datetime, headers=ADMIN_AUTH, **params):
+    return client.get(
+        "/api/v1/usage",
+        params={"from": start.isoformat(), "to": end.isoformat(), **params},
+        headers=headers,
+    )
+
+
 def called_event(
     key,
     *,
@@ -847,6 +855,109 @@ async def test_compare_previous_returns_the_prior_range_totals(client, committed
     assert previous["retried_count"] == 0
     assert previous["p50_duration_ms"] == pytest.approx(40)
     assert query(client, group_by="requested", team_id=str(team.id)).json()["previous"] is None
+
+
+async def test_day_bucket_follows_tz(client, committed) -> None:
+    team = await make_team(committed)
+    key = await make_key(committed, team, await make_service_account(committed, team))
+    committed.add(usage_event(key, ts=datetime(2026, 11, 22, 17, 30, tzinfo=UTC), requested="late"))
+    await committed.commit()
+    start = datetime(2026, 11, 22, tzinfo=UTC)
+    end = datetime(2026, 11, 24, tzinfo=UTC)
+
+    utc = window(client, start, end, group_by="day", tz="UTC", team_id=str(team.id))
+    assert utc.status_code == 200, utc.text
+    assert [row["date"] for row in utc.json()["items"]] == ["2026-11-22"]
+
+    # 17:30Z is 01:30 the next day in Asia/Taipei.
+    taipei = window(client, start, end, group_by="day", tz="Asia/Taipei", team_id=str(team.id))
+    assert taipei.status_code == 200, taipei.text
+    assert [row["date"] for row in taipei.json()["items"]] == ["2026-11-23"]
+
+    bad = window(client, start, end, group_by="day", tz="Not/AZone", team_id=str(team.id))
+    assert bad.status_code == 422, bad.text
+    assert "tz" in bad.text
+
+
+async def test_hour_bucket_is_aware_and_merges_the_same_hour(client, committed) -> None:
+    team = await make_team(committed)
+    key = await make_key(committed, team, await make_service_account(committed, team))
+    committed.add_all(
+        [
+            usage_event(key, ts=datetime(2026, 3, 10, 10, 5, tzinfo=UTC), requested="a"),
+            usage_event(key, ts=datetime(2026, 3, 10, 10, 55, tzinfo=UTC), requested="b"),
+            usage_event(key, ts=datetime(2026, 3, 10, 11, 5, tzinfo=UTC), requested="c"),
+        ]
+    )
+    await committed.commit()
+
+    rows = query(client, group_by="hour", team_id=str(team.id)).json()["items"]
+    assert [row["requests"] for row in rows] == [2, 1]
+    hours = [datetime.fromisoformat(row["hour"]) for row in rows]
+    assert all(hour.tzinfo is not None and hour.minute == 0 and hour.second == 0 for hour in hours)
+    assert hours == [datetime(2026, 3, 10, 10, tzinfo=UTC), datetime(2026, 3, 10, 11, tzinfo=UTC)]
+
+    # A half-hour zone starts its local hour on a :30 UTC instant.
+    kolkata = query(client, group_by="hour", tz="Asia/Kolkata", team_id=str(team.id)).json()[
+        "items"
+    ]
+    assert [row["requests"] for row in kolkata] == [1, 2]
+    assert [datetime.fromisoformat(row["hour"]) for row in kolkata] == [
+        datetime(2026, 3, 10, 9, 30, tzinfo=UTC),
+        datetime(2026, 3, 10, 10, 30, tzinfo=UTC),
+    ]
+
+
+async def test_hour_bucket_keeps_both_fall_back_hours(client, committed) -> None:
+    # 2026-11-01 01:30 happens twice in New York (EDT, then EST): two hours, two buckets.
+    team = await make_team(committed)
+    key = await make_key(committed, team, await make_service_account(committed, team))
+    committed.add_all(
+        [
+            usage_event(key, ts=datetime(2026, 11, 1, 5, 30, tzinfo=UTC)),
+            usage_event(key, ts=datetime(2026, 11, 1, 6, 30, tzinfo=UTC)),
+        ]
+    )
+    await committed.commit()
+
+    rows = window(
+        client,
+        datetime(2026, 11, 1, tzinfo=UTC),
+        datetime(2026, 11, 2, tzinfo=UTC),
+        group_by="hour",
+        tz="America/New_York",
+        team_id=str(team.id),
+    ).json()["items"]
+    assert [(datetime.fromisoformat(row["hour"]), row["requests"]) for row in rows] == [
+        (datetime(2026, 11, 1, 5, tzinfo=UTC), 1),
+        (datetime(2026, 11, 1, 6, tzinfo=UTC), 1),
+    ]
+
+
+async def test_hour_range_limit_and_cursor(client, committed) -> None:
+    team = await make_team(committed)
+    key = await make_key(committed, team, await make_service_account(committed, team))
+    committed.add_all(
+        [
+            usage_event(key, ts=datetime(2026, 3, 10, 10, tzinfo=UTC)),
+            usage_event(key, ts=datetime(2026, 3, 10, 12, tzinfo=UTC)),
+        ]
+    )
+    await committed.commit()
+
+    whole = query(client, group_by="hour", team_id=str(team.id)).json()["items"]
+    first = query(client, group_by="hour", team_id=str(team.id), limit=1).json()
+    assert first["next_cursor"] is not None
+    rest = query(client, group_by="hour", team_id=str(team.id), cursor=first["next_cursor"]).json()[
+        "items"
+    ]
+    assert first["items"] + rest == whole
+
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    end = datetime(2026, 2, 2, tzinfo=UTC)
+    too_long = window(client, start, end, group_by="hour", team_id=str(team.id))
+    assert too_long.status_code == 422, too_long.text
+    assert "31 days" in too_long.text
 
 
 async def test_merged_groups_with_unequal_upstream_lists_do_not_fail(client, committed) -> None:

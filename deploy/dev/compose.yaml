@@ -50,10 +50,11 @@ services:
     volumes:
       - ./keycloak/realm.json:/opt/keycloak/data/import/realm.json:ro
 
-  # Dev-only OpenFGA. Uses its in-memory datastore: tuples and models are gone
-  # after a restart, and `scripts/dev-idp.sh up` seeds the model again.
+  # Dev-only OpenFGA, started only with the `openfga` profile (`DEV_AUTHZ=openfga make dev`).
+  # Uses its in-memory datastore: tuples and models are gone after a restart, and
+  # `lumewarp-control-plane openfga init` seeds the model again.
   openfga:
-    profiles: ["idp"]
+    profiles: ["openfga"]
     image: openfga/openfga:v1.22.0
     command:
       - run
@@ -65,5 +66,69 @@ services:
     ports:
       - "127.0.0.1:18081:8080"
 
+  # The extras below start only with `DEV_EXTRAS=1 make dev` (profile `extras`).
+
+  # Prometheus on 127.0.0.1:19090 scraping the dev gateways and control plane, with the
+  # shipped rules; no persistence.
+  prometheus:
+    profiles: ["extras"]
+    image: prom/prometheus:v3.5.0
+    network_mode: host
+    command:
+      - --config.file=/etc/prometheus/prometheus.yaml
+      - --web.listen-address=127.0.0.1:19090
+      - --storage.tsdb.retention.time=2d
+    volumes:
+      - ./prometheus.yaml:/etc/prometheus/prometheus.yaml:ro
+      - ../prometheus/rules.yaml:/etc/prometheus/rules.yaml:ro
+
+  # Grafana on 127.0.0.1:13000 (anonymous admin) with the shipped dashboards.
+  grafana:
+    profiles: ["extras"]
+    image: grafana/grafana:12.1.1
+    network_mode: host
+    environment:
+      GF_SERVER_HTTP_ADDR: 127.0.0.1
+      GF_SERVER_HTTP_PORT: "13000"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/lumewarp-overview.json
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../grafana/dashboards:/var/lib/grafana/dashboards:ro
+
+  # Open WebUI with the demo key, for the gateway's OpenAI API and its aggregate MCP
+  # endpoint. `make dev` starts it once the demo key exists.
+  # Its connections come from the environment on every start, so settings changed in its
+  # admin panel do not survive a restart; chats live in the volume.
+  openwebui:
+    profiles: ["extras"]
+    image: ghcr.io/open-webui/open-webui:v0.12.5
+    network_mode: host
+    environment:
+      PORT: "3000"
+      HOST: 127.0.0.1
+      WEBUI_AUTH: "False"
+      WEBUI_SECRET_KEY: dev-only-open-webui-secret
+      ENABLE_PERSISTENT_CONFIG: "False"
+      ENABLE_OLLAMA_API: "False"
+      OPENAI_API_BASE_URL: http://127.0.0.1:4000/v1
+      OPENAI_API_KEY: ${DEV_DEMO_KEY:-}
+      TOOL_SERVER_CONNECTIONS: >-
+        [{"type":"mcp","url":"http://127.0.0.1:4000/mcp","path":"","auth_type":"none","key":"",
+        "headers":{"X-Lumewarp-Key":"${DEV_DEMO_KEY:-}"},"config":{"enable":true},
+        "info":{"id":"lumewarp","name":"Lumewarp","description":"Lumewarp gateway, every MCP server the demo key may use"}}]
+      ENABLE_EVALUATION_ARENA_MODELS: "False"
+      OFFLINE_MODE: "True"
+      ANONYMIZED_TELEMETRY: "False"
+      DO_NOT_TRACK: "True"
+      SCARF_NO_ANALYTICS: "True"
+    volumes:
+      - openwebui:/app/backend/data
+
 volumes:
   lumewarp-pg:
+  openwebui:

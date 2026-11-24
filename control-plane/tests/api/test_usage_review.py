@@ -123,10 +123,10 @@ async def test_name_and_missing_filters_are_anded(client, committed, api_scope, 
 
 def test_default_scope_queries_do_not_collect_catalog_refs():
     for groups in (["day", "requested"], ["team"], ["owner"], []):
-        stmt, _, kinds, upstream = _events_query(groups, None, START, END, [])
+        stmt, _, kinds, upstream = _events_query(groups, None, START, END, [], "UTC")
         sql = str(stmt)
         assert "JOIN" not in sql and "DISTINCT" not in sql
         assert kinds == [] and not upstream
-    stmt, _, kinds, upstream = _events_query(["alias"], None, START, END, [])
+    stmt, _, kinds, upstream = _events_query(["alias"], None, START, END, [], "UTC")
     assert kinds == ["model", "alias"] and not upstream
     assert "usage_reduced" in str(stmt)

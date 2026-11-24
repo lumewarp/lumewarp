@@ -58,7 +58,9 @@ test("SSO availability and login errors follow session discovery", async ({ page
     await expect(page.getByRole("button", { name: "Sign in with SSO" })).toBeVisible();
     await expect(page.getByRole("alert")).toContainText(message);
   }
-  // The emergency password form stays available as the secondary option.
+  // The emergency password form stays available as the secondary option, folded away.
+  await expect(page.getByLabel("Break-glass password")).toHaveCount(0);
+  await page.getByRole("button", { name: "Emergency sign-in" }).click();
   await expect(page.getByLabel("Break-glass password")).toBeVisible();
   await page.setViewportSize({ width: 1280, height: 900 });
   await shot(page, "smoke-login-error-desktop");
@@ -76,6 +78,15 @@ test("SSO availability and login errors follow session discovery", async ({ page
   const request = await loginRequest;
   expect(new URL(request.url()).searchParams.get("next")).toBe("/teams/return-here");
   expect(request.headers().authorization).toBeUndefined();
+});
+
+test("the SSO button names the IdP when the server sends a display name", async ({ page }) => {
+  await page.route("**/api/v1/session", (route) =>
+    route.fulfill({ json: { oidc_enabled: true, sso_display_name: "Keycloak", break_glass_enabled: true, authenticated: false } }),
+  );
+  await page.goto("/login");
+  await expect(page.getByRole("button", { name: "Sign in with Keycloak" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Emergency sign-in" })).toHaveAttribute("aria-expanded", "false");
 });
 
 test("cookie session: CSRF on writes, inline member errors, key owner state, logout", async ({ page }) => {

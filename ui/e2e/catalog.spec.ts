@@ -599,8 +599,8 @@ test("My keys shows what a new key can call; a member cannot open admin pages", 
 
 test("usage: grouped by called name by default, served model with how each request was reached, and filters", async ({ page, request }) => {
   await signIn(page, request, "/usage");
-  await expect(page.getByLabel("Group by")).toHaveText("Called name");
-  await expect(page.getByRole("columnheader", { name: "Called name", exact: true })).toBeVisible();
+  await expect(page.getByLabel("Group by")).toHaveText("Model");
+  await expect(page.getByRole("columnheader", { name: "Model", exact: true })).toBeVisible();
   await pick(page, "Group by", "Served model");
   await expect(page.getByLabel("Group by")).toHaveText("Served model");
   const headers = page.getByRole("columnheader");
@@ -683,7 +683,7 @@ test("usage: loading, then a refusal (no permission) with a way to retry", async
   await page.getByTestId("state-error").getByRole("button", { name: "Retry" }).click();
   await expect(page.getByTestId("state-error")).toHaveCount(0);
   await expect(page.getByText("No usage in this period.")).toHaveCount(0);
-  await expect(page.getByRole("columnheader", { name: "Called name", exact: true })).toBeVisible();
+  await expect(page.getByRole("columnheader", { name: "Model", exact: true })).toBeVisible();
 });
 
 test("rollback: a 422 about missing strategies offers a forced confirm, other 422s show the error", async ({ page, request }) => {

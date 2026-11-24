@@ -1395,14 +1395,15 @@ export interface paths {
          * Get Usage
          * @description Aggregate usage within the caller's existing team/key permission scope.
          *
-         *     `day,requested` is the default; `requested` is the literal name the client called, so a
-         *     renamed model, alias or router appears as separate before/after names. `called` groups
-         *     by the catalog item instead (the alias, else the router, else the model, else the
-         *     literal), so a rename merges; it is visible to every caller, as are `status_class` and
-         *     `outcome`. Only an installation admin may group or filter by `model`, `upstream_model`,
-         *     `alias`, `router` or `fallback` and their ids/`_missing` variants; any other caller gets
-         *     403 `routing_detail_forbidden` and never receives `served_by`, `via_aliases`,
-         *     `via_routers` or `upstream_model(s)`.
+         *     `day,requested` is the default; `day` is the calendar day in `tz`, and `hour` gives
+         *     aware one-hour buckets (at most a 31-day range). `requested` is the literal name the
+         *     client called, so a renamed model, alias or router appears as separate before/after
+         *     names. `called` groups by the catalog item instead (the alias, else the router, else the
+         *     model, else the literal), so a rename merges; it is visible to every caller, as are
+         *     `status_class` and `outcome`. Only an installation admin may group or filter by `model`,
+         *     `upstream_model`, `alias`, `router` or `fallback` and their ids/`_missing` variants. Any
+         *     other caller gets 403 `routing_detail_forbidden` and never receives `served_by`,
+         *     `via_aliases`, `via_routers` or `upstream_model(s)`.
          *
          *     Every row carries fallback/retry counts and p50/p95/p99 durations. The percentiles are
          *     null on the monthly totals fast path, which stores no durations. `compare=previous`
@@ -1454,7 +1455,8 @@ export interface paths {
          *     across the readable teams (a renamed model, alias or router shows as separate names).
          *     `by=called` groups the called catalog item instead (the alias, else the router, else the
          *     model, else the literal), so a rename merges; it is visible to every caller. `by=key`
-         *     and `by=owner` group within the team and return `team_id`.
+         *     and `by=owner` group within the team and return `team_id`. Without a `zone` filter rows
+         *     merge every zone of that identity and their `zone` is null; with one they stay per zone.
          *
          *     An installation admin ranks every team. Everyone else ranks only their readable teams;
          *     a plain member therefore sees another member in the ranking but not their identity:
@@ -5012,6 +5014,11 @@ export interface components {
         SessionInfo: {
             /** Oidc Enabled */
             oidc_enabled: boolean;
+            /**
+             * Sso Display Name
+             * @description The IdP's name for the login button (`LUMEWARP_SSO_DISPLAY_NAME`), with SSO.
+             */
+            sso_display_name?: string | null;
             /** Break Glass Enabled */
             break_glass_enabled: boolean;
             /** Authenticated */
@@ -5680,9 +5687,9 @@ export interface components {
             rank: number;
             /**
              * Zone
-             * @description The zone this row was ranked in.
+             * @description The zone this row was ranked in; null when no `zone` filter was given and the row merges every zone of that identity.
              */
-            zone: string;
+            zone?: string | null;
             /**
              * Label
              * @description What the row names: the called name, the key's name or the owner's name; an unreadable key or owner is `Key #<rank>` or `Member #<rank>`.
@@ -5790,7 +5797,9 @@ export interface components {
          *     router, else the model, else the literal `requested`), labelled with its current
          *     name; `called_kind` says which and `called_names` lists every literal spelling
          *     seen, so a rename merges. `status_class` buckets the HTTP status, `outcome` is the
-         *     gateway outcome and `fallback` is the grouped fallback flag.
+         *     gateway outcome and `fallback` is the grouped fallback flag. `date` is the calendar
+         *     day in the query's `tz`, and `hour` is the aware instant of that zone's one-hour bucket
+         *     start (serialized in UTC).
          *
          *     `error_count` and `total_duration_ms` describe how the group's requests ended
          *     (an error outcome, or a 4xx/5xx status that is not a client cancellation;
@@ -5813,8 +5822,16 @@ export interface components {
              * @default 0
              */
             audio_ms: number;
-            /** Date */
+            /**
+             * Date
+             * @description Calendar day in the query's `tz`; only when `day` is grouped.
+             */
             date?: string | null;
+            /**
+             * Hour
+             * @description Aware instant of the one-hour bucket start of the query's `tz`, serialized in UTC; only when `hour` is grouped.
+             */
+            hour?: string | null;
             kind?: components["schemas"]["TrafficKind"] | null;
             /** Target */
             target?: string | null;
@@ -12896,7 +12913,10 @@ export interface operations {
             query?: {
                 from?: string | null;
                 to?: string | null;
+                /** @description Comma-separated dimensions to group by; default `day,requested`. `hour` limits the range to 31 days. */
                 group_by?: string | null;
+                /** @description IANA time zone used to bucket `day` and `hour`, e.g. `Asia/Taipei`; default `UTC`. An unknown zone is 422. */
+                tz?: string;
                 team_id?: string | null;
                 user_id?: string | null;
                 service_account_id?: string | null;

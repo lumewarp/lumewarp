@@ -13,9 +13,8 @@ import { CatalogFilter } from "../components/CatalogPicker";
 import { ComboboxField } from "../components/ui/combobox-field";
 import { useCan, useMe, useNames, useTeamDirectory, useTeams, useZoneFilter } from "../hooks";
 import { ZoneBadge } from "../zone";
-import { dayStart, shiftDay } from "../lib/days";
+import { fromLocalInput, localDayBounds, toLocalInput } from "../lib/days";
 import type { RequestsSearch } from "../lib/requests";
-import { localDayOf } from "./keyText";
 import { OUTCOME_TONE, outcomeLabel, RequestDetail, StatusBadge } from "./RequestDetail";
 import { KeyPill } from "../components/KeyPill";
 
@@ -54,10 +53,15 @@ interface Filters {
   requestId: string;
 }
 
-/** A URL day or ISO instant as the date input's local day. */
-const dayOf = (value: string | undefined) => {
+/**
+ * A URL value as a local `datetime-local` value: an ISO instant shows in local time, and a bare day
+ * (an older link) is that local day, from midnight to its last minute.
+ */
+const inputOf = (value: string | undefined, edge: "from" | "to") => {
   if (!value) return "";
-  return /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : localDayOf(value);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return toLocalInput(value);
+  const day = localDayBounds(value).from;
+  return edge === "from" ? toLocalInput(day) : toLocalInput(new Date(day.getFullYear(), day.getMonth(), day.getDate(), 23, 59));
 };
 
 const initialFilters = (search: RequestsSearch): Filters => ({
@@ -71,14 +75,19 @@ const initialFilters = (search: RequestsSearch): Filters => ({
   router: search.router ?? "",
   status: search.status && /^\d+$/.test(search.status) ? Number(search.status) : null,
   outcome: OUTCOMES.some((item) => item.value !== "" && item.value === search.outcome) ? (search.outcome as Schemas["RequestOutcome"]) : "",
-  from: dayOf(search.from),
-  to: dayOf(search.to),
+  from: inputOf(search.from, "from"),
+  to: inputOf(search.to, "to"),
   requestId: search.request_id ?? "",
 });
 
 const trimmed = (value: string) => value.trim() || undefined;
 
-/** The API query: the day range is inclusive on screen and exclusive at its end, as on Usage. */
+/** The API query: the range is local time; the To minute is included, so the exclusive end is a minute later. */
+const endOf = (value: string) => {
+  const instant = fromLocalInput(value);
+  return instant ? new Date(Date.parse(instant) + 60_000).toISOString() : undefined;
+};
+
 function queryOf(filters: Filters, cursor: string | undefined, routing: boolean, zone: string | undefined): RequestsQuery {
   return {
     zone,
@@ -95,8 +104,8 @@ function queryOf(filters: Filters, cursor: string | undefined, routing: boolean,
     status: filters.status ?? undefined,
     outcome: filters.outcome || undefined,
     request_id: trimmed(filters.requestId),
-    from: filters.from ? dayStart(filters.from) || undefined : undefined,
-    to: filters.to ? dayStart(shiftDay(filters.to, 1)) || undefined : undefined,
+    from: fromLocalInput(filters.from) || undefined,
+    to: endOf(filters.to),
     cursor,
   };
 }
@@ -207,7 +216,7 @@ export function Requests() {
       <PageHeader title="Requests" hint="No prompt or response content is stored; copy a request id to look it up in OTel." />
       <FilterBar
         testId="request-filters"
-        className={perms.canReadRouting ? "lg:grid-cols-[10rem_10rem_repeat(5,minmax(0,1fr))_auto]" : "lg:grid-cols-[10rem_10rem_repeat(4,minmax(0,1fr))_auto]"}
+        className={perms.canReadRouting ? "2xl:grid-cols-[13rem_13rem_repeat(5,minmax(0,1fr))_auto]" : "2xl:grid-cols-[13rem_13rem_repeat(4,minmax(0,1fr))_auto]"}
         more={{
           active: extraActive,
           onClear: clearExtra,
@@ -230,8 +239,8 @@ export function Requests() {
           ),
         }}
       >
-        <TextField label="From" type="date" value={filters.from} onChange={(value) => change({ from: value })} hint="Empty starts 24 hours ago." />
-        <TextField label="To" type="date" value={filters.to} onChange={(value) => change({ to: value })} hint="Inclusive; empty ends now." />
+        <TextField label="From" type="datetime-local" value={filters.from} onChange={(value) => change({ from: value })} hint="Empty starts 24 hours ago; times are in your browser's time zone." />
+        <TextField label="To" type="datetime-local" value={filters.to} onChange={(value) => change({ to: value })} hint="Includes the chosen minute; empty ends now." />
         <ComboboxField
           label="Team"
           value={filters.teamId}

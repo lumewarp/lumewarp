@@ -90,9 +90,9 @@ test("manual screenshots", async ({ page, request, browser }) => {
   await shot(page, "usage-cost");
   await page.getByTestId("usage-lens").getByRole("button", { name: "Usage", exact: true }).click();
   // The seeded traffic spans two weeks; the page defaults to 24 hours, which may be an empty window.
-  const to = new Date().toISOString().slice(0, 10);
-  const from = new Date(Date.now() - 14 * 86_400_000).toISOString().slice(0, 10);
-  await page.goto(`/requests?from=${from}&to=${to}`);
+  const to = new Date().toISOString();
+  const from = new Date(Date.now() - 14 * 86_400_000).toISOString();
+  await page.goto(`/requests?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
   await expect(page.getByRole("heading", { name: "Requests" })).toBeVisible();
   await page.getByLabel("Zone", { exact: true }).click();
   await page.getByRole("option", { name: "All zones", exact: true }).click();
