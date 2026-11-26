@@ -5,8 +5,8 @@ import { signIn, VIEWER } from "./selfService";
 
 /*
  * The usage chart follows the table's grouping: its series are the first non-day dimension of Group by
- * (`group_by=day,<dimension>`, a single series for Day), drawn as stacked bars over days, a share donut or
- * ranked bars, in tokens, cost, requests or errors. serve.py seeds a trend across UTC days, a model with no
+ * (`group_by=day,<dimension>`, a single series for Day), drawn as stacked bars over days in tokens, cost or
+ * requests; errors draw successful and failed requests instead. serve.py seeds a trend across UTC days, a model with no
  * price and nine models on one day; the cases that need exact rows mock the chart's own query.
  */
 
@@ -24,7 +24,6 @@ const tooltip = (page: Page) => page.getByTestId("usage-chart-tooltip");
 const legend = (page: Page) => chart(page).getByTestId("usage-chart-legend");
 const metric = (page: Page, name: "Tokens" | "Requests" | "Errors") => page.getByTestId("usage-chart-metric").getByRole("button", { name, exact: true });
 const lens = (page: Page, name: "Usage" | "Cost") => page.getByTestId("usage-lens").getByRole("button", { name, exact: true });
-const view = (page: Page, name: "Over time" | "Share" | "Ranked") => page.getByTestId("usage-chart-view").getByRole("button", { name, exact: true });
 
 /** The same numbers the chart draws, from the API: `day,called` rows for an inclusive UTC day range. */
 async function apiRows(request: APIRequestContext, from: string, to: string): Promise<ApiRow[]> {
@@ -156,31 +155,61 @@ test("group by: the chart's query and legend follow the table's grouping", async
   await expect(legend(page).locator('[data-series="typed-x"]')).toHaveCount(1);
   expect(seen.at(-1)).toBe("day,requested");
 
-  // Day: a single series, no share or ranked views.
+  // Day: a single series.
   await pickGroup("Day");
   expect(seen.at(-1)).toBe("day");
   await expect(legend(page).locator("[data-series]")).toHaveCount(1);
   await expect(page.getByTestId("usage-chart-view")).toHaveCount(0);
 });
 
-test("chart type: stacked bars, a share donut and ranked bars over the same series", async ({ page, request }) => {
+test("chart type: stacked bars over time only, with no view toggle", async ({ page, request }) => {
   await signInAsAdmin(page, request);
   const today = isoDay(new Date());
   await mockChart(page, [row(today, { called: "big" }, 900), row(today, { called: "small" }, 100)]);
   await page.goto("/usage");
-  await expect(chart(page).getByTestId("usage-chart-plot")).toHaveAttribute("data-view", "stacked");
-  await view(page, "Share").click();
-  await expect(chart(page).getByTestId("usage-chart-plot")).toHaveAttribute("data-view", "share");
-  await expect(chart(page).locator(".recharts-pie-sector").first()).toBeVisible();
-  await expect(legend(page).locator("[data-series]")).toHaveCount(2);
-  await view(page, "Ranked").click();
+  await expect(chart(page).getByTestId("usage-chart-plot")).toBeVisible();
   await expect(chart(page).locator(".recharts-bar-rectangle").first()).toBeVisible();
-  await expect(chart(page).locator(".recharts-bar-rectangle")).toHaveCount(2);
-  await view(page, "Over time").click();
-  await expect(chart(page).getByTestId("usage-chart-plot")).toHaveAttribute("data-view", "stacked");
+  await expect(page.getByTestId("usage-chart-view")).toHaveCount(0);
+  await expect(chart(page).locator(".recharts-pie-sector")).toHaveCount(0);
 });
 
-test("legend: an item toggles its series in the bars, the tooltip and the share total; Show all restores", async ({ page, request }) => {
+test("errors metric: two series, Success and Error instead of a per-model stack", async ({ page, request }) => {
+  await signInAsAdmin(page, request);
+  const today = isoDay(new Date());
+  const yesterday = daysAgo(1);
+  await mockChart(page, [
+    row(yesterday, { called: "alpha", error_count: 1 }, 100, 0, 0, 4),
+    row(today, { called: "alpha", error_count: 2 }, 300, 0, 0, 10),
+    row(today, { called: "beta", error_count: 1 }, 200, 0, 0, 5),
+    row(today, { called: "gamma" }, 50, 0, 0, 3),
+  ]);
+  await page.goto("/usage");
+  await setRange(page, daysAgo(2), today);
+  await metric(page, "Errors").click();
+  await expect(chart(page)).toHaveAttribute("data-metric", "errors");
+  await expect(legend(page).locator("[data-series]")).toHaveCount(2);
+  expect(await legend(page).locator("[data-series]").evaluateAll((items) => items.map((item) => item.getAttribute("data-series")))).toEqual(["Success", "Error"]);
+  await expect(chart(page)).toContainText("success and errors");
+
+  // Today: 18 requests, 3 of them errors.
+  await hoverLastDay(page);
+  await expect(tooltip(page)).toContainText("Success");
+  await expect(tooltip(page)).toContainText("Error");
+  await expect(page.getByTestId("usage-chart-tooltip-total")).toHaveText("18");
+
+  await page.getByTestId("usage-chart-table-toggle").click();
+  const table = page.getByTestId("usage-chart-table");
+  expect(await table.getByRole("columnheader").allTextContents()).toEqual(["Day", "Success", "Error", "Total"]);
+  expect(await table.getByRole("row").filter({ hasText: today }).getByRole("cell").allTextContents()).toEqual([today, "15", "3", "18"]);
+
+  // Hiding Error leaves the successful requests only.
+  await legend(page).locator('[data-series="Error"] button').click();
+  await hoverLastDay(page);
+  await expect(tooltip(page)).toContainText("15");
+  await expect(tooltip(page)).not.toContainText("Error");
+});
+
+test("legend: an item toggles its series in the bars and the tooltip; Show all restores", async ({ page, request }) => {
   await signInAsAdmin(page, request);
   const today = isoDay(new Date());
   await mockChart(page, [row(today, { called: "big" }, 900), row(today, { called: "small" }, 100)]);
@@ -198,10 +227,6 @@ test("legend: an item toggles its series in the bars, the tooltip and the share 
   await expect(tooltip(page)).toContainText("big");
   await expect(tooltip(page)).not.toContainText("small");
 
-  await view(page, "Share").click();
-  const centre = chart(page).getByTestId("usage-chart-plot").locator("span.text-xl");
-  await expect(centre).toHaveText("900");
-  await view(page, "Ranked").click();
   await expect(chart(page).locator(".recharts-bar-rectangle")).toHaveCount(1);
 
   // The data table keeps every series.
@@ -215,8 +240,8 @@ test("legend: an item toggles its series in the bars, the tooltip and the share 
   await page.getByTestId("usage-chart-show-all").click();
   await expect(page.getByTestId("usage-chart-show-all")).toHaveCount(0);
   await expect(item("small")).toHaveAttribute("aria-pressed", "true");
-  await view(page, "Share").click();
-  await expect(centre).toHaveText("1,000");
+  await hoverLastDay(page);
+  await expect(page.getByTestId("usage-chart-tooltip-total")).toHaveText("1,000");
 });
 
 test.describe("hour buckets in the browser's zone", () => {
@@ -314,7 +339,7 @@ test("lens: Cost reshapes tiles, chart, leaderboards and table, and survives a r
   for (const id of ["requests", "tokens", "errors", "p95", "fallback", "status"]) await expect(tiles.getByTestId(`insight-${id}`)).toHaveCount(0);
   await expect(page.getByTestId("usage-chart")).toHaveAttribute("data-metric", "cost");
   await expect(page.getByTestId("usage-chart-metric")).toHaveCount(0);
-  await expect(page.getByTestId("usage-chart-view")).toBeVisible();
+  await expect(page.getByTestId("usage-chart-view")).toHaveCount(0);
   const headers = page.getByRole("columnheader");
   for (const name of ["Requests", "Cost", "Share of cost", "Cost / request", "Unpriced", "Log"]) await expect(headers.filter({ hasText: new RegExp(`^${name.replace("/", "\\/")}$`) })).toHaveCount(1);
   for (const name of ["Prompt", "Completion", "Total tokens", "p95"]) await expect(headers.filter({ hasText: new RegExp(`^${name}$`) })).toHaveCount(0);
