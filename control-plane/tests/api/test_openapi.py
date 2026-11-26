@@ -14,6 +14,8 @@ from lumewarp_control_plane.settings import Settings
 
 METHODS = ("get", "post", "put", "patch", "delete")
 SECURITY = [{"PersonalAccessToken": []}, {"Session": []}]
+# The Alertmanager receiver authenticates with its own fixed token, never a session or PAT.
+ALERTMANAGER_SECURITY = [{"AlertmanagerToken": []}]
 # Reached without credentials: the login flow, the session probe and the health checks.
 PUBLIC = {
     "getSession",
@@ -60,13 +62,22 @@ def test_every_operation_has_a_description(spec: dict[str, Any]) -> None:
 def test_security_is_declared_on_everything_but_the_public_operations(
     spec: dict[str, Any],
 ) -> None:
-    assert set(spec["components"]["securitySchemes"]) == {"PersonalAccessToken", "Session"}
+    assert set(spec["components"]["securitySchemes"]) == {
+        "AlertmanagerToken",
+        "PersonalAccessToken",
+        "Session",
+    }
     public = set()
     for name, op in operations(spec):
         if "security" not in op:
             public.add(op["operationId"])
         else:
-            assert op["security"] == SECURITY, name
+            expected = (
+                ALERTMANAGER_SECURITY
+                if op["operationId"] == "receiveAlertmanagerWebhook"
+                else SECURITY
+            )
+            assert op["security"] == expected, name
     assert public == PUBLIC
 
 

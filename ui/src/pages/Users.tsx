@@ -7,7 +7,7 @@ import { ConfirmDialog } from "../components/Confirm";
 import { FormDialog, required, TextField, useForm } from "../components/Form";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { CreateButton, IconAction } from "../components/RowActions";
-import { DataTable } from "../components/Table";
+import { DataTable, useCursorPaging } from "../components/Table";
 import { useMe, useMut } from "../hooks";
 
 type Values = Schemas["UserCreate"];
@@ -18,8 +18,7 @@ const blank: Values = { email: "", display_name: "", is_active: true };
 
 export function Users() {
   const me = useMe();
-  const [cursor, setCursor] = useState<string | undefined>();
-  const [previousCursors, setPreviousCursors] = useState<(string | undefined)[]>([]);
+  const { cursor, page, paging } = useCursorPaging("");
   const [creating, setCreating] = useState(false);
   const [confirming, setConfirming] = useState<{ user: User; kind: ConfirmationKind } | null>(null);
   const users = useQuery({
@@ -95,33 +94,13 @@ export function Users() {
           void admins.refetch();
         }}
         rowKey={(user) => user.id}
-        paging={{
-          summary: users.data?.items.length
-            ? `${previousCursors.length * PAGE_SIZE + 1}–${previousCursors.length * PAGE_SIZE + users.data.items.length}${next ? "" : ` of ${previousCursors.length * PAGE_SIZE + users.data.items.length}`}`
+        paging={paging(
+          next,
+          users.isFetching,
+          users.data?.items.length
+            ? `${page * PAGE_SIZE + 1}–${page * PAGE_SIZE + users.data.items.length}${next ? "" : ` of ${page * PAGE_SIZE + users.data.items.length}`}`
             : "No users",
-          onFirst:
-            previousCursors.length > 0 && !users.isFetching
-              ? () => {
-                  setPreviousCursors([]);
-                  setCursor(undefined);
-                }
-              : undefined,
-          onPrevious:
-            previousCursors.length > 0 && !users.isFetching
-              ? () => {
-                  const previous = previousCursors.at(-1);
-                  setPreviousCursors((stack) => stack.slice(0, -1));
-                  setCursor(previous);
-                }
-              : undefined,
-          onNext:
-            next && !users.isFetching
-              ? () => {
-                  setPreviousCursors((stack) => [...stack, cursor]);
-                  setCursor(next);
-                }
-              : undefined,
-        }}
+        )}
         empty="No users yet."
         columns={[
           { key: "email", header: "Email", sort: (a, b) => a.email.localeCompare(b.email), cell: (user) => <strong>{user.email}</strong> },

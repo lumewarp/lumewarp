@@ -48,6 +48,28 @@ CLASSIFIED: dict[tuple[str, str], ColumnClass] = {
     ("a2a_agents", "secret_ref"): ColumnClass.ENV_REF,
     ("a2a_agents", "url"): ColumnClass.PUBLIC,
     ("a2a_agents", "zone"): ColumnClass.PUBLIC,
+    # Received from Alertmanager (bearer-authenticated): rule labels and annotations, shown
+    # to installation admins as sent. Never a credential by contract
+    # (docs/operations/alerts-and-incidents.md).
+    ("alert_targets", "kind"): ColumnClass.PUBLIC,
+    ("alert_targets", "name"): ColumnClass.PUBLIC,
+    ("alerts", "alertname"): ColumnClass.PUBLIC,
+    ("alerts", "annotations"): ColumnClass.CONFIG,
+    ("alerts", "fingerprint"): ColumnClass.PROTOCOL,
+    ("alerts", "generator_url"): ColumnClass.PUBLIC,
+    ("alerts", "labels"): ColumnClass.CONFIG,
+    ("alerts", "lumewarp_status"): ColumnClass.PUBLIC,
+    ("alerts", "severity"): ColumnClass.PUBLIC,
+    ("alerts", "status"): ColumnClass.PUBLIC,
+    ("alerts", "zone_id"): ColumnClass.PUBLIC,
+    ("incidents", "alertname"): ColumnClass.PUBLIC,
+    ("incidents", "group_key"): ColumnClass.PROTOCOL,
+    ("incidents", "lumewarp_status"): ColumnClass.PUBLIC,
+    ("incidents", "severity"): ColumnClass.PUBLIC,
+    ("incidents", "status"): ColumnClass.PUBLIC,
+    ("incidents", "zone_id"): ColumnClass.PUBLIC,
+    # A fixed gateway error code or `upstream_<status>`.
+    ("usage_events", "error_code"): ColumnClass.PROTOCOL,
     ("mcp_definitions", "definition_json"): ColumnClass.PROTOCOL,
     ("mcp_definitions", "name"): ColumnClass.PUBLIC,
     ("mcp_servers", "auth_params"): ColumnClass.CONFIG,

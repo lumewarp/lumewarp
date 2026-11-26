@@ -1,4 +1,4 @@
-import { ArrowDown, ArrowUp, ChevronLeftIcon, ChevronRightIcon, ChevronsLeftIcon, ChevronsRightIcon } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronsLeftIcon } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 
 import { cn } from "../lib/utils";
@@ -6,6 +6,7 @@ import { Alert, AlertDescription } from "./ui/alert";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
 import { Empty } from "./ui/empty";
+import { Pagination, PaginationContent, PaginationEllipsis, PaginationItem, PaginationLink, PaginationNext, PaginationPrevious } from "./ui/pagination";
 import { Skeleton } from "./ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
 
@@ -18,6 +19,8 @@ export interface Column<T> {
   align?: "right";
   /** Hide this column below the given breakpoint so a phone keeps the columns that matter. */
   hideBelow?: "sm" | "md" | "lg";
+  /** A fixed column width (CSS length), so tables stacked on one page line up. */
+  width?: string;
 }
 
 const HIDE = { sm: "hidden sm:table-cell", md: "hidden md:table-cell", lg: "hidden lg:table-cell" } as const;
@@ -44,32 +47,89 @@ interface Props<T> {
 export interface Paging {
   /** What the footer says, for example the range shown. */
   summary: ReactNode;
+  onFirst?: () => void;
   onPrevious?: () => void;
   onNext?: () => void;
-  onFirst?: () => void;
-  onLast?: () => void;
+}
+
+/** Client-side pages: numbered links in place of First. */
+interface Pages {
+  current: number;
+  count: number;
+  onPage: (page: number) => void;
+}
+
+/** The page numbers to show: the first, the last and the current one with its neighbours, gaps as null. */
+function pageWindow(current: number, count: number): (number | null)[] {
+  const shown = [...new Set([0, current - 1, current, current + 1, count - 1])].filter((p) => p >= 0 && p < count).sort((a, b) => a - b);
+  return shown.flatMap((p, i) => (i > 0 && p - shown[i - 1] > 1 ? [null, p] : [p]));
 }
 
 /**
- * The pager under a table: a summary, then icon buttons. An undefined handler disables its button; leaving
- * `onFirst` or `onLast` out of the props hides it (a cursor API has no last page).
+ * The pager under a table, built from shadcn's Pagination: a summary, then the page controls. An undefined handler
+ * disables its button; `onFirst` shows only when it is in the props, and `pages` adds numbered links.
  */
-export function TablePagination(props: Paging) {
-  const { summary, onFirst, onPrevious, onNext, onLast } = props;
-  const nav = (label: string, Icon: typeof ChevronLeftIcon, onClick: (() => void) | undefined) => (
-    <Button type="button" variant="outline" size="icon" className="size-8" aria-label={label} disabled={!onClick} onClick={onClick}>
-      <Icon aria-hidden="true" />
-    </Button>
-  );
+export function TablePagination(props: Paging & { pages?: Pages }) {
+  const { summary, onFirst, onPrevious, onNext, pages } = props;
   return (
-    <div className="flex flex-wrap items-center justify-end gap-2 border-t px-3.5 py-2 text-sm text-muted-foreground" data-testid="table-pagination">
+    <Pagination className="flex-wrap items-center justify-end gap-2 border-t px-3.5 py-2 text-sm text-muted-foreground" data-testid="table-pagination">
       <span className="mr-2 tabular-nums">{summary}</span>
-      {"onFirst" in props && nav("First page", ChevronsLeftIcon, onFirst)}
-      {nav("Previous page", ChevronLeftIcon, onPrevious)}
-      {nav("Next page", ChevronRightIcon, onNext)}
-      {"onLast" in props && nav("Last page", ChevronsRightIcon, onLast)}
-    </div>
+      <PaginationContent>
+        {"onFirst" in props && (
+          <PaginationItem>
+            <PaginationLink aria-label="First page" disabled={!onFirst} onClick={onFirst}>
+              <ChevronsLeftIcon aria-hidden="true" />
+            </PaginationLink>
+          </PaginationItem>
+        )}
+        <PaginationItem>
+          <PaginationPrevious aria-label="Previous page" disabled={!onPrevious} onClick={onPrevious} />
+        </PaginationItem>
+        {pages &&
+          pageWindow(pages.current, pages.count).map((p, i) => (
+            <PaginationItem key={p ?? `gap-${i}`}>
+              {p === null ? (
+                <PaginationEllipsis />
+              ) : (
+                <PaginationLink isActive={p === pages.current} aria-label={`Page ${p + 1}`} onClick={() => pages.onPage(p)}>
+                  {p + 1}
+                </PaginationLink>
+              )}
+            </PaginationItem>
+          ))}
+        <PaginationItem>
+          <PaginationNext aria-label="Next page" disabled={!onNext} onClick={onNext} />
+        </PaginationItem>
+      </PaginationContent>
+    </Pagination>
   );
+}
+
+/**
+ * Paging over a cursor API, which only goes forward: the cursors of the pages already seen are kept as a trail.
+ * A cursor belongs to one filter set, so a new `resetKey` starts again at the first page.
+ */
+export function useCursorPaging(resetKey: string) {
+  const [trail, setTrail] = useState<(string | undefined)[]>([undefined]);
+  // Reset during render (not in an effect) so the first query with the new filters already asks for page 1.
+  const [seenKey, setSeenKey] = useState(resetKey);
+  if (seenKey !== resetKey) {
+    setSeenKey(resetKey);
+    setTrail([undefined]);
+  }
+  const back = trail.length > 1;
+  return {
+    cursor: trail[trail.length - 1],
+    /** Zero-based index of the page shown. */
+    page: trail.length - 1,
+    /** The footer for a page whose response carried `next`; `busy` (a fetch in flight) disables the controls. */
+    paging: (next: string | null | undefined, busy: boolean, summary?: ReactNode): Paging => ({
+      summary: summary ?? `Page ${trail.length}${next ? " · more" : ""}`,
+      onFirst: back && !busy ? () => setTrail([undefined]) : undefined,
+      onPrevious: back && !busy ? () => setTrail((current) => current.slice(0, -1)) : undefined,
+      onNext: next && !busy ? () => setTrail((current) => [...current, next]) : undefined,
+    }),
+  };
 }
 
 export function DataTable<T>({ columns, rows, rowKey, loading, error, onRetry, empty = "Nothing here yet.", pageSize = 10, mutedRow, paging, onRowClick, selectedKey }: Props<T>) {
@@ -145,7 +205,7 @@ export function DataTable<T>({ columns, rows, rowKey, loading, error, onRetry, e
               {columns.map((c) => {
                 const active = sort?.key === c.key;
                 return (
-                  <TableHead key={c.key} scope="col" className={cn(c.align === "right" && "text-right", c.hideBelow && HIDE[c.hideBelow])} aria-sort={active ? (sort.dir === 1 ? "ascending" : "descending") : undefined}>
+                  <TableHead key={c.key} scope="col" className={cn(c.align === "right" && "text-right", c.hideBelow && HIDE[c.hideBelow])} style={c.width ? { width: c.width } : undefined} aria-sort={active ? (sort.dir === 1 ? "ascending" : "descending") : undefined}>
                     {c.sort ? (
                       <Button type="button" variant="ghost" size="sm" className="-mx-2 h-7 gap-1 px-2 text-left font-[inherit] uppercase tracking-[0.04em] text-[inherit] hover:text-foreground" onClick={() => toggle(c.key)}>
                         {c.header}
@@ -184,10 +244,9 @@ export function DataTable<T>({ columns, rows, rowKey, loading, error, onRetry, e
         pages > 1 && (
           <TablePagination
             summary={`${cur * pageSize + 1}–${Math.min((cur + 1) * pageSize, sorted.length)} of ${sorted.length}`}
-            onFirst={cur > 0 ? () => setPage(0) : undefined}
             onPrevious={cur > 0 ? () => setPage(cur - 1) : undefined}
             onNext={cur < pages - 1 ? () => setPage(cur + 1) : undefined}
-            onLast={cur < pages - 1 ? () => setPage(pages - 1) : undefined}
+            pages={{ current: cur, count: pages, onPage: setPage }}
           />
         )
       )}

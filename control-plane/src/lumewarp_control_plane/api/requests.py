@@ -91,6 +91,8 @@ class RequestOut(ReadModel):
     prompt_tokens: int
     completion_tokens: int
     audio_ms: int
+    error_code: str | None = None
+    ttft_ms: int | None = None
     cost_nano_usd: int
     usage_state: UsageState
     duration_ms: int
@@ -193,6 +195,10 @@ async def list_requests(
     outcome: Annotated[
         RequestOutcome | None, Query(description="Only requests with this outcome.")
     ] = None,
+    error_code: Annotated[
+        str | None,
+        Query(description="Only requests that ended with this gateway error code."),
+    ] = None,
     request_id: Annotated[
         uuid.UUID | None, Query(description="Only the request with this gateway request id.")
     ] = None,
@@ -261,6 +267,7 @@ async def list_requests(
         (UsageEvent.requested, requested),
         (UsageEvent.status, status),
         (UsageEvent.outcome, outcome),
+        (UsageEvent.error_code, error_code),
         (UsageEvent.request_id, request_id),
     ):
         if value is not None:
@@ -336,6 +343,8 @@ async def list_requests(
             prompt_tokens=event.prompt_tokens,
             completion_tokens=event.completion_tokens,
             audio_ms=event.audio_ms,
+            error_code=event.error_code,
+            ttft_ms=event.ttft_ms,
             cost_nano_usd=event.cost_nano_usd,
             usage_state=event.usage_state,
             duration_ms=event.duration_ms,

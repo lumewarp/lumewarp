@@ -3,13 +3,18 @@
 ## Gateway
 
 Scrape the **admin** port, not the primary listener. Histograms expose `_bucket`,
-`_sum`, and `_count`. Zero-valued series are pre-registered for `team=""`;
-series for a team appear on that team's first request. The registry lives for
+`_sum`, and `_count`. Zero-valued series for successful statuses are pre-registered for
+`team=""`; series for a team, and every series for an error status, appear on their first
+request, so `rate()` over an error series needs an absent-safe form such as
+`or vector(0)`. The registry lives for
 the whole process, so counters are never reset by a config change.
 
 | Series | Type | Labels |
 | --- | --- | --- |
-| `lumewarp_requests_total` | Counter | `requested`, `endpoint`, `model`, `team`, `status` |
+| `lumewarp_requests_total` | Counter | `requested`, `endpoint`, `model`, `team`, `status`, `error_source`, `code` |
+| `lumewarp_gateway_info` | Gauge | `zone`, `gateway_id`, `version`; always `1`. |
+| `lumewarp_rate_limited_total` | Counter | `scope` (`key`, `team`, `member`, `org`, `service_account`, `other`); the gateway's own 429 for a rate limit. |
+| `lumewarp_request_attempts` | Histogram | `requested`; upstream attempts per request, buckets 1, 2, 3, 4, 5, 8. |
 | `lumewarp_request_duration_seconds` | Histogram | `requested`, `endpoint`, `model` |
 | `lumewarp_gateway_overhead_seconds` | Histogram | `endpoint` |
 | `lumewarp_request_body_read_seconds` | Histogram | `endpoint` |
@@ -75,6 +80,28 @@ Label semantics:
   `500`, `502`, `503`, `504`, or fallback `other`. A handler dropped **before a
   response exists** records 499; this is a metric label, not a sent HTTP response.
   After headers, a dropped/broken body retains the response's HTTP status.
+- `error_source` says who an unsuccessful request is to blame on: `none` for a success,
+  `client` (a malformed or unauthenticated request, a 4xx other than 403 and 429, or a client
+  that went away), `policy` (403 and 429: a name, a limit or a budget refused it),
+  `upstream` (an `upstream_*` gateway code, or a non-2xx status the upstream answered and
+  the gateway passed through) or `gateway` (everything else, 5xx included).
+- `code` is the stable code of the error: one of the gateway's own
+  [error codes](./errors.md#gateway); `upstream_<status>` (for example `upstream_503`) for
+  a passed-through upstream status; `client_cancelled` when the client dropped before any
+  response existed (the 499 `status`, which is not an error code the gateway ever sends);
+  empty on success. The set is fixed, so the label cannot grow from client input. The same
+  value is the usage event's `error_code`, shown in the [request log](../admin/requests.md).
+- `lumewarp_gateway_info` names the gateway by its zone and its control-plane-assigned id;
+  a standalone gateway has both empty. A reconnect assigns a new id and removes the old
+  series. Join it onto other gateway series on `namespace` and `instance` with
+  `group_left(zone)`, as the shipped [alert rules](../operations/alerts-and-incidents.md#rules-that-ship-with-lumewarp) do.
+- `lumewarp_rate_limited_total` counts the gateway's own 429 (an LLM request over its
+  rpm, tpm or concurrency limit, or an MCP `tools/call` over the key's rpm), by the scope
+  whose limit was hit. A 429 that an upstream answered is `upstream_429` in
+  `lumewarp_requests_total`, never here.
+- `lumewarp_request_attempts` is observed once per request that reached an upstream
+  attempt (a success, a passed-through error or all attempts exhausted); a request refused
+  or dropped before routing completes is not observed.
 - `kind` is `connect`, `protocol` (other upstream request failures), `timeout`
   (response headers), or `stream` (upstream body failure, including non-stream
   response bodies). A truncated 200 response increments `kind="stream"` while

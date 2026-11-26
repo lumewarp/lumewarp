@@ -651,6 +651,20 @@ impl Drop for Permit {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RateLimited {
     pub retry_after_secs: u64,
+    /// Which kind of scope rejected: the `lumewarp_rate_limited_total` label.
+    pub scope: &'static str,
+}
+
+/// The kind of a limiter scope from its id prefix (`team:<uuid>`, `sa:<uuid>`...).
+pub fn scope_label(id: &str) -> &'static str {
+    match id.split_once(':').map(|(prefix, _)| prefix) {
+        Some("key") => "key",
+        Some("team") => "team",
+        Some("member") => "member",
+        Some("org") => "org",
+        Some("sa") => "service_account",
+        _ => "other",
+    }
 }
 
 impl Registry {
@@ -736,6 +750,7 @@ impl Registry {
                     drop(counters);
                     permit.rollback(self);
                     return Err(RateLimited {
+                        scope: scope_label(id),
                         retry_after_secs: retry_after_secs(prev, cur, tpm, elapsed),
                     });
                 }
@@ -748,6 +763,7 @@ impl Registry {
                     drop(counters);
                     permit.rollback(self);
                     return Err(RateLimited {
+                        scope: scope_label(id),
                         retry_after_secs: retry_after_secs(prev, cur, u64::from(rpm), elapsed),
                     });
                 }
@@ -758,6 +774,7 @@ impl Registry {
                         permit.rollback(self);
                         // The share is redivided at the next sync.
                         return Err(RateLimited {
+                            scope: scope_label(id),
                             retry_after_secs: 1,
                         });
                     }
@@ -782,6 +799,7 @@ impl Registry {
                     permit.rollback(self);
                     // Unknown when a slot frees up; ask the client to retry.
                     return Err(RateLimited {
+                        scope: scope_label(id),
                         retry_after_secs: 1,
                     });
                 }
@@ -792,6 +810,7 @@ impl Registry {
                         permit.push(taken);
                         permit.rollback(self);
                         return Err(RateLimited {
+                            scope: scope_label(id),
                             retry_after_secs: 1,
                         });
                     }
@@ -861,6 +880,7 @@ impl Registry {
                 drop(counters);
                 charged.rollback(self);
                 return Err(RateLimited {
+                    scope: scope_label(id),
                     retry_after_secs: retry_after_secs(prev, cur, u64::from(rpm), elapsed),
                 });
             }
@@ -868,6 +888,7 @@ impl Registry {
                 drop(counters);
                 charged.rollback(self);
                 return Err(RateLimited {
+                    scope: scope_label(id),
                     retry_after_secs: 1,
                 });
             };

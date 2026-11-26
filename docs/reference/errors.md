@@ -9,8 +9,18 @@ An error the gateway produces has an OpenAI-shaped body; `code` is stable:
 ```
 
 `type` is `authentication_error` for 401, `permission_error` for 403, `insufficient_quota`
-and `rate_limit_error` for the two 429 codes, `upstream_error` for 502 and 504, and
-`invalid_request_error` otherwise.
+and `rate_limit_error` for the two 429 codes, `upstream_error` for 502 and 504, `api_error`
+for 408 and every other 5xx (500, 503 and so on: a fault or a state of the gateway, not of
+the request), and `invalid_request_error` otherwise. Before this mapping a 408, 500 or 503 was
+reported as `invalid_request_error`.
+
+Each code also has a **source**, recorded as `error_source` on
+[`lumewarp_requests_total`](./metrics.md#gateway) and with the code in the request log:
+`upstream` for the `upstream_*` codes, `policy` for the 403 and 429 codes, `client` for
+every other 4xx and `gateway` for 5xx. The code itself is the metric's `code` label and the
+usage event's `error_code`. A status that an upstream answered and the gateway passed through
+unchanged has no code of the table above; it is recorded as `upstream_<status>`
+(`upstream_503`), and a request the client dropped before any response as `client_cancelled`.
 
 <!--@include: ./generated/gateway-errors.md-->
 

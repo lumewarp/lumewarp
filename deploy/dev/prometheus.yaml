@@ -6,6 +6,11 @@ global:
   evaluation_interval: 15s
 rule_files:
   - /etc/prometheus/rules.yaml
+# The dev Alertmanager, which forwards every Lumewarp alert to the control plane.
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["127.0.0.1:19093"]
 scrape_configs:
   - job_name: lumewarp-gateway
     static_configs:

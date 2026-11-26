@@ -258,6 +258,7 @@ fn rejected_event(
     request: &RequestCtx,
     endpoint: usize,
     status: StatusCode,
+    error_code: &'static str,
 ) -> UsageEvent {
     use lumewarp_proto::usage::v1::{RequestOutcome, UsageState};
     UsageEvent {
@@ -281,6 +282,7 @@ fn rejected_event(
         started_at_unix_ms: request.started_at_unix_ms,
         cost_nano_usd: 0,
         cost_known: false,
+        error_code: error_code.into(),
         ..Default::default()
     }
 }
@@ -494,6 +496,7 @@ async fn serve_api(
                     &request,
                     endpoint,
                     rejection.error.status(),
+                    rejection.error.code(),
                 ));
             }
             return rejection.into();
@@ -687,7 +690,7 @@ mod tests {
         let (status, metrics) = server.get(true, "/metrics", None).await;
         assert_eq!(status, 200);
         assert!(String::from_utf8_lossy(&metrics).contains(
-            "lumewarp_requests_total{requested=\"\",endpoint=\"models\",model=\"\",team=\"\",status=\"503\"} 2"
+            "lumewarp_requests_total{requested=\"\",endpoint=\"models\",model=\"\",team=\"\",status=\"503\",error_source=\"gateway\",code=\"not_ready\"} 2"
         ));
         let routing_table =
             RoutingTable::compile(&snapshot, lumewarp_config::AuthMode::RequireKey, &runtime)

@@ -13,18 +13,20 @@
 #
 #   DEV_AUTHZ=openfga   authorization backend (default builtin); only then is OpenFGA started
 #   DEV_DATABASE=name   use this database in the dev Postgres, created if missing
-#   DEV_EXTRAS=1        also start Prometheus, Grafana (shipped rules and dashboards) and
-#                       Open WebUI with the demo key; off by default
+#   DEV_EXTRAS=1        also start Prometheus, Alertmanager (webhook to the control plane),
+#                       Grafana (shipped rules and dashboards) and Open WebUI with the demo
+#                       key; off by default
 #   LUMEWARP_BREAK_GLASS_PASSWORD   the emergency password (default dev-break-glass)
 #
 # Ports: UI 5173 (proxies /api to the CP), CP 8091 (+ gRPC 50051, metrics 9465); zone
 # `default` gateways on 4000 and 4001 (admin 9464, 9466), zone `prod` on 4002 and 4003
 # (admin 9468, 9470); mock upstream 9100, example MCP 9110, example A2A 9120, Postgres
-# 55432, Valkey 56379, Keycloak 18080, OpenFGA 18081; extras: Prometheus 19090, Grafana
-# 13000, Open WebUI 3000.
+# 55432, Valkey 56379, Keycloak 18080, OpenFGA 18081; extras: Prometheus 19090,
+# Alertmanager 19093, Grafana 13000, Open WebUI 3000.
 # Every start runs `lumewarp-control-plane seed-dev`, which keeps the demo (`mock-local`,
 # router `demo`, alias `demo-latest`, team `demo`, keys in .dev/demo-key and
-# .dev/demo-key-prod) and the larger seed catalog with 30 days of usage.
+# .dev/demo-key-prod) and the larger seed catalog with 30 days of usage, plus demo incidents
+# (one still firing, so the status banner shows).
 
 SHELL := bash
 .SHELLFLAGS := -euo pipefail -c
@@ -58,6 +60,8 @@ export LUMEWARP_GATEWAY_ZONE_DEFAULT_TOKEN := dev-only-gateway-token-zone-defaul
 export LUMEWARP_GATEWAY_ZONE_PROD_TOKEN := dev-only-gateway-token-zone-prod-0123456789ab
 # Without an id key the gateway answers 503 on /mcp and /a2a.
 export LUMEWARP_GATEWAY_ID_KEY := ZGV2LW9ubHktbHVtZXdhcnAtZ2F0ZXdheS1pZC1rZXktMDEyMzQ1Njc4OQ==
+# The Alertmanager receiver; deploy/dev/alertmanager.yaml sends the same token.
+export LUMEWARP_ALERTMANAGER_TOKEN := dev-only-alertmanager-token-0123456789abcdef
 export LUMEWARP_GATEWAY_PUBLIC_URL := http://127.0.0.1:4000
 export LUMEWARP_PLAYGROUND_GATEWAY_URL := http://127.0.0.1:4000
 export LUMEWARP_SHARED_LIMITS_REDIS_URL := redis://127.0.0.1:56379/0
@@ -176,8 +180,9 @@ dev-seed:
 
 dev-extras:
 ifeq ($(DEV_EXTRAS),1)
-	@$(log) "starting Prometheus, Grafana and Open WebUI"
-	@DEV_DEMO_KEY="$$(<$(DEV)/demo-key)" $(COMPOSE) --profile extras up -d prometheus grafana openwebui
+	@$(log) "starting Prometheus, Alertmanager, Grafana and Open WebUI"
+	@DEV_DEMO_KEY="$$(<$(DEV)/demo-key)" $(COMPOSE) --profile extras up -d \
+	  prometheus alertmanager grafana openwebui
 endif
 
 dev-info:
@@ -191,7 +196,8 @@ dev-info:
 	echo "  MCP       http://127.0.0.1:9110/mcp    A2A http://127.0.0.1:9120/a2a"; \
 	echo "  metrics   gateways :9464 :9466 :9468 :9470, control plane :9465"; \
 	if [[ "$(DEV_EXTRAS)" == 1 ]]; then \
-	  echo "  Prometheus http://127.0.0.1:19090   Grafana http://127.0.0.1:13000 (Lumewarp folder)"; \
+	  echo "  Prometheus http://127.0.0.1:19090   Alertmanager http://127.0.0.1:19093"; \
+	  echo "  Grafana   http://127.0.0.1:13000 (Lumewarp folder)"; \
 	  echo "  Open WebUI http://127.0.0.1:3000   (demo key; its first start takes a few minutes)"; fi; \
 	echo
 

@@ -224,6 +224,86 @@ fn attempts(metrics: &Prometheus, outcome: &str) -> f64 {
 }
 
 #[tokio::test]
+async fn an_upstream_429_is_an_upstream_error_and_not_a_local_rate_limit() {
+    let backend = Backend::start(&[]).await;
+    let gateway = Gateway::start(config(
+        backend.addr,
+        backend.addr,
+        "",
+        "  - {name: public, members: [{model: a}]}",
+    ))
+    .await;
+    let response = gateway.post(false, &[("x-mock-fail", "429")]).await;
+    assert_eq!(response.status(), 429);
+    bytes(response).await;
+    let metrics = gateway.metrics().await;
+    assert_eq!(
+        metrics.sum(
+            "lumewarp_requests_total",
+            &[
+                ("status", "429"),
+                ("error_source", "upstream"),
+                ("code", "upstream_429"),
+            ],
+        ),
+        1.
+    );
+    assert_eq!(
+        metrics.sum("lumewarp_requests_total", &[("error_source", "policy")]),
+        0.
+    );
+    assert_eq!(metrics.sum("lumewarp_rate_limited_total", &[]), 0.);
+    // Exported from boot, with this crate's version and no assigned id.
+    assert_eq!(
+        metrics.sum(
+            "lumewarp_gateway_info",
+            &[
+                ("zone", ""),
+                ("gateway_id", ""),
+                ("version", env!("CARGO_PKG_VERSION"))
+            ],
+        ),
+        1.
+    );
+}
+
+#[tokio::test]
+async fn attempts_are_observed_once_per_routed_request() {
+    let backend = Backend::start(&["--fail-every", "2"]).await;
+    let warm = client()
+        .request(
+            Request::builder()
+                .method("POST")
+                .uri(format!("http://{}/v1/chat/completions", backend.addr))
+                .body(Full::new(Bytes::from_static(br#"{"model":"warm"}"#)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    bytes(warm).await;
+    let gateway = Gateway::start(config(
+        backend.addr,
+        backend.addr,
+        "",
+        "  - {name: public, members: [{model: a}, {model: b}], retry: {max_attempts: 2}}",
+    ))
+    .await;
+    // The first request fails once upstream and succeeds on its retry.
+    assert_eq!(gateway.post(false, &[]).await.status(), 200);
+    let metrics = gateway.metrics().await;
+    let labels = [("requested", "public")];
+    assert_eq!(metrics.sum("lumewarp_request_attempts_count", &labels), 1.);
+    assert_eq!(metrics.sum("lumewarp_request_attempts_sum", &labels), 2.);
+    assert_eq!(
+        metrics.sum(
+            "lumewarp_request_attempts_bucket",
+            &[("requested", "public"), ("le", "1.0")]
+        ),
+        0.
+    );
+}
+
+#[tokio::test]
 async fn retry_chooses_another_model_and_meters_once() {
     let backend = Backend::start(&["--fail-every", "2"]).await;
     // The next inference fails, whichever model weighted routing chooses.

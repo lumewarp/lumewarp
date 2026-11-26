@@ -676,6 +676,16 @@ async fn auth_timeout_is_504_and_counted_without_breaking_aggregate_initializati
                 && line.contains("status=\"504\"")),
         "{metrics}"
     );
+    // An upstream failure is blamed on the upstream, under the code the client saw.
+    assert!(
+        metrics
+            .lines()
+            .any(|line| line.starts_with("lumewarp_requests_total{")
+                && line.contains("status=\"504\"")
+                && line.contains("error_source=\"upstream\"")
+                && line.contains("code=\"mcp_error\"")),
+        "{metrics}"
+    );
 }
 #[tokio::test]
 async fn other_auth_failures_remain_502() {

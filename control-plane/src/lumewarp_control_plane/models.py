@@ -2298,6 +2298,104 @@ class GatewayPlugin(Base):
     seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+# --------------------------------------------------------------------------- alerts
+
+
+class Incident(TimestampMixin, Base):
+    """One outage: the alerts of one alertname, zone and target set whose intervals overlap.
+
+    Rules fire per gateway instance, so one outage seen by several gateways arrives as
+    several alerts with slightly different starts; the receiver attaches each new alert to
+    the overlapping incident of its group (or opens one) and recomputes the window from the
+    members. `group_key` is a sha256 of the sorted resolved targets, or of the labels minus
+    the per-instance ones when nothing resolved. `severity` and `lumewarp_status` are the
+    worst member's. Rows are never deleted.
+    """
+
+    __tablename__ = "incidents"
+    __table_args__ = (
+        CheckConstraint("status IN ('firing', 'resolved')", name="status"),
+        Index("ix_incidents_starts_at_id", "starts_at", "id"),
+        Index("ix_incidents_status_starts_at", "status", "starts_at"),
+        Index("ix_incidents_zone_id_starts_at", "zone_id", "starts_at"),
+        Index("ix_incidents_group", "alertname", "group_key", "starts_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
+    alertname: Mapped[str] = mapped_column(String(256), nullable=False)
+    # The members' `zone` label; no FK, because an alert may name an unknown zone.
+    zone_id: Mapped[str | None] = mapped_column(String(64))
+    group_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    severity: Mapped[str | None] = mapped_column(String(64))
+    lumewarp_status: Mapped[str | None] = mapped_column(String(64))
+
+
+class Alert(Base):
+    """One firing or resolved Alertmanager alert, upserted on (fingerprint, starts_at).
+
+    Rows are never deleted; each belongs to one `Incident`. Labels and
+    annotations are kept verbatim; `zone_id`, `lumewarp_status` and `severity` are the
+    labels Lumewarp acts on, copied out so queries do not have to read JSONB.
+    """
+
+    __tablename__ = "alerts"
+    __table_args__ = (
+        CheckConstraint("status IN ('firing', 'resolved')", name="status"),
+        UniqueConstraint("fingerprint", "starts_at"),
+        Index("ix_alerts_status_starts_at", "status", "starts_at"),
+        Index(None, "starts_at"),
+        Index(None, "alertname"),
+        Index("ix_alerts_zone_id_starts_at", "zone_id", "starts_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
+    # Fixed at the first receive; a later target rewrite does not move the alert.
+    incident_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("incidents.id"), nullable=False, index=True
+    )
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    alertname: Mapped[str] = mapped_column(String(256), nullable=False)
+    severity: Mapped[str | None] = mapped_column(String(64))
+    # The `zone` label's value; no FK, because an alert may name an unknown zone.
+    zone_id: Mapped[str | None] = mapped_column(String(64))
+    # The user-visible state from the `lumewarp_status` label; NULL = admin-only.
+    lumewarp_status: Mapped[str | None] = mapped_column(String(64))
+    labels: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    annotations: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    generator_url: Mapped[str | None] = mapped_column(Text)
+    first_received_at: Mapped[datetime] = _now()
+    last_received_at: Mapped[datetime] = _now()
+
+
+class AlertTarget(Base):
+    """One catalog entry or upstream an alert resolved to, rewritten on each receive.
+
+    No FK on `target_id`: the target may be renamed, replaced or deleted, and the alert's
+    history keeps the id and the name it had at receive time.
+    """
+
+    __tablename__ = "alert_targets"
+    __table_args__ = (
+        PrimaryKeyConstraint("alert_id", "kind", "target_id"),
+        CheckConstraint("kind IN ('model', 'alias', 'router', 'upstream')", name="kind"),
+        Index("ix_alert_targets_kind_target_id", "kind", "target_id"),
+        Index("ix_alert_targets_name", "name"),
+    )
+
+    alert_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("alerts.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    target_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    name: Mapped[str] = mapped_column(String(256), nullable=False)
+
+
 # --------------------------------------------------------------------------- usage
 
 
@@ -2389,6 +2487,12 @@ class UsageEvent(Base):
     alias_id: Mapped[uuid.UUID | None] = mapped_column()
     router_id: Mapped[uuid.UUID | None] = mapped_column()
     audio_ms: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
+    # Gateway error code (`error::CODES`) or `upstream_<status>`; NULL on success and on
+    # rows that predate the field.
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    # Time to the first forwarded non-empty stream frame; NULL when not streamed or
+    # never sent, and on rows that predate the field.
+    ttft_ms: Mapped[int | None] = mapped_column(Integer)
     endpoint: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[int] = mapped_column(SmallInteger, nullable=False)
     stream: Mapped[bool] = mapped_column(Boolean, nullable=False)

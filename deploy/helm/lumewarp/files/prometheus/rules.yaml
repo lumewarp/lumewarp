@@ -6,13 +6,13 @@ groups:
     interval: 1m
     rules:
       - record: lumewarp:model_requests:rate5m
-        expr: "sum by (namespace, requested) (rate(lumewarp_requests_total{endpoint=~\"chat_completions|completions|embeddings|models\"}[5m]))"
+        expr: "sum by (namespace, zone, requested) (rate(lumewarp_requests_total{endpoint=~\"chat_completions|completions|embeddings|models\"}[5m]) * on (namespace, instance) group_left(zone) max by (namespace, instance, zone) (lumewarp_gateway_info))"
       - record: lumewarp:model_errors:ratio5m
-        expr: "sum by (namespace, requested) (rate(lumewarp_requests_total{status=~\"5..\",endpoint=~\"chat_completions|completions|embeddings|models\"}[5m])) / lumewarp:model_requests:rate5m"
+        expr: "sum by (namespace, zone, requested) (rate(lumewarp_requests_total{status=~\"5..\",endpoint=~\"chat_completions|completions|embeddings|models\"}[5m]) * on (namespace, instance) group_left(zone) max by (namespace, instance, zone) (lumewarp_gateway_info)) / lumewarp:model_requests:rate5m"
       - record: lumewarp:gateway_overhead:p99_5m
         expr: "histogram_quantile(0.99, sum by (namespace, endpoint, le) (rate(lumewarp_gateway_overhead_seconds_bucket[5m])))"
       - record: lumewarp:ttft:p99_5m
-        expr: "histogram_quantile(0.99, sum by (namespace, requested, le) (rate(lumewarp_ttft_seconds_bucket[5m])))"
+        expr: "histogram_quantile(0.99, sum by (namespace, zone, requested, le) (rate(lumewarp_ttft_seconds_bucket[5m]) * on (namespace, instance) group_left(zone) max by (namespace, instance, zone) (lumewarp_gateway_info)))"
   - name: lumewarp.alerts
     interval: 1m
     rules:
@@ -26,13 +26,15 @@ groups:
           runbook: "Investigate the emergency access and review its audit trail."
       # 5% at >=1 request/s avoids paging on isolated failures or local admin traffic.
       - alert: LumewarpGatewayHigh5xxRatio
-        expr: "lumewarp:model_errors:ratio5m > 0.05 and on (namespace, requested) lumewarp:model_requests:rate5m >= 1"
+        expr: "lumewarp:model_errors:ratio5m > 0.05 and on (namespace, zone, requested) lumewarp:model_requests:rate5m >= 1"
         for: 5m
         labels:
           severity: critical
+          lumewarp_status: degraded
         annotations:
           summary: "Gateway 5xx ratio is high"
           description: "Requested {{ $labels.requested }} exceeds 5% 5xx responses for 5 minutes at >=1 request/s."
+          lumewarp_summary: "{{ $labels.requested }} has an elevated error rate."
           runbook: "Check upstream errors and routing dashboard; restore a healthy model or roll back routing."
       # 10 ms is an operational page budget, not the tighter benchmark target.
       - alert: LumewarpGatewayOverheadHigh
@@ -50,39 +52,47 @@ groups:
         for: 10m
         labels:
           severity: warning
+          lumewarp_status: congested
         annotations:
           summary: "Stream p99 TTFT is high"
           description: "Requested {{ $labels.requested }} has p99 TTFT above 5 seconds for 10 minutes."
+          lumewarp_summary: "{{ $labels.requested }} is responding slowly."
           runbook: "Inspect vLLM queue and KV cache, upstream latency and request sizes; tune this baseline per requested name."
       # State 2 is open; brief trips and half-open probes do not alert.
       - alert: LumewarpUpstreamCircuitOpen
-        expr: "lumewarp_upstream_circuit_state == 2"
+        expr: "(lumewarp_upstream_circuit_state == 2) * on (namespace, instance) group_left(zone) max by (namespace, instance, zone) (lumewarp_gateway_info)"
         for: 2m
         labels:
           severity: warning
+          lumewarp_status: down
         annotations:
           summary: "Upstream circuit remains open"
           description: "Model {{ $labels.model }} circuit has remained open for 2 minutes."
+          lumewarp_summary: "{{ $labels.model }} is unavailable; requests may fail or use a fallback."
           runbook: "Inspect attempts by outcome, upstream logs and health; repair the upstream before closing the circuit."
       # Two minutes tolerates transient health-check failures.
       - alert: LumewarpUpstreamUnhealthy
-        expr: "lumewarp_upstream_healthy == 0"
+        expr: "(lumewarp_upstream_healthy == 0) * on (namespace, instance) group_left(zone) max by (namespace, instance, zone) (lumewarp_gateway_info)"
         for: 2m
         labels:
           severity: critical
+          lumewarp_status: down
         annotations:
           summary: "Upstream health checks are failing"
           description: "Upstream {{ $labels.upstream }} has been unhealthy for 2 minutes."
+          lumewarp_summary: "A backend serving some models is unavailable; requests may fail or use a fallback."
           runbook: "Check upstream health endpoint, credentials and network reachability; shift traffic to another model if needed."
       # Same hold as upstream health: one failed chat check is not an incident.
       - alert: LumewarpModelUnhealthy
-        expr: "lumewarp_model_healthy == 0"
+        expr: "(lumewarp_model_healthy == 0) * on (namespace, instance) group_left(zone) max by (namespace, instance, zone) (lumewarp_gateway_info)"
         for: 2m
         labels:
           severity: warning
+          lumewarp_status: down
         annotations:
           summary: "Model chat checks are failing"
           description: "Model {{ $labels.model }} has failed its chat check for 2 minutes."
+          lumewarp_summary: "{{ $labels.model }} is unavailable; requests may fail or use a fallback."
           runbook: "Run Test now on the model page; check the upstream model name, default body and credentials."
       # Any sustained exhaustion deserves investigation; five-minute counter window tolerates scrape jitter.
       - alert: LumewarpRetryBudgetExhausted
@@ -207,23 +217,27 @@ groups:
           runbook: "Inspect reconciler task, DB and identity provider connectivity; confirm suspended keys and a successful reconciliation."
       # 100 queued requests is a starting threshold; calibrate to model concurrency.
       - alert: LumewarpVLLMQueueHigh
-        expr: "lumewarp_vllm_queue_depth > 100"
+        expr: "(lumewarp_vllm_queue_depth > 100) * on (namespace, instance) group_left(zone) max by (namespace, instance, zone) (lumewarp_gateway_info)"
         for: 10m
         labels:
           severity: warning
+          lumewarp_status: congested
         annotations:
           summary: "vLLM request queue is growing"
           description: "Model {{ $labels.model }} has over 100 queued requests for 10 minutes."
+          lumewarp_summary: "{{ $labels.model }} is under heavy load; responses may be slower."
           runbook: "Inspect GPU utilization and prefill load; add capacity or reduce admission and shift routing weights."
       # Usage is a 0..1 ratio, not a percentage; sustained 90% leaves little headroom.
       - alert: LumewarpVLLMKVCacheSaturated
-        expr: "lumewarp_vllm_kv_cache_usage > 0.9"
+        expr: "(lumewarp_vllm_kv_cache_usage > 0.9) * on (namespace, instance) group_left(zone) max by (namespace, instance, zone) (lumewarp_gateway_info)"
         for: 10m
         labels:
           severity: warning
+          lumewarp_status: congested
         annotations:
           summary: "vLLM KV cache is saturated"
           description: "Model {{ $labels.model }} KV cache exceeds 90% for 10 minutes."
+          lumewarp_summary: "{{ $labels.model }} is under heavy load; responses may be slower."
           runbook: "Inspect context lengths, concurrency and GPU memory; reduce admission or add capacity."
       # Job selector matches chart gateway Service names; relabel custom scrape jobs to include lumewarp and gateway.
       - alert: LumewarpGatewayDown

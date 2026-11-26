@@ -1,5 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, Outlet, useNavigate } from "@tanstack/react-router";
 import {
   BarChart3,
@@ -12,6 +12,7 @@ import {
   History,
   KeyRound,
   ListOrdered,
+  Siren,
   ChevronDown,
   Globe,
   LogOut,
@@ -40,6 +41,7 @@ import { useZone, ZoneBadge } from "../zone";
 import { AuthzNotice } from "../pages/Access";
 import { useClearSecrets } from "./SecretProvider";
 import { Badge } from "./Bits";
+import { StatusBanner } from "./StatusBanner";
 import { useToast } from "./Toast";
 import { Button } from "./ui/button";
 import {
@@ -110,6 +112,7 @@ const NAV: { group: string | null; items: NavItem[] }[] = [
     items: [
       { to: "/usage", label: "Usage", icon: BarChart3 },
       { to: "/requests", label: "Requests", icon: ListOrdered },
+      { to: "/incidents", label: "Incidents", icon: Siren, access: "installationAdmin" },
       { to: "/audit", label: "Audit log", icon: ScrollText, access: "teamAdmin" },
     ],
   },
@@ -332,7 +335,28 @@ function AccountMenu({ me, theme, onTheme, onSignOut }: { me: Me | undefined; th
   );
 }
 
+/**
+ * Publishes the height of the sticky header block (header, authz notice, status banner) as `--app-top`, so pages that
+ * fill the viewport subtract what is actually above them instead of a fixed header height.
+ */
+function useAppTop() {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const root = document.documentElement;
+    const observer = new ResizeObserver(() => root.style.setProperty("--app-top", `${el.offsetHeight}px`));
+    observer.observe(el);
+    return () => {
+      observer.disconnect();
+      root.style.removeProperty("--app-top");
+    };
+  }, []);
+  return ref;
+}
+
 export function Layout() {
+  const appTop = useAppTop();
   const me = useMe();
   const perms = useCan();
   const { theme, setTheme } = useTheme();
@@ -373,23 +397,27 @@ export function Layout() {
       </a>
       <NavSidebar installationAdmin={perms.isInstallationAdmin} orgAdmin={perms.isOrgAdmin} teamAdmin={perms.isTeamAdmin} breakGlass={me.data?.kind === "break_glass"} />
       <div className="flex min-w-0 flex-1 flex-col">
-        <header
-          className="sticky top-0 z-40 flex items-center gap-2 border-b bg-background/95 px-4 py-2.5 backdrop-blur md:px-6"
-          data-testid="app-header"
-          data-zone={zone.id}
-        >
-          <NavToggle />
-          <ZoneSwitcher installationAdmin={perms.isInstallationAdmin} />
-          <span className="flex-1" />
-          <AccountMenu me={me.data} theme={theme} onTheme={setTheme} onSignOut={() => void logout()} />
-        </header>
-        {me.data?.authz_unavailable && (
-          <div className="border-b bg-background px-4 py-3 md:px-6">
-            <div className="mx-auto w-full max-w-[1200px]">
-              <AuthzNotice />
+        {/* The header and the status banner stay on screen together while the page scrolls. */}
+        <div ref={appTop} className="sticky top-0 z-40 bg-background">
+          <header
+            className="flex items-center gap-2 border-b bg-background/95 px-4 py-2.5 backdrop-blur md:px-6"
+            data-testid="app-header"
+            data-zone={zone.id}
+          >
+            <NavToggle />
+            <ZoneSwitcher installationAdmin={perms.isInstallationAdmin} />
+            <span className="flex-1" />
+            <AccountMenu me={me.data} theme={theme} onTheme={setTheme} onSignOut={() => void logout()} />
+          </header>
+          {me.data?.authz_unavailable && (
+            <div className="border-b bg-background px-4 py-3 md:px-6">
+              <div className="mx-auto w-full max-w-[1200px]">
+                <AuthzNotice />
+              </div>
             </div>
-          </div>
-        )}
+          )}
+          <StatusBanner />
+        </div>
         <main id="main" className="mx-auto w-full max-w-[1200px] flex-1 px-4 py-6 outline-none md:px-6" tabIndex={-1}>
           <Outlet />
         </main>

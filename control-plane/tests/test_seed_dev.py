@@ -10,7 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane import usage
 from lumewarp_control_plane._proto.lumewarp.usage.v1 import usage_pb2
+from lumewarp_control_plane.alerts import receiver
 from lumewarp_control_plane.models import (
+    Alert,
+    Incident,
     ScopeType,
     TrafficKind,
     UsageEvent,
@@ -19,11 +22,15 @@ from lumewarp_control_plane.models import (
     member_scope_id,
 )
 from lumewarp_control_plane.seed_dev import (
+    INCIDENTS,
     SeedKey,
     SeedRefused,
     _guard,
+    _incident_window,
     _rebuild_totals,
+    apply_incidents,
     generate_events,
+    incident_alerts,
 )
 from lumewarp_control_plane.settings import DEV_DATABASE_URL, Settings
 from tests import factories
@@ -250,3 +257,76 @@ async def test_rebuild_totals_keys_member_rows_like_ingest(session: AsyncSession
     assert any(row[2] == member_scope_id(team.id, user.id) for row in before)
     await _rebuild_totals(session, {team.id})
     assert snapshot((await session.scalars(select(UsageTotal))).all()) == before
+
+
+def _incident_events() -> dict[str, list[usage_pb2.UsageEvent]]:
+    events = generate_events(_keys(), seed=42, days=14, end=END)
+    apply_incidents(events, _keys(), seed=42, end=END)
+    return events
+
+
+def _in_window(event: usage_pb2.UsageEvent, key: str) -> bool:
+    incident = next(item for item in INCIDENTS if item.key == key)
+    start, stop = _incident_window(incident, END)
+    return start.timestamp() * 1000 <= event.timestamp_unix_ms <= stop.timestamp() * 1000
+
+
+def test_incident_traffic_is_deterministic_and_valid() -> None:
+    first = _incident_events()
+    second = _incident_events()
+    assert {zone: [e.SerializeToString() for e in batch] for zone, batch in first.items()} == {
+        zone: [e.SerializeToString() for e in batch] for zone, batch in second.items()
+    }
+    ids: set[str] = set()
+    for zone, batch in first.items():
+        for event in batch:
+            usage._prepare_event(f"seed-dev-{zone}", zone, event)
+            assert event.request_id not in ids, "request ids must be unique"
+            ids.add(event.request_id)
+            if event.status >= 400:
+                assert event.error_code
+            elif event.ttft_ms:
+                assert event.stream
+
+
+def test_incidents_reshape_the_traffic_they_hit() -> None:
+    events = _incident_events()
+    qwen = [e for e in events["default"] if _in_window(e, "qwen-down")]
+    # Direct calls fail with the upstream's status; router calls fall back.
+    assert any(e.error_code == "upstream_503" and e.model == "qwen2.5-32b" for e in qwen)
+    assert any(e.fallback and e.router for e in qwen)
+    assert not any(e.status == 200 and e.model == "qwen2.5-32b" for e in qwen)
+
+    prod = [
+        e
+        for e in events["prod"]
+        if _in_window(e, "prod-upstream-down") and e.kind == usage_pb2.TRAFFIC_KIND_LLM
+    ]
+    # Nothing in the zone succeeds while its only upstream is down.
+    assert prod and all(e.status >= 400 for e in prod)
+    assert any(e.error_code == "upstream_unavailable" for e in prod)
+
+    slow = [e for e in events["default"] if _in_window(e, "llama-queue") and e.ttft_ms > 5000]
+    assert slow and all("llama-3.1-8b" in {e.model, e.requested} for e in slow)
+
+
+async def test_incident_alerts_go_through_the_receiver(session: AsyncSession) -> None:
+    alerts = incident_alerts(END)
+    expected = sum(max(1, len(item.gateways)) for item in INCIDENTS)
+    assert expected > len(INCIDENTS), "an incident reported by several gateways"
+    assert await receiver.receive(session, alerts) == expected
+    # Replaying the same run is idempotent.
+    await receiver.receive(session, incident_alerts(END))
+    rows = (await session.scalars(select(Alert))).all()
+    assert len(rows) == expected
+    # The gateways of one outage share an incident.
+    grouped = (await session.scalars(select(Incident))).all()
+    assert len(grouped) == len(INCIDENTS)
+    down = [row for row in rows if row.alertname == "LumewarpUpstreamUnhealthy"]
+    assert len(down) == 2 and len({row.incident_id for row in down}) == 1
+    assert {row.labels["instance"] for row in down} == {"10.0.0.11:9466", "10.0.0.12:9466"}
+    firing = [row for row in rows if row.status == "firing"]
+    assert [row.alertname for row in firing] == ["LumewarpVLLMQueueHigh"]
+    assert firing[0].ends_at is None and firing[0].lumewarp_status == "congested"
+    assert all(row.ends_at is not None for row in rows if row.status == "resolved")
+    assert any(row.lumewarp_status is None for row in rows), "an admin-only alert"

@@ -51,6 +51,15 @@ pub enum AuthError {
 }
 
 impl AuthError {
+    /// The `error::CODES` code this error answers with.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::InvalidApiKey => "invalid_api_key",
+            Self::ModelNotAllowed => "model_not_allowed",
+            Self::InsufficientQuota => "insufficient_quota",
+        }
+    }
+
     pub fn status(self) -> StatusCode {
         match self {
             Self::InvalidApiKey => StatusCode::UNAUTHORIZED,

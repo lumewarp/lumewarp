@@ -2205,7 +2205,7 @@ mod tests {
         drop(new);
         crate::metrics::tests::finish_with(&third.rejected[0], 404);
         assert!(runtime.encode_metrics().unwrap().contains(
-            "{requested=\"\",endpoint=\"chat_completions\",model=\"\",team=\"\",status=\"404\"} 2"
+            "{requested=\"\",endpoint=\"chat_completions\",model=\"\",team=\"\",status=\"404\",error_source=\"upstream\",code=\"upstream_404\"} 2"
         ));
     }
 
@@ -2343,7 +2343,7 @@ mod tests {
         crate::metrics::tests::finish_with(&guard.metrics, 200);
         let text = runtime.encode_metrics().unwrap();
         assert!(text.contains(
-            "lumewarp_requests_total{requested=\"m1\",endpoint=\"chat_completions\",model=\"a\",team=\"t1\",status=\"200\"} 1"
+            "lumewarp_requests_total{requested=\"m1\",endpoint=\"chat_completions\",model=\"a\",team=\"t1\",status=\"200\",error_source=\"none\",code=\"\"} 1"
         ));
         assert!(!text.contains("team=\"t2\""));
     }

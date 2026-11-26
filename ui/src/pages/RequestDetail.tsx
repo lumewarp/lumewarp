@@ -105,7 +105,17 @@ function steps(row: RequestRow): Step[] {
         <Badge tone={OUTCOME_TONE[row.outcome]}>{outcomeLabel(row.outcome)}</Badge>
       </span>
     ),
-    detail: `${row.duration_ms.toLocaleString()} ms`,
+    detail: (
+      <>
+        {row.duration_ms.toLocaleString()} ms
+        {row.error_code && (
+          <>
+            {" · "}
+            <code data-testid="request-detail-error-code">{row.error_code}</code>
+          </>
+        )}
+      </>
+    ),
     tone: OUTCOME_TONE[row.outcome],
   });
   return out;
@@ -192,6 +202,14 @@ export function RequestDetail({ row, onClose, team, owner, playgroundUser, reque
                   <DescriptionDetails>{USAGE_STATE[row.usage_state]}</DescriptionDetails>
                   <DescriptionTerm>Duration</DescriptionTerm>
                   <DescriptionDetails className="tabular-nums">{row.duration_ms.toLocaleString()} ms</DescriptionDetails>
+                  {row.stream && row.ttft_ms != null && row.ttft_ms > 0 && (
+                    <>
+                      <DescriptionTerm>First token</DescriptionTerm>
+                      <DescriptionDetails className="tabular-nums" data-testid="request-detail-ttft">
+                        {row.ttft_ms.toLocaleString()} ms
+                      </DescriptionDetails>
+                    </>
+                  )}
                 </DescriptionList>
               </section>
               <Separator />

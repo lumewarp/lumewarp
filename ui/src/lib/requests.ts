@@ -14,6 +14,7 @@ export interface RequestsSearch {
   router?: string;
   status?: string;
   outcome?: string;
+  error_code?: string;
   from?: string;
   to?: string;
   request_id?: string;
@@ -31,6 +32,7 @@ const FIELDS: (keyof RequestsSearch)[] = [
   "router",
   "status",
   "outcome",
+  "error_code",
   "from",
   "to",
   "request_id",

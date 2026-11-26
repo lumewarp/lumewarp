@@ -1506,6 +1506,117 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/alerts/alertmanager": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Receive Alertmanager
+         * @description Store one Alertmanager webhook v4 delivery and return `{received: n}`.
+         *
+         *     Authenticated by `Authorization: Bearer <LUMEWARP_ALERTMANAGER_TOKEN>`, compared in
+         *     constant time, before the body is read: an unset token answers 404 and a wrong one 401
+         *     whatever the body is. The body is then read in chunks and refused with 413 past 1 MiB,
+         *     and validated (422): version 4, at most 1000 alerts. There is no request-rate limiter;
+         *     the token and these caps are the bound. Replaying the same delivery is idempotent:
+         *     alerts are upserted on `(fingerprint, startsAt)` and their target list is rewritten from
+         *     the labels (`requested`, `model`, `upstream`, scoped by `zone`). A new alert joins the
+         *     overlapping incident of the same alertname, zone and targets, or opens one; it never
+         *     moves afterwards. This receiver is not
+         *     audited per call.
+         */
+        post: operations["receiveAlertmanagerWebhook"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Status
+         * @description Firing user-visible alerts that touch names the caller can call, one item per name
+         *     and zone.
+         *
+         *     Every signed-in caller may read this. A name appears only when the caller's effective
+         *     models in that zone contain it and the zone's snapshot deploys it; an upstream target
+         *     contributes the models deployed on that upstream. Alerts without `lumewarp_status` are
+         *     admin-only and never appear here. Installation admins also get `incident_id` for the
+         *     incident link; no upstream names, labels or other annotations are returned.
+         */
+        get: operations["getStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/incidents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Incidents
+         * @description Incidents, newest `starts_at` first. Requires an installation admin.
+         *
+         *     An incident groups the alerts of one outage: same alertname, zone and resolved targets
+         *     (or labels minus the per-instance ones), with overlapping intervals. `zone` also
+         *     includes incidents without a zone label (they apply everywhere); `q` matches the
+         *     alertname, a member's `summary` or any resolved model, alias, router or upstream name.
+         *     Rows are never deleted, so the history is complete.
+         */
+        get: operations["listIncidents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/incidents/{incident_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Incident
+         * @description One incident with its member alerts, affected names, related incidents and the usage
+         *     traffic around it.
+         *
+         *     Requires an installation admin. `traffic` reads metadata from the incident window
+         *     (`starts_at - 10 min` to `ends_at` or now), clipped to the newest 24 hours and restricted
+         *     to the incident's targets and zone. `affected` lists every callable name the targets
+         *     reach, whoever may call it. `related` lists other incidents sharing a target within one
+         *     hour of the incident. Prompts and responses are never included.
+         */
+        get: operations["getIncident"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/audit": {
         parameters: {
             query?: never;
@@ -2015,6 +2126,14 @@ export interface components {
              */
             force?: boolean;
         };
+        /** AlertReceivedOut */
+        AlertReceivedOut: {
+            /**
+             * Received
+             * @description Number of alerts stored from this delivery.
+             */
+            received: number;
+        };
         /** AliasCreate */
         AliasCreate: {
             /**
@@ -2360,6 +2479,375 @@ export interface components {
             unhealthy_threshold: number | null;
             /** Healthy Threshold */
             healthy_threshold: number | null;
+        };
+        /** IncidentAffectedOut */
+        IncidentAffectedOut: {
+            /** Zone */
+            zone: string;
+            /**
+             * Name
+             * @description A callable model, alias or router name the incident's targets reach.
+             */
+            name: string;
+        };
+        /** IncidentAlertOut */
+        IncidentAlertOut: {
+            /**
+             * Id
+             * Format: uuid
+             * @description The member alert row.
+             */
+            id: string;
+            /**
+             * Starts At
+             * Format: date-time
+             */
+            starts_at: string;
+            /** Ends At */
+            ends_at: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "firing" | "resolved";
+            /**
+             * Instance
+             * @description The alert's `instance` label, else `gateway_id`; null when neither.
+             */
+            instance: string | null;
+        };
+        /** IncidentAttemptsOut */
+        IncidentAttemptsOut: {
+            /** Attempts */
+            attempts: number;
+            /** Count */
+            count: number;
+        };
+        /** IncidentDetailOut */
+        IncidentDetailOut: {
+            /**
+             * Id
+             * Format: uuid
+             * @description The incident id.
+             */
+            id: string;
+            /** Alertname */
+            alertname: string;
+            /**
+             * Severity
+             * @description The worst member's `severity` label (critical, warning, info).
+             */
+            severity: string | null;
+            /**
+             * Status
+             * @description `firing` while any member alert fires, else `resolved`.
+             * @enum {string}
+             */
+            status: "firing" | "resolved";
+            /**
+             * Lumewarp Status
+             * @description The worst member's `lumewarp_status` (down, congested, degraded); null = admin-only, never shown to users.
+             */
+            lumewarp_status: string | null;
+            /**
+             * Zone
+             * @description The alerts' `zone` label; null = every zone.
+             */
+            zone: string | null;
+            /**
+             * Starts At
+             * Format: date-time
+             * @description The earliest member start.
+             */
+            starts_at: string;
+            /**
+             * Ends At
+             * @description The latest member end once all members resolved; null while firing.
+             */
+            ends_at: string | null;
+            /** Duration Seconds */
+            duration_seconds: number;
+            /**
+             * Targets
+             * @description The resolved targets of the member alerts, deduplicated.
+             */
+            targets: components["schemas"]["IncidentTargetOut"][];
+            /**
+             * Summary
+             * @description The first member's `summary` annotation.
+             */
+            summary: string | null;
+            /**
+             * Description
+             * @description The first member's `description` annotation.
+             */
+            description: string | null;
+            /**
+             * Lumewarp Summary
+             * @description The first member's `lumewarp_summary` annotation: the user banner text.
+             */
+            lumewarp_summary: string | null;
+            /**
+             * Generator Url
+             * @description The first member's link back to the Prometheus expression.
+             */
+            generator_url: string | null;
+            /**
+             * Alert Count
+             * @description Number of member alerts.
+             */
+            alert_count: number;
+            /**
+             * Gateways
+             * @description Sorted distinct reporting gateways of the members (`instance` label, else `gateway_id`); empty when no member has either.
+             */
+            gateways: string[];
+            /**
+             * Alerts
+             * @description The member alerts, oldest first.
+             */
+            alerts: components["schemas"]["IncidentAlertOut"][];
+            /**
+             * Affected
+             * @description Every callable name the targets reach, by zone (a zone-less incident covers every live zone), independent of any caller's grants.
+             */
+            affected: components["schemas"]["IncidentAffectedOut"][];
+            /**
+             * Related
+             * @description Other incidents sharing a target within one hour of this one.
+             */
+            related: components["schemas"]["IncidentOut"][];
+            traffic: components["schemas"]["IncidentTrafficOut"];
+        };
+        /** IncidentErrorCodeOut */
+        IncidentErrorCodeOut: {
+            /** Code */
+            code: string;
+            /** Count */
+            count: number;
+        };
+        /** IncidentKeyTrafficOut */
+        IncidentKeyTrafficOut: {
+            /**
+             * Key Id
+             * Format: uuid
+             */
+            key_id: string;
+            key: components["schemas"]["KeyRefOut"] | null;
+            /** Requests */
+            requests: number;
+            /**
+             * Failed
+             * @description The key's failed requests in the window.
+             */
+            failed: number;
+            /** Prompt Tokens */
+            prompt_tokens: number;
+            /** Completion Tokens */
+            completion_tokens: number;
+        };
+        /** IncidentMinuteOut */
+        IncidentMinuteOut: {
+            /**
+             * Minute
+             * Format: date-time
+             */
+            minute: string;
+            /** Requests */
+            requests: number;
+            /**
+             * Failed
+             * @description Requests of the minute that failed (as in `failed_requests`).
+             */
+            failed: number;
+            /**
+             * Fallback
+             * @description Requests of the minute served through a fallback and not failed; the rest of `requests` minus `failed` succeeded directly.
+             */
+            fallback: number;
+            /**
+             * Ttft Avg Ms
+             * @description Mean time to first token of the minute's streamed requests; null = none.
+             */
+            ttft_avg_ms: number | null;
+            /**
+             * Ttft P95 Ms
+             * @description 95th percentile time to first token of the minute's streamed requests.
+             */
+            ttft_p95_ms: number | null;
+            /**
+             * Context Avg Tokens
+             * @description Mean prompt tokens of the minute's requests that reported usage.
+             */
+            context_avg_tokens: number | null;
+            /**
+             * Context P95 Tokens
+             * @description 95th percentile prompt tokens of the minute's requests that reported usage.
+             */
+            context_p95_tokens: number | null;
+        };
+        /** IncidentOut */
+        IncidentOut: {
+            /**
+             * Id
+             * Format: uuid
+             * @description The incident id.
+             */
+            id: string;
+            /** Alertname */
+            alertname: string;
+            /**
+             * Severity
+             * @description The worst member's `severity` label (critical, warning, info).
+             */
+            severity: string | null;
+            /**
+             * Status
+             * @description `firing` while any member alert fires, else `resolved`.
+             * @enum {string}
+             */
+            status: "firing" | "resolved";
+            /**
+             * Lumewarp Status
+             * @description The worst member's `lumewarp_status` (down, congested, degraded); null = admin-only, never shown to users.
+             */
+            lumewarp_status: string | null;
+            /**
+             * Zone
+             * @description The alerts' `zone` label; null = every zone.
+             */
+            zone: string | null;
+            /**
+             * Starts At
+             * Format: date-time
+             * @description The earliest member start.
+             */
+            starts_at: string;
+            /**
+             * Ends At
+             * @description The latest member end once all members resolved; null while firing.
+             */
+            ends_at: string | null;
+            /** Duration Seconds */
+            duration_seconds: number;
+            /**
+             * Targets
+             * @description The resolved targets of the member alerts, deduplicated.
+             */
+            targets: components["schemas"]["IncidentTargetOut"][];
+            /**
+             * Summary
+             * @description The first member's `summary` annotation.
+             */
+            summary: string | null;
+            /**
+             * Description
+             * @description The first member's `description` annotation.
+             */
+            description: string | null;
+            /**
+             * Lumewarp Summary
+             * @description The first member's `lumewarp_summary` annotation: the user banner text.
+             */
+            lumewarp_summary: string | null;
+            /**
+             * Generator Url
+             * @description The first member's link back to the Prometheus expression.
+             */
+            generator_url: string | null;
+            /**
+             * Alert Count
+             * @description Number of member alerts.
+             */
+            alert_count: number;
+            /**
+             * Gateways
+             * @description Sorted distinct reporting gateways of the members (`instance` label, else `gateway_id`); empty when no member has either.
+             */
+            gateways: string[];
+        };
+        /** IncidentStatusClassOut */
+        IncidentStatusClassOut: {
+            /** Status Class */
+            status_class: string;
+            /** Count */
+            count: number;
+        };
+        /** IncidentTargetOut */
+        IncidentTargetOut: {
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "model" | "alias" | "router" | "upstream";
+            /** Name */
+            name: string;
+        };
+        /** IncidentTeamTrafficOut */
+        IncidentTeamTrafficOut: {
+            /**
+             * Team Id
+             * Format: uuid
+             */
+            team_id: string;
+            /** Team Name */
+            team_name: string;
+            /** Requests */
+            requests: number;
+            /**
+             * Failed
+             * @description The team's failed requests in the window.
+             */
+            failed: number;
+            /** Prompt Tokens */
+            prompt_tokens: number;
+            /** Completion Tokens */
+            completion_tokens: number;
+        };
+        /** IncidentTrafficOut */
+        IncidentTrafficOut: {
+            /**
+             * Window Start
+             * Format: date-time
+             */
+            window_start: string;
+            /**
+             * Window End
+             * Format: date-time
+             */
+            window_end: string;
+            /**
+             * Clipped
+             * @description True when the incident window was cut to the newest 24 hours.
+             */
+            clipped: boolean;
+            /** Requests */
+            requests: number;
+            /**
+             * Failed Count
+             * @description Requests in the window with a status of 400 or more, a cut stream or an error code: the predicate of `failed_requests`, uncapped.
+             */
+            failed_count: number;
+            /** Per Minute */
+            per_minute: components["schemas"]["IncidentMinuteOut"][];
+            /** Errors By Code */
+            errors_by_code: components["schemas"]["IncidentErrorCodeOut"][];
+            /** Errors By Status Class */
+            errors_by_status_class: components["schemas"]["IncidentStatusClassOut"][];
+            /** Fallback Requests */
+            fallback_requests: number;
+            /** Fallback Share */
+            fallback_share: number;
+            /** Rescued Count */
+            rescued_count: number;
+            /** Attempts */
+            attempts: components["schemas"]["IncidentAttemptsOut"][];
+            /** Teams */
+            teams: components["schemas"]["IncidentTeamTrafficOut"][];
+            /** Keys */
+            keys: components["schemas"]["IncidentKeyTrafficOut"][];
+            /** Failed Requests */
+            failed_requests: components["schemas"]["RequestOut"][];
         };
         /**
          * InheritedFrom
@@ -4052,6 +4540,13 @@ export interface components {
             /** Next Cursor */
             next_cursor?: string | null;
         };
+        /** Page[IncidentOut] */
+        Page_IncidentOut_: {
+            /** Items */
+            items: components["schemas"]["IncidentOut"][];
+            /** Next Cursor */
+            next_cursor?: string | null;
+        };
         /** Page[InstallationAdminOut] */
         Page_InstallationAdminOut_: {
             /** Items */
@@ -4515,6 +5010,10 @@ export interface components {
             completion_tokens: number;
             /** Audio Ms */
             audio_ms: number;
+            /** Error Code */
+            error_code?: string | null;
+            /** Ttft Ms */
+            ttft_ms?: number | null;
             /** Cost Nano Usd */
             cost_nano_usd: number;
             usage_state: components["schemas"]["UsageState"];
@@ -5051,6 +5550,45 @@ export interface components {
             /** Is Admin */
             is_admin: boolean;
             installation_role?: components["schemas"]["InstallationRole"] | null;
+        };
+        /** StatusItemOut */
+        StatusItemOut: {
+            /**
+             * Name
+             * @description The name the caller can call.
+             */
+            name: string;
+            /**
+             * Zone
+             * @description The zone the alert applies to.
+             */
+            zone: string;
+            /**
+             * State
+             * @description The alert's `lumewarp_status` label.
+             */
+            state: string;
+            /**
+             * Summary
+             * @description The `lumewarp_summary` annotation, when present.
+             */
+            summary?: string | null;
+            /**
+             * Since
+             * Format: date-time
+             * @description When the alert started, with a timezone.
+             */
+            since: string;
+            /**
+             * Incident Id
+             * @description The incident of the alert, for the incident link; installation admins only.
+             */
+            incident_id?: string | null;
+        };
+        /** StatusOut */
+        StatusOut: {
+            /** Items */
+            items: components["schemas"]["StatusItemOut"][];
         };
         /**
          * StickyBy
@@ -13119,6 +13657,8 @@ export interface operations {
                 status?: number | null;
                 /** @description Only requests with this outcome. */
                 outcome?: components["schemas"]["RequestOutcome"] | null;
+                /** @description Only requests that ended with this gateway error code. */
+                error_code?: string | null;
                 /** @description Only the request with this gateway request id. */
                 request_id?: string | null;
                 /** @description Start of the range (inclusive); defaults to 24 hours ago. */
@@ -13142,6 +13682,346 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Page_RequestOut_"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    receiveAlertmanagerWebhook: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /**
+                     * Version
+                     * @description The webhook version; only `4` is accepted.
+                     * @constant
+                     */
+                    version: "4";
+                    /**
+                     * Alerts
+                     * @description The alerts of this delivery; at most 1000.
+                     */
+                    alerts?: {
+                        /**
+                         * Status
+                         * @description The alert's current state in Alertmanager.
+                         * @enum {string}
+                         */
+                        status: "firing" | "resolved";
+                        /**
+                         * Labels
+                         * @description Alert labels. `alertname`, `zone`, `requested`, `model`, `upstream`, `severity`, `lumewarp_status` and `lumewarp_summary` are the ones Lumewarp acts on; the rest are stored verbatim.
+                         */
+                        labels: {
+                            [key: string]: string;
+                        };
+                        /**
+                         * Annotations
+                         * @description Alert annotations. `lumewarp_summary` is shown to users; `summary` and `description` are shown to installation admins.
+                         */
+                        annotations: {
+                            [key: string]: string;
+                        };
+                        /**
+                         * Startsat
+                         * Format: date-time
+                         * @description When the alert started, with a timezone.
+                         */
+                        startsAt: string;
+                        /**
+                         * Endsat
+                         * Format: date-time
+                         * @description When the alert ended, with a timezone; Alertmanager's year-1 sentinel means no end while firing.
+                         */
+                        endsAt: string;
+                        /**
+                         * Generatorurl
+                         * @description Link back to the Prometheus expression that fired.
+                         * @default
+                         */
+                        generatorURL?: string;
+                        /**
+                         * Fingerprint
+                         * @description Alertmanager's stable fingerprint; with `startsAt` it identifies the row.
+                         */
+                        fingerprint: string;
+                    }[];
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertReceivedOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    getStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StatusOut"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    listIncidents: {
+        parameters: {
+            query?: {
+                /** @description Only this zone's incidents, plus alerts without a zone. */
+                zone?: string | null;
+                /** @description Only firing or resolved. */
+                status?: ("firing" | "resolved") | null;
+                /** @description `user_visible`: incidents with a `lumewarp_status`; `admin_only`: without one. */
+                impact?: ("user_visible" | "admin_only") | null;
+                /** @description Case-insensitive substring of the alertname, a member's `summary` annotation or a resolved target name. */
+                q?: string | null;
+                /** @description Only incidents that started at or after this instant. */
+                from?: string | null;
+                /** @description Only incidents that started before this instant. */
+                to?: string | null;
+                limit?: number;
+                /** @description Opaque cursor from the previous page's `next_cursor`. */
+                cursor?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Page_IncidentOut_"];
+                };
+            };
+            /** @description Missing or invalid credentials */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Validation error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    getIncident: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                incident_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IncidentDetailOut"];
                 };
             };
             /** @description Missing or invalid credentials */

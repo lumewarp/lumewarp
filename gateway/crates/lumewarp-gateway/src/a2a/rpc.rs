@@ -240,6 +240,11 @@ pub async fn serve(call: Call<'_>, agent: &str) -> Response<ProxyBody> {
                 status,
                 false,
                 reply.outcome,
+                reply
+                    .response
+                    .extensions()
+                    .get::<crate::error::ErrorInfo>()
+                    .map_or("", |info| info.code),
             );
         }
     }
@@ -1154,6 +1159,7 @@ fn start_stream(
             outcome: RequestOutcome::Completed,
             stream: true,
             config_version,
+            error_code: "",
         },
     );
     let state = StreamState {
@@ -1807,6 +1813,7 @@ mod tests {
                 outcome: RequestOutcome::Completed,
                 stream: true,
                 config_version: 0,
+                error_code: "",
             },
         );
         let state = StreamState {

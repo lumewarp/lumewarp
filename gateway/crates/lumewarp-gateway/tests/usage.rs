@@ -796,6 +796,74 @@ async fn cancelled_and_failed_streams_are_reported_once() {
 }
 
 #[tokio::test]
+async fn usage_events_carry_the_error_code_and_the_stream_ttft() {
+    let (mut cp, mut upstream, gateway) = setup().await;
+    // A stream whose first frame comes 80 ms after the headers: ttft_ms covers
+    // the wait, and a success has no error code.
+    let frames = upstream.respond_live("text/event-stream");
+    let response = gateway
+        .post(
+            "/v1/chat/completions",
+            KEY,
+            r#"{"model":"public","stream":true}"#,
+        )
+        .await;
+    upstream.received().await;
+    let body = response.into_body();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    frames.send(Ok(Bytes::from_static(CONTENT))).await.unwrap();
+    frames.send(Ok(Bytes::from_static(DONE))).await.unwrap();
+    drop(frames);
+    bounded(body.collect()).await.unwrap();
+    let event = cp.event().await;
+    assert_eq!((event.status, event.stream), (200, true));
+    assert_eq!(event.error_code, "");
+    assert!(
+        (60..=event.duration_ms).contains(&event.ttft_ms),
+        "ttft {} duration {}",
+        event.ttft_ms,
+        event.duration_ms
+    );
+
+    // A passed-through upstream status is named after it; nothing streamed.
+    upstream.respond(
+        503,
+        "application/json",
+        &[br#"{"error":{"message":"down"}}"#],
+    );
+    let response = gateway
+        .post("/v1/chat/completions", KEY, r#"{"model":"public"}"#)
+        .await;
+    assert_eq!(response.status(), 503);
+    bytes(response).await;
+    upstream.received().await;
+    let event = cp.event().await;
+    assert_eq!(
+        (event.error_code.as_str(), event.ttft_ms),
+        ("upstream_503", 0)
+    );
+
+    // The gateway's own rejections carry their code from `error::CODES`.
+    let response = gateway
+        .post("/v1/chat/completions", KEY, r#"{"model":"secret"}"#)
+        .await;
+    assert_eq!(response.status(), 403);
+    assert_eq!(cp.event().await.error_code, "model_not_allowed");
+    upstream.respond(200, "application/json", &[CHAT_JSON]);
+    let response = gateway
+        .post("/v1/chat/completions", LIMITED_KEY, r#"{"model":"public"}"#)
+        .await;
+    bytes(response).await;
+    upstream.received().await;
+    assert_eq!(cp.event().await.error_code, "");
+    let response = gateway
+        .post("/v1/chat/completions", LIMITED_KEY, r#"{"model":"public"}"#)
+        .await;
+    assert_eq!(response.status(), 429);
+    assert_eq!(cp.event().await.error_code, "rate_limit_exceeded");
+}
+
+#[tokio::test]
 async fn non_stream_and_embeddings_usage() {
     let mut upstream = Upstream::start().await;
     let mut s = snapshot(upstream.addr);

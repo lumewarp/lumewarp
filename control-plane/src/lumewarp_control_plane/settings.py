@@ -160,6 +160,10 @@ class Settings(BaseSettings):
     # sha256 digests only. A zone is declared here by its token.
     gateway_zone_tokens: dict[str, bytes] = Field(default_factory=gateway_zone_tokens)
 
+    # Alertmanager webhook receiver (`POST /api/v1/alerts/alertmanager`). The token is sent
+    # as `Authorization: Bearer <token>`; unset disables the receiver (404).
+    alertmanager_token: SecretStr | None = None
+
     # Limits shared with the gateway, see docs/config-protocol.md.
     max_snapshot_bytes: int = 64 * MIB
     max_snapshot_keys: int = 200_000
@@ -184,6 +188,13 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             value = [item.strip() for item in value.split(",") if item.strip()]
         return [ip_network(item) for item in value]
+
+    @field_validator("alertmanager_token")
+    @classmethod
+    def _check_alertmanager_token(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None and len(value.get_secret_value()) < 32:
+            raise ValueError("LUMEWARP_ALERTMANAGER_TOKEN must be at least 32 characters")
+        return value
 
     @field_validator("zone")
     @classmethod

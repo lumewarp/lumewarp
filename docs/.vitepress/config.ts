@@ -1,4 +1,5 @@
 import { defineConfig } from "vitepress";
+import { withMermaid } from "vitepress-plugin-mermaid";
 
 // Sections follow the reader, not the component: someone holding an `lw-` key, a team
 // admin and an operator each have their own entry point.
@@ -41,6 +42,7 @@ const sidebar = [
       { text: "MCP servers and A2A agents", link: "/admin/mcp-a2a" },
       { text: "Usage and audit", link: "/admin/usage-and-audit" },
       { text: "Requests", link: "/admin/requests" },
+      { text: "Incidents", link: "/admin/incidents" },
       { text: "Config versions and gateways", link: "/admin/config-and-gateways" },
     ],
   },
@@ -55,6 +57,8 @@ const sidebar = [
       { text: "Gateway settings", link: "/operations/gateway" },
       { text: "Sign-in and authorization", link: "/operations/identity" },
       { text: "Metrics, alerts and tracing", link: "/operations/observability" },
+      { text: "Alerts and incidents", link: "/operations/alerts-and-incidents" },
+      { text: "Incident flow, end to end", link: "/operations/incident-flow" },
       { text: "Upgrades and limits", link: "/operations/upgrades" },
       { text: "Troubleshooting", link: "/operations/troubleshooting" },
     ],
@@ -89,7 +93,7 @@ const sidebar = [
 // Set LUMEWARP_DOCS_BASE to the path the site is served under (GitHub Pages: /lumewarp/).
 const base = process.env.LUMEWARP_DOCS_BASE || "/";
 
-export default defineConfig({
+const config = defineConfig({
   title: "Lumewarp",
   description: "A fast, manageable LLM gateway for OpenAI-compatible upstreams.",
   base,
@@ -98,6 +102,20 @@ export default defineConfig({
   cleanUrls: true,
   lastUpdated: true,
   srcExclude: ["**/node_modules/**"],
+  // `pnpm dev` serves mermaid's CommonJS dependencies unbundled unless they are pre-bundled;
+  // pnpm keeps them nested, hence the `a > b` paths (the plugin's own bare names do not
+  // resolve under pnpm and only log "Failed to resolve dependency").
+  vite: {
+    optimizeDeps: {
+      include: [
+        "vitepress-plugin-mermaid > mermaid",
+        "vitepress-plugin-mermaid > mermaid > dayjs",
+        "vitepress-plugin-mermaid > mermaid > @braintree/sanitize-url",
+        "vitepress-plugin-mermaid > mermaid > cytoscape",
+        "vitepress-plugin-mermaid > mermaid > cytoscape-cose-bilkent",
+      ],
+    },
+  },
   // One locale for now. A translation becomes a directory (`zh-tw/`) and an entry here.
   locales: {
     root: { label: "English", lang: "en" },
@@ -121,3 +139,6 @@ export default defineConfig({
     footer: { message: "Apache-2.0" },
   },
 });
+
+// `withMermaid` renders ```mermaid blocks (architecture, alerts and incident flow) in the browser.
+export default withMermaid(config);

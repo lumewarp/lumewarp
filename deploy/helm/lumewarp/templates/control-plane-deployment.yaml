@@ -101,6 +101,13 @@ spec:
                   name: {{ .Values.controlPlane.breakGlass.passwordHashSecret.name }}
                   key: {{ .Values.controlPlane.breakGlass.passwordHashSecret.key }}
             {{- end }}
+            {{- if .Values.controlPlane.alertmanager.tokenSecret.name }}
+            - name: LUMEWARP_ALERTMANAGER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.controlPlane.alertmanager.tokenSecret.name }}
+                  key: {{ .Values.controlPlane.alertmanager.tokenSecret.key }}
+            {{- end }}
             {{- if .Values.controlPlane.grpcTls.enabled }}
             - name: LUMEWARP_GRPC_TLS_CERT_FILE
               value: /etc/lumewarp/tls/{{ .Values.controlPlane.grpcTls.certKey }}

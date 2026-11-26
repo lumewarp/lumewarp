@@ -98,6 +98,14 @@ message UsageEvent {
   // Transcription: audio duration reported by the upstream (usage type
   // "duration"), in milliseconds; 0 when it reported tokens or nothing.
   uint64 audio_ms = 32;
+  // The gateway error code from `error::CODES` (for example `rate_limit_exceeded`,
+  // `upstream_unavailable`) when the gateway answered with its own error; for a non-2xx
+  // passed through from the upstream, `upstream_<status>` (for example `upstream_503`);
+  // empty on success. At most 64 bytes.
+  string error_code = 33;
+  // Time to the first forwarded non-empty data frame of a successful stream, in
+  // milliseconds; 0 when the request did not stream or no frame was sent.
+  uint32 ttft_ms = 34;
 }
 
 enum TrafficKind {

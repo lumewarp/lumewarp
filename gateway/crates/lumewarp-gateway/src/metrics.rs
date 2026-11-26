@@ -342,6 +342,22 @@ struct RequestLabels {
     model: String,
     team: String,
     status: &'static str,
+    error_source: &'static str,
+    code: &'static str,
+}
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct GatewayInfoLabels {
+    zone: String,
+    gateway_id: String,
+    version: &'static str,
+}
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct RateLimitedLabels {
+    scope: &'static str,
+}
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct RequestedLabels {
+    requested: String,
 }
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct EndpointLabels {
@@ -402,6 +418,9 @@ fn duration_histogram() -> Histogram {
         0.25, 0.5, 1., 2.5, 5., 10., 30., 60.,
     ])
 }
+fn attempts_histogram() -> Histogram {
+    Histogram::new([1., 2., 3., 4., 5., 8.])
+}
 fn overhead_histogram() -> Histogram {
     Histogram::new([
         0.000025, 0.00005, 0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05,
@@ -423,9 +442,36 @@ pub struct RequestMetrics {
     ttft: Option<Histogram>,
     errors: Option<[Counter; 4]>,
     pub attempts: [Counter; 6],
+    /// `lumewarp_request_attempts{requested}`.
+    attempts_histogram: Histogram,
+    /// `lumewarp_requests_total` for this label set; errors look their series
+    /// up here by (`status`, `error_source`, `code`) on the cold error path.
+    requests: Family<RequestLabels, Counter>,
+    endpoint: &'static str,
 }
 
 impl RequestMetrics {
+    /// Observes how many upstream attempts a request that reached routing made.
+    pub fn observe_attempts(&self, attempts: usize) {
+        self.attempts_histogram.observe(attempts as f64);
+    }
+
+    /// The `lumewarp_requests_total` counter of a request that ended in an
+    /// error. Allocates its label strings: errors are off the success path.
+    fn error_counter(&self, status: u16, source: &'static str, code: &'static str) -> Counter {
+        self.requests
+            .get_or_create(&RequestLabels {
+                requested: self.requested.clone(),
+                endpoint: self.endpoint,
+                model: self.model.clone(),
+                team: self.team.clone(),
+                status: status_label(status),
+                error_source: source,
+                code,
+            })
+            .clone()
+    }
+
     pub fn upstream_error(&self, kind: UpstreamError) {
         if let Some(errors) = &self.errors {
             errors[kind as usize].inc();
@@ -473,6 +519,11 @@ pub struct Metrics {
     /// (team, requested, model, endpoint) and kept across snapshot swaps.
     handle_cache: papaya::HashMap<HandleKey, Arc<RequestMetrics>>,
     requests: Family<RequestLabels, Counter>,
+    gateway_info: Family<GatewayInfoLabels, Gauge>,
+    /// The label set currently exported by `gateway_info`.
+    gateway_info_current: Mutex<Option<GatewayInfoLabels>>,
+    rate_limited: Family<RateLimitedLabels, Counter>,
+    request_attempts: Histograms<RequestedLabels>,
     durations: Histograms<Labels>,
     overhead: Histograms<EndpointLabels>,
     body_read: Histograms<EndpointLabels>,
@@ -536,6 +587,10 @@ impl Metrics {
     pub fn with_shared_limits(shared_limits: bool) -> Self {
         let mut registry = Registry::default();
         let requests = Family::default();
+        let gateway_info = Family::default();
+        let rate_limited = Family::default();
+        let request_attempts =
+            Family::new_with_constructor(attempts_histogram as fn() -> Histogram);
         let durations = Family::new_with_constructor(duration_histogram as fn() -> Histogram);
         let overhead = Family::new_with_constructor(overhead_histogram as fn() -> Histogram);
         let body_read = Family::new_with_constructor(duration_histogram as fn() -> Histogram);
@@ -672,8 +727,23 @@ impl Metrics {
             model_healthy.clone(),
         );
         registry.register(
+            "lumewarp_gateway_info",
+            "Constant 1 labelled with this gateway's zone, control-plane assigned id (empty until the stream's Welcome, and in standalone mode) and version",
+            gateway_info.clone(),
+        );
+        registry.register(
+            "lumewarp_rate_limited",
+            "Requests rejected by this gateway's own rate limiter, by the kind of scope that rejected (key, team, member, org, service_account); an upstream 429 is not counted",
+            rate_limited.clone(),
+        );
+        registry.register(
+            "lumewarp_request_attempts",
+            "Upstream attempts per request that reached routing, by called name",
+            request_attempts.clone(),
+        );
+        registry.register(
             "lumewarp_requests",
-            "Completed requests, including dropped response bodies",
+            "Completed requests, including dropped response bodies (error_source: none, client, policy, upstream, gateway; code: the gateway error code, upstream_<status> for a passed-through error, empty on success)",
             requests.clone(),
         );
         registry.register(
@@ -894,6 +964,10 @@ impl Metrics {
             tokens,
             spend,
             spend_cache: papaya::HashMap::new(),
+            gateway_info,
+            gateway_info_current: Mutex::new(None),
+            rate_limited,
+            request_attempts,
             attempts,
             fallbacks,
             budget_exhausted,
@@ -925,6 +999,34 @@ impl Metrics {
     }
 
     /// Records one shared-limits sync; `result` is `success` or `error`.
+    /// Exports `lumewarp_gateway_info{zone, gateway_id, version} 1`, replacing
+    /// the previous label set (the id arrives in `Welcome`, after boot).
+    pub fn set_gateway_info(&self, zone: &str, gateway_id: &str) {
+        let labels = GatewayInfoLabels {
+            zone: zone.into(),
+            gateway_id: gateway_id.into(),
+            version: env!("CARGO_PKG_VERSION"),
+        };
+        let mut current = self
+            .gateway_info_current
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(old) = current.take() {
+            if old != labels {
+                self.gateway_info.remove(&old);
+            }
+        }
+        self.gateway_info.get_or_create(&labels).set(1);
+        *current = Some(labels);
+    }
+
+    /// `lumewarp_rate_limited_total{scope}`: a local limiter rejection.
+    pub fn rate_limited(&self, scope: &'static str) {
+        self.rate_limited
+            .get_or_create(&RateLimitedLabels { scope })
+            .inc();
+    }
+
     pub fn shared_limits_sync(&self, elapsed: Duration, result: &'static str) {
         if let Some(shared) = &self.shared_limits {
             shared
@@ -1217,7 +1319,13 @@ impl Metrics {
         endpoint: usize,
         team: &str,
     ) -> Arc<RequestMetrics> {
+        // Only statuses a success can have are exported up front; an error's
+        // series (status x error_source x code) is created when it happens, so
+        // the zero series carry no misleading `error_source="none"`.
         let counters = std::array::from_fn(|i| {
+            if !matches!(STATUSES[i], "200" | "204" | "other") {
+                return Counter::default();
+            }
             self.requests
                 .get_or_create(&RequestLabels {
                     requested: requested.into(),
@@ -1225,6 +1333,8 @@ impl Metrics {
                     model: model.into(),
                     team: team.into(),
                     status: STATUSES[i],
+                    error_source: "none",
+                    code: "",
                 })
                 .clone()
         });
@@ -1279,6 +1389,14 @@ impl Metrics {
             ttft,
             errors,
             attempts: self.attempt_handles(requested, model),
+            attempts_histogram: self
+                .request_attempts
+                .get_or_create(&RequestedLabels {
+                    requested: requested.into(),
+                })
+                .clone(),
+            requests: self.requests.clone(),
+            endpoint: API_ENDPOINTS[endpoint],
         })
     }
 
@@ -1456,6 +1574,7 @@ pub struct Observation {
     identified: bool,
     routed: bool,
     attempt: Option<Attempt>,
+    error: Option<crate::error::ErrorInfo>,
 }
 
 /// The upstream attempt the request span reports.
@@ -1508,6 +1627,7 @@ impl Observation {
             identified: false,
             routed: false,
             attempt: None,
+            error: None,
         }
     }
 
@@ -1631,7 +1751,17 @@ impl Observation {
             .iter()
             .position(|&known| known == status)
             .unwrap_or(11);
-        self.handles.counters[index].inc();
+        let (source, code) = crate::error::classify(self.status.as_u16(), self.error);
+        match source {
+            crate::error::Source::None => {
+                self.handles.counters[index].inc();
+            }
+            source => {
+                self.handles
+                    .error_counter(self.status.as_u16(), source.label(), code)
+                    .inc();
+            }
+        }
         // NOTE: Histogram::observe uses shared write locks; profile if p99 shows contention.
         self.handles
             .duration
@@ -1665,6 +1795,10 @@ impl Observation {
 
     pub fn wrap(mut self, response: hyper::Response<ProxyBody>) -> hyper::Response<ProxyBody> {
         self.status = response.status();
+        self.error = response
+            .extensions()
+            .get::<crate::error::ErrorInfo>()
+            .copied();
         self.handler_finished = Some(Instant::now());
         let (parts, body) = response.into_parts();
         hyper::Response::from_parts(
@@ -1805,7 +1939,7 @@ routers:
         observation.finish();
         observation.finish();
         let text = runtime.encode_metrics().unwrap();
-        assert!(text.contains("lumewarp_requests_total{requested=\"unknown\",endpoint=\"chat_completions\",model=\"\",team=\"\",status=\"404\"} 1"));
+        assert!(text.contains("lumewarp_requests_total{requested=\"unknown\",endpoint=\"chat_completions\",model=\"\",team=\"\",status=\"404\",error_source=\"upstream\",code=\"upstream_404\"} 1"));
         for name in [
             "lumewarp_requests_total",
             "lumewarp_request_duration_seconds",
@@ -1835,7 +1969,7 @@ routers:
             false,
         ));
         assert!(runtime.encode_metrics().unwrap().contains(
-            "requested=\"unknown\",endpoint=\"chat_completions\",model=\"\",team=\"\",status=\"499\"} 1"
+            "requested=\"unknown\",endpoint=\"chat_completions\",model=\"\",team=\"\",status=\"499\",error_source=\"client\",code=\"client_cancelled\"} 1"
         ));
         let guard = router.acquire(&router.names["public"], 0, &anonymous);
         assert!(runtime
@@ -1851,11 +1985,11 @@ routers:
         fallback.status = StatusCode::IM_A_TEAPOT;
         drop(fallback);
         assert!(runtime.encode_metrics().unwrap().contains(
-            "requested=\"unknown\",endpoint=\"chat_completions\",model=\"\",team=\"\",status=\"other\"} 1"
+            "requested=\"unknown\",endpoint=\"chat_completions\",model=\"\",team=\"\",status=\"other\",error_source=\"upstream\",code=\"upstream_418\"} 1"
         ));
         finish_with(&router.unknown(&anonymous, 0), 403);
         assert!(runtime.encode_metrics().unwrap().contains(
-            "requested=\"unknown\",endpoint=\"chat_completions\",model=\"\",team=\"\",status=\"403\"} 1"
+            "requested=\"unknown\",endpoint=\"chat_completions\",model=\"\",team=\"\",status=\"403\",error_source=\"upstream\",code=\"upstream_403\"} 1"
         ));
     }
 

@@ -195,7 +195,7 @@ async fn team_label_in_request_metrics() {
         }
     })
     .await;
-    let series = |labels: &[(&str, &str)]| metrics.value("lumewarp_requests_total", labels);
+    let series = |labels: &[(&str, &str)]| metrics.sum("lumewarp_requests_total", labels);
     assert_eq!(
         series(&[
             ("requested", "public"),
@@ -268,7 +268,7 @@ async fn authenticated_traffic_without_a_model_keeps_the_team() {
     })
     .await;
     let series = |router: &str, team: &str, status: &str| {
-        metrics.value(
+        metrics.sum(
             "lumewarp_requests_total",
             &[
                 ("requested", ""),

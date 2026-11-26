@@ -12,7 +12,7 @@ amber for 4xx and red for 5xx, with the outcome when the request did not complet
 **Requested** (the name the client called), **Resolved** (the model that served it; only an
 installation admin sees it), **Key** (a pill with the key name; hover or focus it for the
 org, team, owner (or service account), zone, `lw-` prefix and id),
-**Tokens** (total, with input + output in brackets) and **Cost**. The filter bar holds the
+**Tokens** (total, with input + output in brackets), **Cost**, and the gateway's **error code** when the request failed. The filter bar holds the
 range (**From** and **To**, date and time), zone, team, key and requested name; the other filters, including the resolved names, are
 under **More filters** and only an installation admin sees the routing ones. The copy button
 next to the date copies the request id.
@@ -38,7 +38,9 @@ Click a row to open its details beside the log.
 - **Model** is the model that served the request; **Upstream** is the upstream and its model
   name used by the final attempt, with the number of attempts when there were retries.
 - **Response** is the HTTP status, the outcome (`completed`, `client_cancelled`,
-  `upstream_error`, `rejected` or `unspecified`) and the duration.
+  `upstream_error`, `rejected` or `unspecified`), the duration, the **error code** of a failed
+  request (a gateway code, `upstream_<status>` for an error the upstream answered, or
+  `client_cancelled`) and, for a successful stream, the time to the first token (`ttft_ms`).
 
 Only an installation admin sees the routing part of the timeline (alias, router, fallback,
 model, upstream and attempts). Every other caller sees the received name, the response,
@@ -69,13 +71,16 @@ request, copy its `request_id` and look it up in
 | `requested` | Only requests that called this exact name, including one that never existed. |
 | `model`, `alias`, `router` | Only requests served by or routed through this name; installation admin only, otherwise `403 routing_detail_forbidden`. Follows the same current-name/orphan-spelling rule as `/usage`. |
 | `status`, `outcome` | HTTP status (`100`–`599`) or outcome. |
+| `error_code` | Only requests that ended with this gateway error code (the usage event's `error_code`). |
 | `request_id` | One request by the gateway's id. |
 | `limit`, `cursor` | Page size and the opaque cursor from the previous page's `next_cursor`. |
 
 Rows are ordered by the usage event's timestamp (`ts`) and `request_id`, newest first,
 and paginated with a keyset cursor, so a page stays stable while new requests arrive.
 
-Each row carries its `zone`, `key_id` and `key`, the shared key reference (`id`, `name`,
+Each row carries `error_code` and `ttft_ms`, both null when unknown: a request without an
+error has no code, a request that did not stream has no first-token time, and rows stored
+before these fields existed have neither. Each row carries its `zone`, `key_id` and `key`, the shared key reference (`id`, `name`,
 `display_prefix`, `team_id`, `team_name`, `org_id`, `org_name`, `owner_kind`, `user_id`,
 `service_account_id`, `service_account_name`, `lifecycle`). `key` is null when the key row
 no longer exists; `key_id` remains and the UI shows **Deleted key**.

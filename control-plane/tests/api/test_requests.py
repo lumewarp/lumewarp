@@ -442,3 +442,23 @@ async def test_deleted_key_answers_a_null_ref(client, committed) -> None:
     (row,) = items(client, team_id=str(team.id))
     assert row["key_id"] == str(key.id)
     assert row["key"] is None
+
+
+async def test_error_code_and_ttft_are_returned_and_filterable(client, committed) -> None:
+    team = await make_team(committed)
+    user, token = await user_with_token(committed)
+    await make_member(committed, team, user)
+    key = await make_key(committed, team, user)
+    failed = usage_event(key, ts=TS, requested="coded")
+    failed.status = 503
+    failed.error_code = "no_healthy_upstream"
+    ok = usage_event(key, ts=TS, requested="fine")
+    ok.ttft_ms = 120
+    committed.add_all([failed, ok])
+    await committed.commit()
+
+    rows = {row["requested"]: row for row in items(client, auth(token))}
+    assert (rows["coded"]["error_code"], rows["coded"]["ttft_ms"]) == ("no_healthy_upstream", None)
+    assert (rows["fine"]["error_code"], rows["fine"]["ttft_ms"]) == (None, 120)
+    assert names(client, auth(token), error_code="no_healthy_upstream") == {"coded"}
+    assert names(client, auth(token), error_code="rate_limited") == set()

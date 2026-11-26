@@ -238,6 +238,9 @@ impl Client {
                     if let Some(Update::Welcome(welcome)) = &update.update {
                         tracing::info!(gateway_id = %welcome.gateway_id, "gateway id assigned");
                         self.config.identity.assign(welcome.gateway_id.clone());
+                        self.runtime
+                            .metrics
+                            .set_gateway_info(&self.config.zone, &welcome.gateway_id);
                         continue;
                     }
                     let reply = self.handle(update).await;

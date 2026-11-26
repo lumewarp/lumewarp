@@ -427,6 +427,7 @@ the gateway take `extraEnv`. `nameOverride` and `fullnameOverride` are top-level
 | `controlPlane.databaseUrl.secretName` / `.key` | `lumewarp-control-plane` / `database-url` | Existing Secret with `LUMEWARP_DATABASE_URL`. |
 | `controlPlane.initialAdminEmail` | `""` | `LUMEWARP_INITIAL_ADMIN_EMAIL`: the email that becomes proxy_admin on its first verified login while no proxy_admin exists. Empty leaves emergency access only. |
 | `controlPlane.breakGlass.passwordHashSecret.name` / `.key` | empty / `password-hash` | Existing Secret with `LUMEWARP_BREAK_GLASS_PASSWORD_HASH` (argon2id). Empty disables the emergency login. |
+| `controlPlane.alertmanager.tokenSecret.name` / `.key` | empty / `token` | Existing Secret with `LUMEWARP_ALERTMANAGER_TOKEN` (32+ characters). Empty leaves the Alertmanager receiver off (it answers 404). See [Alerts and incidents](./alerts-and-incidents.md). |
 | `controlPlane.oidc.issuer` / `.clientId` / `.publicUrl` | empty | OIDC sign-in; the variables render only with an `issuer`. See [SSO](#sso-and-authorization-backend). |
 | `controlPlane.oidc.clientSecret.secretName` / `.key` | empty / `client-secret` | Existing Secret with the client secret; empty for a public PKCE client. |
 | `controlPlane.oidc.secretKey.secretName` / `.key` | empty / `secret-key` | Existing Secret with `LUMEWARP_SECRET_KEY`; required with an `issuer`. |

@@ -83,8 +83,11 @@ their volumes, and `make dev-reset` removes those too. `make dev-down` removes t
 alone and `make dev-run-<service>` runs one service in the foreground; the `Makefile` header
 lists the services, ports and settings. `DEV_EXTRAS=1 make dev` also starts Open WebUI, a
 Prometheus at `127.0.0.1:19090` that scrapes the gateways and the control plane with the
-shipped rules (`deploy/prometheus/rules.yaml`, label `namespace="dev"`), and a Grafana with
-the dashboards from `deploy/grafana/dashboards`.
+shipped rules (`deploy/prometheus/rules.yaml`, label `namespace="dev"`), an Alertmanager at
+`127.0.0.1:19093` that posts every alert to the control plane's receiver (which then shows
+the status banner and Incidents), and a Grafana with the dashboards from
+`deploy/grafana/dashboards`. [Incident flow, end to end](../operations/incident-flow.md#rehearse-it-on-the-development-stack)
+shows how to break the mock upstream and follow an incident.
 
 The stack has these development-only accounts, defined in `deploy/dev/keycloak/realm.json`,
 `deploy/dev/compose.yaml` and the `Makefile`.
@@ -115,7 +118,10 @@ mock upstream in both zones, the aliases `chat-default` and `embed`, the routers
 and service-account limits and budgets above the seeded spend. It then ingests 30 UTC days
 of usage in both zones, ending now: weekday/weekend and hour-of-day curves, calls through
 models, aliases and routers, streaming and non-streaming, embeddings, transcription, MCP
-`tools/call` and A2A requests, and about 3% 429/5xx with their outcomes. Key secrets are in
+`tools/call` and A2A requests, and about 3% 429/5xx with their outcomes and error codes. It
+stores seven demo alerts in six incidents with matching traffic (one still firing, so the
+status banner shows; one outage reported by two gateways) and health-checks the seeded mock
+upstreams every 5 seconds. Key secrets are in
 `.dev/seed-keys` (not the database); the run deletes and re-ingests only the seed teams'
 `usage_events` and rebuilds their monthly totals, so the window slides forward and other
 teams' history is untouched. `seed-dev --days N --seed N --no-usage` changes the window or
