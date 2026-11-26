@@ -78,4 +78,7 @@ A zone separates gateway configuration and traffic, not teams or identity. See [
 | OIDC settings and `LUMEWARP_SECRET_KEY` | Control plane | Sign-in for everyone else ([Sign-in and authorization](./identity.md)). |
 | `LUMEWARP_GATEWAY_ID_KEY`, `LUMEWARP_GATEWAY_PUBLIC_URL` | Gateway | Only for MCP and A2A; without them those endpoints answer 503. |
 
+Optional, for a status banner and an incident history driven by your Prometheus alerts:
+`LUMEWARP_ALERTMANAGER_TOKEN` on the control plane, see [Alerts and incidents](./alerts-and-incidents.md).
+
 Run exactly one control-plane process per installation.

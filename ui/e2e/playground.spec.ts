@@ -233,3 +233,29 @@ test("an answer cut off mid-stream is kept with a warning and stays in the histo
     { role: "user", content: "second" },
   ]);
 });
+
+test("fits the viewport below the status banner, so only the transcript scrolls", async ({ page }) => {
+  await mockInfo(page, { enabled: true, keys: [KEY] });
+  const since = new Date().toISOString();
+  await page.route(
+    (url) => url.pathname === "/api/v1/status",
+    (route) =>
+      route.fulfill({
+        json: {
+          items: [
+            { name: "gpt-a", zone: "default", state: "down", summary: "A backend is unavailable.", since },
+            { name: "gpt-b", zone: "default", state: "congested", summary: null, since },
+          ],
+        },
+      }),
+  );
+  await page.setViewportSize({ width: 1400, height: 800 });
+  await signIn(page, VIEWER, "/playground");
+  await expect(page.getByTestId("status-banner")).toBeVisible();
+  await expect(page.getByTestId("playground-chat")).toBeVisible();
+  const overflow = () => page.evaluate(() => document.documentElement.scrollHeight - window.innerHeight);
+  await expect.poll(overflow).toBeLessThanOrEqual(0);
+  // Opening the list makes the banner taller; the Playground shrinks with it.
+  await page.getByTestId("status-count").click();
+  await expect.poll(overflow).toBeLessThanOrEqual(0);
+});

@@ -121,6 +121,9 @@ pub struct TrafficEvent<'a> {
     pub outcome: RequestOutcome,
     pub stream: bool,
     pub config_version: u64,
+    /// The gateway's own `error::CODES` code, empty when the response was not one of its
+    /// errors (a status over 399 is then named `upstream_<status>`).
+    pub error_code: &'static str,
 }
 
 /// The `endpoint` label of a traffic event: the MCP and A2A endpoints are the
@@ -158,6 +161,7 @@ struct OwnedTraffic {
     tool: String,
     stream: bool,
     status: u16,
+    error_code: &'static str,
 }
 
 impl OwnedTraffic {
@@ -187,6 +191,7 @@ impl OwnedTraffic {
             tool: bounded(event.tool, MAX_TOOL).into_owned(),
             stream: event.stream,
             status: event.status,
+            error_code: event.error_code,
         })
     }
 
@@ -214,6 +219,11 @@ impl OwnedTraffic {
             target: self.target,
             method: self.method,
             tool: self.tool,
+            error_code: if self.error_code.is_empty() {
+                crate::error::classify(status, None).1.into()
+            } else {
+                self.error_code.into()
+            },
             ..Default::default()
         });
     }
@@ -839,6 +849,12 @@ pub struct UsageCapture {
     pub endpoint: usize,
     pub stream: bool,
     pub status: u16,
+    /// The gateway's own `error::CODES` code when it answered with an error
+    /// itself; empty otherwise (a passed-through status or a cancellation is
+    /// named from `status` in `finalize`).
+    pub error_code: &'static str,
+    /// Milliseconds to the first forwarded data frame of a stream; 0 if none.
+    pub ttft_ms: u32,
 }
 
 impl UsageCapture {
@@ -919,6 +935,12 @@ impl UsageCapture {
             cost_nano_usd: cost.unwrap_or(0),
             cost_known: cost.is_some(),
             kind: lumewarp_proto::usage::v1::TrafficKind::Llm as i32,
+            error_code: if self.error_code.is_empty() {
+                crate::error::classify(self.status, None).1.into()
+            } else {
+                self.error_code.into()
+            },
+            ttft_ms: self.ttft_ms,
             ..Default::default()
         });
     }
@@ -1622,6 +1644,39 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
         })
     }
 
+    /// MCP/A2A events carry the gateway's own error code, `upstream_<status>` for an error status
+    /// nobody coded, and nothing on success.
+    #[test]
+    fn a_traffic_event_carries_its_error_code() {
+        let (sink, mut rx) = UsageSink::for_test();
+        let runtime = Runtime::with_usage(Arc::new(Metrics::new()), sink);
+        let request = RequestCtx::new(Instant::now());
+        let caller = Caller::Key(traffic_key("key-1", "team-1"));
+        let mut code = |status: u16, error_code: &'static str| {
+            record_traffic(
+                &runtime,
+                TrafficEvent {
+                    kind: TrafficKind::A2a,
+                    request: &request,
+                    caller: &caller,
+                    target: "agent",
+                    method: "SendMessage",
+                    tool: "",
+                    status,
+                    outcome: RequestOutcome::Completed,
+                    stream: false,
+                    config_version: 1,
+                    error_code,
+                },
+            );
+            rx.try_recv().expect("one event").error_code
+        };
+        assert_eq!(code(200, ""), "");
+        assert_eq!(code(429, "rate_limit_exceeded"), "rate_limit_exceeded");
+        assert_eq!(code(502, "mcp_error"), "mcp_error");
+        assert_eq!(code(503, ""), "upstream_503");
+    }
+
     /// F2: one MCP/A2A request becomes one usage event, and nothing an upstream
     /// or a client chose can violate the control plane's field bounds.
     #[test]
@@ -1644,6 +1699,7 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
                 outcome: RequestOutcome::Completed,
                 stream: true,
                 config_version: 7,
+                error_code: "",
             },
         );
         let event = rx.try_recv().expect("one event");
@@ -1702,6 +1758,7 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
                 outcome: RequestOutcome::UpstreamError,
                 stream: false,
                 config_version: 7,
+                error_code: "",
             },
         );
         let event = rx.try_recv().expect("second event");
@@ -1742,6 +1799,7 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
                 outcome: RequestOutcome::Completed,
                 stream: false,
                 config_version: 3,
+                error_code: "",
             }
         }
 
@@ -1817,6 +1875,7 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
                 outcome: RequestOutcome::Completed,
                 stream: true,
                 config_version: 3,
+                error_code: "",
             },
         );
         recorder.finish(RequestOutcome::Completed);
@@ -1853,6 +1912,7 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
                 outcome: RequestOutcome::Completed,
                 stream: false,
                 config_version: 1,
+                error_code: "",
             },
         );
         assert!(rx.try_recv().is_err());
@@ -1870,6 +1930,7 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
                 outcome: RequestOutcome::Completed,
                 stream: false,
                 config_version: 1,
+                error_code: "",
             },
         );
         assert!(rx.try_recv().is_err());
@@ -1888,6 +1949,7 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
                 outcome: RequestOutcome::Completed,
                 stream: false,
                 config_version: 1,
+                error_code: "",
             },
         );
         assert!(rx.try_recv().is_err());
@@ -1912,6 +1974,8 @@ data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\
             router: None,
             fallback: false,
             attempts: 0,
+            error_code: "",
+            ttft_ms: 0,
         };
         let captured = || {
             runtime

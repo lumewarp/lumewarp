@@ -43,6 +43,7 @@ ZC_POOL = 6
 HTTP_PORT = os.environ.get("E2E_HTTP_PORT", "8992")
 GRPC_PORT = os.environ.get("E2E_GRPC_PORT", "50952")
 BREAK_GLASS_PASSWORD = "e2e-break-glass-password"
+ALERTMANAGER_TOKEN = "e2e-alertmanager-token-0123456789abcdef"
 # Users without a team: a spec adds them where it needs them. Their sessions are seeded here because the
 # login is OIDC (or break-glass); a cookie session is the only way a spec can act as a regular member.
 VIEWER_EMAIL = "viewer@e2e.test"
@@ -943,6 +944,8 @@ def main() -> None:
         **os.environ,
         "LUMEWARP_DATABASE_URL": url,
         "LUMEWARP_BREAK_GLASS_PASSWORD": BREAK_GLASS_PASSWORD,
+        # incidents.spec.ts posts Alertmanager payloads with this token.
+        "LUMEWARP_ALERTMANAGER_TOKEN": ALERTMANAGER_TOKEN,
         # Seals an API key or an MCP/A2A token stored through the API; a deployment sets this too.
         "LUMEWARP_ENCRYPTION_KEY": "e2e-encryption-key-0123456789abcdef",
         "LUMEWARP_DEV_MODE": "true",

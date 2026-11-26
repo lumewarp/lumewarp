@@ -108,6 +108,7 @@ from [Sign-in and authorization](./identity.md) to `.env`, with
 | Logs | `docker compose logs -f gateway control-plane` |
 | Another zone | Set `LUMEWARP_GATEWAY_ZONE_<ID>_TOKEN` on the control plane and pass the same secret to its gateway; see [Zones](../admin/zones.md#declare-and-configure-a-zone). |
 | MCP and A2A | Set `LUMEWARP_GATEWAY_ID_KEY` (`openssl rand -base64 32`) and `LUMEWARP_GATEWAY_PUBLIC_URL` in `.env` |
+| Alerts and incidents | Uncomment `LUMEWARP_ALERTMANAGER_TOKEN` in `.env`; the control plane reads `.env` through `env_file`, so `compose.yaml` does not change ([Alerts and incidents](./alerts-and-incidents.md)). Leave an unused variable commented out: an empty token is refused at startup |
 | WASM plugins | Mount a directory into the gateway and set `LUMEWARP_ROUTER_PLUGIN_DIR`, `LUMEWARP_AUTH_PLUGIN_DIR` and `LUMEWARP_A2A_MIDDLEWARE_DIR` ([Gateway plugins](../plugins.md#loading)); plugin secrets are `LUMEWARP_PLUGIN_SECRET_*` variables |
 | Metrics | Scrape `127.0.0.1:9464/metrics` and `127.0.0.1:9465/metrics` ([Metrics, alerts and tracing](./observability.md)) |
 | Backups | The `postgres` volume holds everything; the gateway's `gateway-state` volume is a cache it rebuilds from the control plane |

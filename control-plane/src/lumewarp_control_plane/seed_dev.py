@@ -30,14 +30,18 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from sqlalchemy import bindparam, delete, select, text
+from sqlalchemy import bindparam, delete, exists, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane import usage
 from lumewarp_control_plane._proto.lumewarp.usage.v1 import usage_pb2
+from lumewarp_control_plane.alerts import receiver as alerts_receiver
+from lumewarp_control_plane.alerts.receiver import IncomingAlert
 from lumewarp_control_plane.db import create_engine, create_session_factory
 from lumewarp_control_plane.models import (
+    Alert,
+    Incident,
     KeyOwnerKind,
     OrgAdmin,
     ScopeType,
@@ -343,10 +347,17 @@ def _ensure_service_account(api: Api, team_id: uuid.UUID, name: str) -> uuid.UUI
     return uuid.UUID(created["id"])
 
 
+# Probes `GET /v1/models` on the mock every 5 s; two failures mark the upstream unhealthy,
+# so `POST /fault?status=503` on the mock fires `LumewarpUpstreamUnhealthy` in about 2 minutes.
+MOCK_HEALTH_CHECK = {"interval_ms": 5000, "timeout_ms": 2000, "unhealthy_threshold": 2}
+
+
 def _ensure_upstream(api: Api, zone: str) -> uuid.UUID:
     name = f"mock-{zone}"
     found = _find(api.get_items("/upstreams"), name=name, zone=zone)
     if found:
+        if not found.get("health_check"):
+            api.patch(f"/upstreams/{found['id']}", {"health_check": MOCK_HEALTH_CHECK})
         return uuid.UUID(found["id"])
     created = api.post(
         "/upstreams",
@@ -355,6 +366,7 @@ def _ensure_upstream(api: Api, zone: str) -> uuid.UUID:
             "zone": zone,
             "kind": "openai_compatible",
             "base_url": MOCK_BASE_URL,
+            "health_check": MOCK_HEALTH_CHECK,
         },
     )
     return uuid.UUID(created["id"])
@@ -760,14 +772,17 @@ def _llm_event(
     status = 200
     outcome = usage_pb2.REQUEST_OUTCOME_COMPLETED
     usage_state = usage_pb2.USAGE_STATE_REPORTED
+    error_code = ""
     if failed < 0.015:
         status = 429
         outcome = usage_pb2.REQUEST_OUTCOME_REJECTED
         usage_state = usage_pb2.USAGE_STATE_MISSING
+        error_code = "rate_limit_exceeded"
     elif failed < 0.03:
         status = 503
         outcome = usage_pb2.REQUEST_OUTCOME_UPSTREAM_ERROR
         usage_state = usage_pb2.USAGE_STATE_MISSING
+        error_code = "upstream_503"
         attempts = 2
     elif router and served != FALLBACK_MODEL and rng.random() < 0.10:
         # A member failed before any response byte; the router fell back.
@@ -793,6 +808,8 @@ def _llm_event(
         usage_state = usage_pb2.USAGE_STATE_INVALID
         cost = 0
         cost_known = False
+    # Time to the first streamed byte, a fraction of the whole duration.
+    ttft = int(duration * rng.uniform(0.08, 0.3)) if stream and status == 200 else 0
     return usage_pb2.UsageEvent(
         request_id=str(request_id),
         timestamp_unix_ms=_ms(ts),
@@ -819,6 +836,8 @@ def _llm_event(
         config_version=0,
         usage_state=usage_state,
         outcome=outcome,
+        error_code=error_code,
+        ttft_ms=ttft,
     )
 
 
@@ -909,6 +928,7 @@ def _target_event(
         tool=tool,
         endpoint=endpoint,
         status=500 if failed else 200,
+        error_code=("mcp_error" if kind == "mcp" else "upstream_500") if failed else "",
         duration_ms=duration,
         usage_state=(usage_pb2.USAGE_STATE_MISSING if failed else usage_pb2.USAGE_STATE_REPORTED),
         outcome=(
@@ -968,6 +988,286 @@ def generate_events(
                 )
                 events[key.zone].append(_one_event(rng, key, request_id=request_id, ts=ts))
     return dict(events)
+
+
+# --------------------------------------------------------------------------- incidents
+
+
+@dataclass(frozen=True)
+class SeedIncident:
+    """One demo alert, stored through the Alertmanager receiver, and what it did to traffic.
+
+    `effect` reshapes the seed traffic in its window: `down` fails the matching requests
+    (a router falls back instead), `errors` fails some of them, `slow` stretches latency
+    and TTFT. `match` is the served model, or empty for every request in the zone.
+    """
+
+    key: str
+    alertname: str
+    severity: str
+    status: str | None
+    zone: str
+    labels: dict[str, str]
+    summary: str
+    description: str
+    user_summary: str | None
+    ago: timedelta
+    duration: timedelta | None
+    effect: str | None = None
+    match: str = ""
+    error_code: str = "upstream_503"
+    # Gateways reporting the alert: one alert each, starts staggered by GATEWAY_STAGGER,
+    # grouped by the receiver into one incident. Empty = one alert without an instance.
+    gateways: tuple[str, ...] = ()
+
+
+INCIDENTS = (
+    SeedIncident(
+        "qwen-down",
+        "LumewarpModelUnhealthy",
+        "warning",
+        "down",
+        "default",
+        {"model": "qwen2.5-32b"},
+        "Model chat checks are failing",
+        "Model qwen2.5-32b has failed its chat check for 2 minutes.",
+        "qwen2.5-32b is unavailable; requests may fail or use a fallback.",
+        timedelta(days=2, hours=3),
+        timedelta(minutes=38),
+        effect="down",
+        match="qwen2.5-32b",
+    ),
+    SeedIncident(
+        "prod-upstream-down",
+        "LumewarpUpstreamUnhealthy",
+        "critical",
+        "down",
+        "prod",
+        {"upstream": "mock-prod"},
+        "Upstream health checks are failing",
+        "Upstream mock-prod has been unhealthy for 2 minutes.",
+        "A backend serving some models is unavailable; requests may fail or use a fallback.",
+        timedelta(days=6, hours=5),
+        timedelta(minutes=22),
+        effect="down",
+        error_code="upstream_unavailable",
+        gateways=("10.0.0.11:9466", "10.0.0.12:9466"),
+    ),
+    SeedIncident(
+        "chat-5xx",
+        "LumewarpGatewayHigh5xxRatio",
+        "critical",
+        "degraded",
+        "prod",
+        {"requested": "chat"},
+        "Gateway 5xx ratio is high",
+        "Requested chat exceeds 5% 5xx responses for 5 minutes at >=1 request/s.",
+        "chat has an elevated error rate.",
+        timedelta(days=4, hours=1),
+        timedelta(minutes=17),
+        effect="errors",
+    ),
+    SeedIncident(
+        "llama-ttft",
+        "LumewarpTTFTHigh",
+        "warning",
+        "congested",
+        "default",
+        {"requested": "llama-3.1-8b"},
+        "Stream p99 TTFT is high",
+        "Requested llama-3.1-8b has p99 TTFT above 5 seconds for 10 minutes.",
+        "llama-3.1-8b is responding slowly.",
+        timedelta(days=9, hours=4),
+        timedelta(minutes=70),
+        effect="slow",
+        match="llama-3.1-8b",
+    ),
+    SeedIncident(
+        "usage-failed",
+        "LumewarpUsageEventsFailed",
+        "warning",
+        None,
+        "default",
+        {"instance": "127.0.0.1:9466"},
+        "Usage reporting is failing",
+        "Gateway 127.0.0.1:9466 has failed usage report attempts for 5 minutes.",
+        None,
+        timedelta(days=3, hours=7),
+        timedelta(minutes=12),
+    ),
+    # Still firing: the status banner shows it to callers of llama-3.1-8b in `default`.
+    SeedIncident(
+        "llama-queue",
+        "LumewarpVLLMQueueHigh",
+        "warning",
+        "congested",
+        "default",
+        {"model": "llama-3.1-8b"},
+        "vLLM request queue is growing",
+        "Model llama-3.1-8b has over 100 queued requests for 10 minutes.",
+        "llama-3.1-8b is under heavy load; responses may be slower.",
+        timedelta(minutes=25),
+        None,
+        effect="slow",
+        match="llama-3.1-8b",
+    ),
+)
+# Seeded alerts are found again by this fingerprint prefix and replaced on every run.
+INCIDENT_FINGERPRINT = "seed-dev-"
+# Extra requests per minute in each incident's zone, from 15 minutes before to 15 after.
+INCIDENT_RATE = 6
+INCIDENT_MARGIN = timedelta(minutes=15)
+# How far apart the gateways of one incident saw the alert start.
+GATEWAY_STAGGER = timedelta(seconds=20)
+
+
+def _incident_window(incident: SeedIncident, end: datetime) -> tuple[datetime, datetime]:
+    start = end - incident.ago
+    stop = start + incident.duration if incident.duration is not None else end
+    return start, min(stop, end)
+
+
+def _fail(event: usage_pb2.UsageEvent, rng: random.Random, code: str) -> None:
+    status = 503
+    event.status = status
+    event.outcome = usage_pb2.REQUEST_OUTCOME_UPSTREAM_ERROR
+    event.usage_state = usage_pb2.USAGE_STATE_MISSING
+    event.error_code = code
+    event.prompt_tokens = event.completion_tokens = 0
+    event.cost_nano_usd = 0
+    event.cost_known = False
+    event.ttft_ms = 0
+    event.attempts = 2
+    event.duration_ms = rng.randint(5, 900)
+    event.started_at_unix_ms = event.timestamp_unix_ms - event.duration_ms
+
+
+def _apply_incident(
+    event: usage_pb2.UsageEvent, incident: SeedIncident, rng: random.Random
+) -> None:
+    """Reshape one request inside the incident's window, as the outage would have."""
+    if event.kind != usage_pb2.TRAFFIC_KIND_LLM or event.status != 200:
+        return
+    named = {event.model, event.requested, event.alias, event.router}
+    if incident.match and incident.match not in named:
+        return
+    if incident.effect == "down":
+        if event.router and incident.match and event.model != FALLBACK_MODEL:
+            # The router's member failed before any byte and the fallback served it.
+            spec = MODEL_NAMES[FALLBACK_MODEL]
+            event.model = FALLBACK_MODEL
+            event.upstream_model = spec.upstream_model
+            event.fallback = True
+            event.attempts = 2
+            if event.cost_known:
+                event.cost_nano_usd = _cost(spec, event.prompt_tokens, event.completion_tokens, 0)
+        else:
+            _fail(event, rng, incident.error_code)
+    elif incident.effect == "errors" and rng.random() < 0.4:
+        _fail(event, rng, incident.error_code)
+    elif incident.effect == "slow":
+        factor = rng.uniform(4.0, 7.0)
+        event.duration_ms = min(int(event.duration_ms * factor) + 3000, 2**31 - 1)
+        event.started_at_unix_ms = event.timestamp_unix_ms - event.duration_ms
+        if event.stream:
+            event.ttft_ms = rng.randint(5200, 12_000)
+
+
+def apply_incidents(
+    events: dict[str, list[usage_pb2.UsageEvent]],
+    keys: Sequence[SeedKey],
+    *,
+    seed: int,
+    end: datetime,
+) -> None:
+    """Add a burst of traffic around every incident and reshape the requests it hit.
+
+    The burst gives each incident page a traffic snapshot worth reading; its request ids
+    are `uuid5` like the history, so a rerun replays the same rows.
+    """
+    end = end.astimezone(UTC).replace(microsecond=0)
+    rng = random.Random(seed + 1)
+    for incident in INCIDENTS:
+        zone_keys = [key for key in keys if key.zone == incident.zone]
+        if incident.effect is None or not zone_keys:
+            continue
+        start, stop = _incident_window(incident, end)
+        burst_start = start - INCIDENT_MARGIN
+        burst_stop = min(stop + INCIDENT_MARGIN, end)
+        minutes = max(1, int((burst_stop - burst_start).total_seconds() // 60))
+        batch = events.setdefault(incident.zone, [])
+        for slot in range(minutes * INCIDENT_RATE):
+            ts = burst_start + timedelta(seconds=rng.uniform(0, minutes * 60))
+            request_id = uuid.uuid5(
+                uuid.NAMESPACE_URL, f"lumewarp-seed-dev:{seed}:incident:{incident.key}:{slot}"
+            )
+            key = rng.choice(zone_keys)
+            batch.append(
+                _llm_event(rng, key, request_id=request_id, ts=ts, endpoint="chat_completions")
+            )
+        lower, upper = _ms(start), _ms(stop)
+        for event in batch:
+            if lower <= event.timestamp_unix_ms <= upper:
+                _apply_incident(event, incident, rng)
+
+
+def incident_alerts(end: datetime) -> list[IncomingAlert]:
+    """The seeded alerts as the receiver would get them from Alertmanager."""
+    end = end.astimezone(UTC).replace(microsecond=0)
+    alerts = []
+    for incident in INCIDENTS:
+        start, stop = _incident_window(incident, end)
+        labels = {
+            "alertname": incident.alertname,
+            "severity": incident.severity,
+            "zone": incident.zone,
+            "namespace": "lumewarp-dev",
+            **incident.labels,
+        }
+        annotations = {"summary": incident.summary, "description": incident.description}
+        if incident.status:
+            labels["lumewarp_status"] = incident.status
+        if incident.user_summary:
+            annotations["lumewarp_summary"] = incident.user_summary
+        for position, gateway in enumerate(incident.gateways or ("",)):
+            fingerprint = INCIDENT_FINGERPRINT + incident.key
+            gateway_labels = dict(labels)
+            if gateway:
+                gateway_labels["instance"] = gateway
+                fingerprint += f"-{position}"
+            alerts.append(
+                IncomingAlert(
+                    status="resolved" if incident.duration is not None else "firing",
+                    labels=gateway_labels,
+                    annotations=annotations,
+                    starts_at=start + GATEWAY_STAGGER * position,
+                    ends_at=stop if incident.duration is not None else None,
+                    generator_url="http://127.0.0.1:19090/alerts",
+                    fingerprint=fingerprint,
+                )
+            )
+    return alerts
+
+
+async def _write_alerts(settings: Settings, alerts: Sequence[IncomingAlert]) -> None:
+    engine = create_engine(settings)
+    factory = create_session_factory(engine)
+    try:
+        async with factory() as session, session.begin():
+            # Development data only: the previous run's demo alerts slide with the window,
+            # and so do their incidents.
+            seeded = Alert.fingerprint.startswith(INCIDENT_FINGERPRINT)
+            incident_ids = list(await session.scalars(select(Alert.incident_id).where(seeded)))
+            await session.execute(delete(Alert).where(seeded))
+            await session.execute(
+                delete(Incident).where(
+                    Incident.id.in_(incident_ids),
+                    ~exists().where(Alert.incident_id == Incident.id),
+                )
+            )
+            await alerts_receiver.receive(session, alerts)
+    finally:
+        await engine.dispose()
 
 
 # --------------------------------------------------------------------------- totals
@@ -1157,11 +1457,16 @@ def run(settings: Settings, args: Any) -> None:
         _write_secrets(path, secrets)
     if plan.org_admin == "direct":
         asyncio.run(_write_org_admin(settings, plan.org_ids["acme"], plan.user_ids[ORG_ADMIN]))
+    end = datetime.now(UTC)
+    alerts = incident_alerts(end)
+    asyncio.run(_write_alerts(settings, alerts))
+    print(f"seed-dev: {len(alerts)} demo alerts in {len(INCIDENTS)} incidents")
     if args.no_usage:
         print(f"seed-dev: catalog ready ({len(plan.keys)} keys); usage skipped")
         return
 
-    events = generate_events(plan.keys, seed=args.seed, days=args.days, end=datetime.now(UTC))
+    events = generate_events(plan.keys, seed=args.seed, days=args.days, end=end)
+    apply_incidents(events, plan.keys, seed=args.seed, end=end)
     count = sum(len(batch) for batch in events.values())
     accepted, skipped = asyncio.run(_write_history(settings, plan, events))
     print(

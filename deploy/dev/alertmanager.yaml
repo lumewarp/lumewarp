@@ -1,0 +1,18 @@
+# Dev-only Alertmanager (`DEV_EXTRAS=1 make dev`): every Lumewarp alert goes to the control
+# plane's receiver. The token is the Makefile's LUMEWARP_ALERTMANAGER_TOKEN; it protects
+# nothing real. Short waits so a fault injected on the mock shows up within minutes.
+route:
+  receiver: lumewarp
+  group_by: [alertname, zone, model, upstream, requested]
+  group_wait: 10s
+  group_interval: 30s
+  repeat_interval: 1h
+receivers:
+  - name: lumewarp
+    webhook_configs:
+      - url: http://127.0.0.1:8091/api/v1/alerts/alertmanager
+        send_resolved: true
+        http_config:
+          authorization:
+            type: Bearer
+            credentials: dev-only-alertmanager-token-0123456789abcdef

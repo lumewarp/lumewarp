@@ -16,9 +16,11 @@ Sub-routers are included into `router` here; app.py mounts `router` and nothing 
 from fastapi import APIRouter
 
 from lumewarp_control_plane.api import (
+    alerts,
     audit,
     config,
     gateways,
+    incidents,
     installation_admins,
     keys,
     members,
@@ -67,6 +69,8 @@ router.include_router(users.router)
 router.include_router(installation_admins.router)
 router.include_router(usage.router)
 router.include_router(requests.router)
+router.include_router(alerts.router)
+router.include_router(incidents.router)
 router.include_router(audit.router)
 router.include_router(gateways.router)
 router.include_router(config.router)

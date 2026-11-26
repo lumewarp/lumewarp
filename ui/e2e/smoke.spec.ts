@@ -122,6 +122,8 @@ test("cookie session: CSRF on writes, inline member errors, key owner state, log
       },
     }),
   );
+  // The status banner polls /status on every page; the real server would answer this mocked session with a 401.
+  await page.route("**/api/v1/status", (route) => route.fulfill({ json: { items: [] } }));
   // The header's zone switcher reads the zone list; this session is mocked, so the list is too.
   await page.route("**/api/v1/zones*", (route) =>
     route.fulfill({
@@ -346,10 +348,10 @@ test("team, member, service-account, and key flows", async ({ page, browser, req
   await page.getByRole("link", { name: "Research" }).click();
   await expect(page.getByRole("tab", { name: "Members" })).toHaveAttribute("aria-selected", "true");
 
-  const usersResponse = await request.get("/api/v1/users", { headers: admin });
+  const usersResponse = await request.get("/api/v1/users?limit=500", { headers: admin });
   const users = (await usersResponse.json()).items as { id: string; email: string }[];
   const viewer = users.find((user) => user.email === "viewer@e2e.test")!;
-  const teamsResponse = await request.get("/api/v1/teams", { headers: admin });
+  const teamsResponse = await request.get("/api/v1/teams?limit=500", { headers: admin });
   const teams = (await teamsResponse.json()).items as { id: string; name: string }[];
   const team = teams.find((item) => item.name === "Research")!;
 

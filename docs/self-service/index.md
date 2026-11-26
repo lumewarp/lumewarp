@@ -26,6 +26,17 @@ tab. A plain member does not see this table.
 These are *your* effective values in the selected zone: the team's grants narrowed by your
 own, and the zone's limits and budgets. A member does not see the team's full policy.
 
+## Status banner
+
+When a model you may call is affected, a banner under the header says so on every page:
+`down`, `degraded`, `congested` or whatever the alert says, the model's name, the zone when
+you have more than one, a short text and since when. When several names are affected, the banner shows the text of
+the worst state and an "N names affected" button that lists them all. It lists only names
+you can call in the zones where they are deployed, and disappears when the alert resolves. It reflects the
+alerts your administrators route to Lumewarp ([Alerts and
+incidents](../operations/alerts-and-incidents.md)); no banner means no alert is firing, not a
+guarantee. Your own requests show the same failures in the error code your client received.
+
 ## Create a key
 
 Choose a team in the selected zone, give the key a name, and optionally an expiry and

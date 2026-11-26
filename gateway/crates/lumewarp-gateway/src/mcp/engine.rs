@@ -172,6 +172,10 @@ pub async fn handle(call: Call<'_>) -> Response<ProxyBody> {
                 status,
                 stream: false,
                 config_version: routing_table.version,
+                error_code: response
+                    .extensions()
+                    .get::<crate::error::ErrorInfo>()
+                    .map_or("", |info| info.code),
                 outcome: if let Some(outcome) = response
                     .extensions()
                     .get::<lumewarp_proto::usage::v1::RequestOutcome>()
@@ -482,6 +486,7 @@ impl Context<'_> {
             }
             if name == "tools/call" {
                 if let Err(limited) = self.runtime.limiters.charge_request(self.caller) {
+                    self.runtime.metrics.rate_limited(limited.scope);
                     let mut r = fail(
                         StatusCode::TOO_MANY_REQUESTS,
                         "MCP tool call RPM limit exceeded",
@@ -549,6 +554,7 @@ impl Context<'_> {
                             outcome: lumewarp_proto::usage::v1::RequestOutcome::Completed,
                             stream: true,
                             config_version: self.routing_table.version,
+                            error_code: "",
                         },
                     )
                 });
@@ -1039,7 +1045,13 @@ fn decode_id(value: &Value) -> Option<(String, Value)> {
     (id.is_string() || id.is_i64() || id.is_u64()).then(|| (server.into(), id))
 }
 fn fail(status: StatusCode, message: &str) -> Response<ProxyBody> {
-    error::json(status, "mcp_error", message)
+    // The client-visible code stays `mcp_error`; a 502/504 is the upstream's failure.
+    let source = matches!(
+        status,
+        StatusCode::BAD_GATEWAY | StatusCode::GATEWAY_TIMEOUT
+    )
+    .then_some(error::Source::Upstream);
+    error::json_from(source, status, "mcp_error", message)
 }
 fn ok(id: Value, result: Value) -> Response<ProxyBody> {
     transport::reply(

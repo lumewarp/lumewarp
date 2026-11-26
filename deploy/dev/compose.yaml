@@ -82,6 +82,19 @@ services:
       - ./prometheus.yaml:/etc/prometheus/prometheus.yaml:ro
       - ../prometheus/rules.yaml:/etc/prometheus/rules.yaml:ro
 
+  # Alertmanager on 127.0.0.1:19093: Prometheus sends it the shipped rules' alerts and it
+  # posts them to the control plane's receiver (status banner and Incidents page).
+  alertmanager:
+    profiles: ["extras"]
+    image: prom/alertmanager:v0.28.1
+    network_mode: host
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yaml
+      - --web.listen-address=127.0.0.1:19093
+      - --cluster.listen-address=
+    volumes:
+      - ./alertmanager.yaml:/etc/alertmanager/alertmanager.yaml:ro
+
   # Grafana on 127.0.0.1:13000 (anonymous admin) with the shipped dashboards.
   grafana:
     profiles: ["extras"]

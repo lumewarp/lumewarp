@@ -100,6 +100,39 @@ fn boundary_retry_after(now_ms: u64) -> u64 {
 }
 
 #[tokio::test]
+async fn a_local_429_is_a_policy_error_and_counts_as_rate_limited() {
+    let mock = Mock::start(Behavior::Json).await;
+    let extra = yaml(
+        "  []\n",
+        &[("rpm", ", rate_limits: {requests_per_minute: 1}")],
+    );
+    let gateway = start(&mock, &extra).await;
+    assert_eq!(status(&gateway, "rpm").await.0, 200);
+    assert_eq!(status(&gateway, "rpm").await.0, 429);
+    let metrics = gateway.metrics().await;
+    assert_eq!(
+        metrics.sum(
+            "lumewarp_requests_total",
+            &[
+                ("status", "429"),
+                ("error_source", "policy"),
+                ("code", "rate_limit_exceeded"),
+            ],
+        ),
+        1.
+    );
+    assert_eq!(
+        metrics.sum("lumewarp_requests_total", &[("error_source", "upstream")]),
+        0.
+    );
+    assert_eq!(metrics.sum("lumewarp_rate_limited_total", &[]), 1.);
+    assert_eq!(
+        metrics.sum("lumewarp_rate_limited_total", &[("scope", "key")]),
+        1.
+    );
+}
+
+#[tokio::test]
 async fn rpm_exhaustion_and_retry_after() {
     let mock = Mock::start(Behavior::Json).await;
     let extra = yaml(

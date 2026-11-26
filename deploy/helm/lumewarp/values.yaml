@@ -48,6 +48,12 @@ controlPlane:
     passwordHashSecret:
       name: ""
       key: password-hash
+  # Alertmanager webhook receiver (POST /api/v1/alerts/alertmanager). Empty = the receiver answers 404.
+  alertmanager:
+    # Existing Secret with LUMEWARP_ALERTMANAGER_TOKEN (32+ characters), the bearer token Alertmanager sends.
+    tokenSecret:
+      name: ""
+      key: token
   # SSO login. Rendered only when set; issuer requires secretKey.secretName (the control plane refuses to start without it).
   oidc:
     issuer: ""

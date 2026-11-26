@@ -86,9 +86,9 @@ export function Playground() {
         : null
     : null;
   const info = useQuery({ queryKey: ["playground"], queryFn: api.playground, staleTime: 30_000, enabled: !breakGlass });
-  // Fills the main container's height (header and its padding aside), so the transcript scrolls inside it.
+  // Fills the viewport below the sticky header block (--app-top, banner included) and main's padding, so the transcript scrolls inside it.
   return (
-    <div className="flex flex-col lg:h-[calc(100dvh-6.75rem)] lg:min-h-[32rem]">
+    <div className="flex flex-col lg:h-[calc(100dvh-var(--app-top,3.75rem)-3rem)] lg:min-h-[32rem]">
       <PageHeader title="Playground" />
       {zoneUnavailable && !breakGlass && (
         <Alert className="mb-3" data-testid="playground-zone-unavailable">

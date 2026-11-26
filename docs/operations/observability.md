@@ -183,6 +183,13 @@ Their sources of truth are `deploy/prometheus/rules.yaml` and
 so update the bundled copies whenever sources change; the CI observability job
 checks byte equality and validates all dashboard expressions with promtool.
 
+Seven of the alerts (circuit open, model and upstream unhealthy, 5xx ratio, TTFT, vLLM
+queue and KV cache) also carry a `lumewarp_status` label and a `lumewarp_summary`
+annotation, and a `zone` label taken from `lumewarp_gateway_info`. With Alertmanager
+pointed at the control plane they become the users' status banner and the admin incident
+history; see [Alerts and incidents](./alerts-and-incidents.md). Upgrade the gateways before
+the rules, because a gateway without `lumewarp_gateway_info` has no zone and so no alert.
+
 Operational defaults and response steps are documented beside each alert in
 `rules.yaml`. The defaults include 5% 5xx at >=1 request/s, overhead p99 >10 ms
 for 10 minutes, TTFT p99 >5 s for 10 minutes, and queue >80,000 of the fixed

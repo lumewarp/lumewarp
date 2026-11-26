@@ -298,6 +298,7 @@ pub(crate) fn record_usage(
     status: u16,
     stream: bool,
     outcome: lumewarp_proto::usage::v1::RequestOutcome,
+    error_code: &'static str,
 ) {
     crate::usage::record_traffic(
         runtime,
@@ -312,6 +313,7 @@ pub(crate) fn record_usage(
             outcome,
             stream,
             config_version: routing_table.version,
+            error_code,
         },
     );
 }

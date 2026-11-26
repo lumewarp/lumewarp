@@ -800,3 +800,38 @@ async def test_provenance_fields_are_stored_with_rejected_requests(
             None,
             None,
         )
+
+
+@pytest.mark.asyncio
+async def test_error_code_and_ttft_are_stored_with_empty_as_null(session_factory: SessionFactory):
+    scope_name, key = await _seed(session_factory)
+    failed = _event(key, request_id=uuid7(), cost=0)
+    failed.error_code = "no_healthy_upstream"
+    failed.ttft_ms = 250
+    plain = _event(key, request_id=uuid7(), cost=0)  # empty code and 0 ms mean unknown
+
+    async with session_factory() as session, session.begin():
+        assert await ingest(session, "gateway-a", [failed, plain], zone=scope_name) == 2
+
+    async with session_factory() as session:
+        rows = {
+            str(row.request_id): row
+            for row in await session.scalars(
+                select(UsageEventRow).where(
+                    UsageEventRow.request_id.in_(
+                        [uuid.UUID(failed.request_id), uuid.UUID(plain.request_id)]
+                    )
+                )
+            )
+        }
+    assert (rows[failed.request_id].error_code, rows[failed.request_id].ttft_ms) == (
+        "no_healthy_upstream",
+        250,
+    )
+    assert (rows[plain.request_id].error_code, rows[plain.request_id].ttft_ms) == (None, None)
+
+    too_long = _event(key, request_id=uuid7(), cost=0)
+    too_long.error_code = "x" * 65
+    async with session_factory() as session, session.begin():
+        # An invalid event is rejected on its own, not stored.
+        assert await ingest(session, "gateway-a", [too_long], zone=scope_name) == 0

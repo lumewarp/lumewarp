@@ -1,13 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
 import { useSearch } from "@tanstack/react-router";
 import { CheckIcon, CopyIcon } from "lucide-react";
-import { useEffect, useState, type MouseEvent } from "react";
+import { useState, type MouseEvent } from "react";
 
 import { api, type RequestRow, type RequestsQuery, type Schemas } from "../api";
 import { Badge, fmtUsd, PageHeader } from "../components/Bits";
 import { NumberField, SelectField, TextField } from "../components/Form";
 import { FilterBar } from "../components/FilterBar";
-import { DataTable } from "../components/Table";
+import { DataTable, useCursorPaging } from "../components/Table";
 import { Button } from "../components/ui/button";
 import { CatalogFilter } from "../components/CatalogPicker";
 import { ComboboxField } from "../components/ui/combobox-field";
@@ -48,6 +48,7 @@ interface Filters {
   router: string;
   status: number | null;
   outcome: Schemas["RequestOutcome"] | "";
+  errorCode: string;
   from: string;
   to: string;
   requestId: string;
@@ -75,6 +76,7 @@ const initialFilters = (search: RequestsSearch): Filters => ({
   router: search.router ?? "",
   status: search.status && /^\d+$/.test(search.status) ? Number(search.status) : null,
   outcome: OUTCOMES.some((item) => item.value !== "" && item.value === search.outcome) ? (search.outcome as Schemas["RequestOutcome"]) : "",
+  errorCode: search.error_code ?? "",
   from: inputOf(search.from, "from"),
   to: inputOf(search.to, "to"),
   requestId: search.request_id ?? "",
@@ -103,6 +105,7 @@ function queryOf(filters: Filters, cursor: string | undefined, routing: boolean,
     router: routing ? trimmed(filters.router) : undefined,
     status: filters.status ?? undefined,
     outcome: filters.outcome || undefined,
+    error_code: trimmed(filters.errorCode),
     request_id: trimmed(filters.requestId),
     from: fromLocalInput(filters.from) || undefined,
     to: endOf(filters.to),
@@ -117,11 +120,9 @@ function queryOf(filters: Filters, cursor: string | undefined, routing: boolean,
 export function Requests() {
   const search = useSearch({ strict: false }) as RequestsSearch;
   const [filters, setFilters] = useState<Filters>(() => initialFilters(search));
-  const [trail, setTrail] = useState<(string | undefined)[]>([undefined]);
-  const cursor = trail[trail.length - 1];
   const zone = useZoneFilter();
-  // A cursor belongs to one zone filter: a new zone starts at the first page.
-  useEffect(() => setTrail([undefined]), [zone.value]);
+  // A cursor belongs to one set of filters and zone: any change starts at the first page.
+  const { cursor, paging } = useCursorPaging(JSON.stringify([filters, zone.value]));
   const [selected, setSelected] = useState<RequestRow | null>(null);
   const teams = useTeams();
   const perms = useCan();
@@ -155,7 +156,7 @@ export function Requests() {
     queryFn: () => api.requests(queryOf(filters, cursor, perms.canReadRouting, zone.param)),
   });
 
-  const set = (patch: Partial<Filters>) =>
+  const change = (patch: Partial<Filters>) =>
     setFilters((current) => {
       const next = { ...current, ...patch };
       // A team changes what its keys and owners mean; the filters built for the old team do not carry.
@@ -165,10 +166,6 @@ export function Requests() {
       }
       return next;
     });
-  const change = (patch: Partial<Filters>) => {
-    set(patch);
-    setTrail([undefined]);
-  };
 
   const next = query.data?.next_cursor ?? undefined;
   const keyOptions = [
@@ -206,10 +203,11 @@ export function Requests() {
     perms.canReadRouting && !!filters.router,
     filters.status !== null,
     !!filters.outcome,
+    !!filters.errorCode,
     !!filters.requestId,
   ].filter(Boolean).length;
   const clearExtra = () =>
-    change({ kind: "llm", owner: "", alias: "", router: "", status: null, outcome: "", requestId: "" });
+    change({ kind: "llm", owner: "", alias: "", router: "", status: null, outcome: "", errorCode: "", requestId: "" });
 
   return (
     <>
@@ -234,6 +232,7 @@ export function Requests() {
                 <NumberField label="Status" value={filters.status} onChange={(value) => change({ status: value })} min={100} placeholder="Any" />
                 <SelectField label="Outcome" value={filters.outcome} onChange={(value) => change({ outcome: value as Filters["outcome"] })} options={OUTCOMES} />
               </div>
+              <TextField label="Error code" value={filters.errorCode} onChange={(value) => change({ errorCode: value })} placeholder="Any code" hint="The gateway's own error code, or upstream_ and the status of an error the upstream answered with." />
               <TextField label="Request id" value={filters.requestId} onChange={(value) => change({ requestId: value })} placeholder="Full request id" />
             </>
           ),
@@ -268,17 +267,7 @@ export function Requests() {
         onRowClick={setSelected}
         selectedKey={selected?.request_id}
         empty="No requests in this range."
-        paging={{
-          summary: `Page ${trail.length}${next ? " · more" : ""}`,
-          onPrevious:
-            trail.length > 1 && !query.isFetching
-              ? () => setTrail((current) => current.slice(0, -1))
-              : undefined,
-          onNext:
-            next && !query.isFetching
-              ? () => setTrail((current) => [...current, next])
-              : undefined,
-        }}
+        paging={paging(next, query.isFetching)}
         columns={[
           {
             key: "date",
@@ -294,6 +283,11 @@ export function Requests() {
               <span className="flex flex-wrap items-center gap-1" data-testid="request-status">
                 <StatusBadge status={row.status} />
                 {row.outcome !== "completed" && <Badge tone={OUTCOME_TONE[row.outcome]}>{outcomeLabel(row.outcome)}</Badge>}
+                {row.error_code && (
+                  <code className="text-xs text-muted-foreground" data-testid="request-error-code">
+                    {row.error_code}
+                  </code>
+                )}
               </span>
             ),
           },

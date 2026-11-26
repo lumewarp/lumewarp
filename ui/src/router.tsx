@@ -42,6 +42,8 @@ const McpServerEditPage = lazy(() => import("./pages/McpServerEdit").then((modul
 const PluginsPage = lazy(() => import("./pages/Plugins").then((module) => ({ default: module.Plugins })));
 const ZonesPage = lazy(() => import("./pages/Zones").then((module) => ({ default: module.Zones })));
 const A2aAgentsPage = lazy(() => import("./pages/A2aAgents").then((module) => ({ default: module.A2aAgents })));
+const IncidentsPage = lazy(() => import("./pages/Incidents").then((module) => ({ default: module.Incidents })));
+const IncidentDetailPage = lazy(() => import("./pages/IncidentDetail").then((module) => ({ default: module.IncidentDetail })));
 const A2aAgentEditPage = lazy(() => import("./pages/A2aAgentEdit").then((module) => ({ default: module.A2aAgentEdit })));
 
 /** A chunk in flight shows the shell's loading line; a chunk that fails shows its own error, not a blank page. */
@@ -212,6 +214,8 @@ const routeTree = rootRoute.addChildren([
     page("/a2a-agents/$id", () => <A2aAgentEditPage />, "installationAdmin"),
     page("/usage", Usage),
     requestsRoute,
+    page("/incidents", () => <IncidentsPage />, "installationAdmin"),
+    page("/incidents/$incidentId", () => <IncidentDetailPage />, "installationAdmin"),
     page("/audit", () => <AuditPage />, "teamAdmin"),
     zonesRoute,
     page("/gateways", () => <GatewaysPage />, "installationAdmin"),

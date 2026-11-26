@@ -41,6 +41,9 @@ export type CatalogKind = Schemas["CatalogKind"];
 export type UsageRow = Schemas["UsageRowOut"];
 export type UsageTotals = Schemas["UsageTotalsOut"];
 export type RequestRow = Schemas["RequestOut"];
+export type StatusItem = Schemas["StatusItemOut"];
+export type Incident = Schemas["IncidentOut"];
+export type IncidentDetail = Schemas["IncidentDetailOut"];
 export type LeaderboardRow = Schemas["UsageLeaderboardRowOut"];
 export type RequestOutcome = Schemas["RequestOutcome"];
 export type TrafficKind = Schemas["TrafficKind"];
@@ -122,6 +125,7 @@ export async function listAll<T>(fetchPage: (cursor: string | undefined) => Prom
 
 export type UsageQuery = NonNullable<paths["/api/v1/usage"]["get"]["parameters"]["query"]>;
 export type LeaderboardQuery = NonNullable<paths["/api/v1/usage/leaderboard"]["get"]["parameters"]["query"]>;
+export type IncidentsQuery = NonNullable<paths["/api/v1/incidents"]["get"]["parameters"]["query"]>;
 export type RequestsQuery = NonNullable<paths["/api/v1/requests"]["get"]["parameters"]["query"]>;
 
 const q = (cursor: string | undefined) => ({ limit: 200, cursor });
@@ -283,6 +287,10 @@ export const api = {
   /** One page of the request log, newest first; follow `next_cursor` for older rows. */
   requests: (query: RequestsQuery) =>
     unwrap(client.GET("/api/v1/requests", { params: { query: { limit: 50, ...query } } })),
+  /** Firing user-visible alerts on names the caller can call. */
+  status: () => unwrap(client.GET("/api/v1/status")).then((body) => body.items),
+  incidents: (query: IncidentsQuery) => unwrap(client.GET("/api/v1/incidents", { params: { query: { limit: 50, ...query } } })),
+  incident: (id: string) => unwrap(client.GET("/api/v1/incidents/{incident_id}", { params: { path: { incident_id: id } } })),
   audit: (query: { team_id?: string; org_id?: string; actor_id?: string; action?: string; resource_type?: string; resource_id?: string; from?: string; to?: string } = {}) =>
     listAll((c) => unwrap(client.GET("/api/v1/audit", { params: { query: { ...query, ...q(c) } } }))),
 

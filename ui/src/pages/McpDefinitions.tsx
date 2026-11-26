@@ -5,7 +5,7 @@ import { fmtDateTime, Badge } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
 import { Section } from "../components/EditPage";
 import { SelectField } from "../components/Form";
-import { DataTable } from "../components/Table";
+import { DataTable, useCursorPaging } from "../components/Table";
 import { Button } from "../components/ui/button";
 import { useApprovedDefinitions, useMcpDefinitions, useMut } from "../hooks";
 import { condense, diffCounts, lineDiff, prettyJson, type DiffRow } from "../lib/diff";
@@ -37,9 +37,8 @@ const keyOf = (row: { kind: string; name: string }) => `${row.kind}:${row.name}`
 
 export function McpDefinitions({ server }: { server: McpServer }) {
   const [state, setState] = useState<McpDefinitionState | "all">("pending");
-  // The cursor trail: the `<`-cursor only goes forward, so previous pages are remembered here.
-  const [trail, setTrail] = useState<(string | undefined)[]>([undefined]);
-  const cursor = trail[trail.length - 1];
+  // The `<`-cursor only goes forward; a new state filter starts at the first page.
+  const { cursor, paging } = useCursorPaging(state);
   const definitions = useMcpDefinitions(server.id, state === "all" ? undefined : state, cursor);
   const items = definitions.data?.items ?? [];
   // Only the names in this page's queue: the approved set is read for those alone.
@@ -60,7 +59,6 @@ export function McpDefinitions({ server }: { server: McpServer }) {
           options={STATES}
           onChange={(next) => {
             setState(next as McpDefinitionState | "all");
-            setTrail([undefined]);
           }}
         />
       </div>
@@ -72,11 +70,7 @@ export function McpDefinitions({ server }: { server: McpServer }) {
         onRetry={() => void definitions.refetch()}
         rowKey={(row) => row.id}
         empty={state === "pending" ? "Nothing is waiting for review." : "No definitions in this state."}
-        paging={{
-          summary: `Page ${trail.length}${definitions.data?.next_cursor ? " · more" : ""}`,
-          onPrevious: trail.length > 1 ? () => setTrail(trail.slice(0, -1)) : undefined,
-          onNext: definitions.data?.next_cursor ? () => setTrail([...trail, definitions.data!.next_cursor!]) : undefined,
-        }}
+        paging={paging(definitions.data?.next_cursor, definitions.isFetching)}
         columns={[
           { key: "kind", header: "Kind", cell: (row) => <Badge tone="info">{row.kind}</Badge> },
           { key: "name", header: "Name", cell: (row) => <code className="[overflow-wrap:anywhere]">{row.name}</code> },

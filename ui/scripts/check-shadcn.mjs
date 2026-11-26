@@ -44,7 +44,7 @@ export const PRIMITIVES_DIR = "src/components/ui/";
 export const GENERATED_PRIMITIVES = new Set(
   [
     "alert-dialog", "alert", "badge", "button", "card", "checkbox", "command", "dialog", "empty", "field", "input", "label",
-    "popover", "radio-group", "select", "separator", "sheet", "sidebar", "skeleton", "sonner", "table", "tabs", "textarea",
+    "pagination", "popover", "radio-group", "select", "separator", "sheet", "sidebar", "skeleton", "sonner", "table", "tabs", "textarea",
   ].map((n) => `${PRIMITIVES_DIR}${n}.tsx`),
 );
 

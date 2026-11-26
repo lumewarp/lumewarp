@@ -44,8 +44,8 @@ from lumewarp_control_plane.windows import month_window
 log = logging.getLogger(__name__)
 _MAX_BIGINT = 2**63 - 1
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
-# asyncpg caps one statement at 32767 bind parameters; 34 columns per event row.
-_INSERT_CHUNK_EVENTS = 900
+# asyncpg caps one statement at 32767 bind parameters; 38 columns per event row.
+_INSERT_CHUNK_EVENTS = 800
 # Fields taken from the wire; the key owner is added from api_keys after validation.
 _EVENT_FIELDS = (
     "request_id",
@@ -72,6 +72,8 @@ _EVENT_FIELDS = (
     "prompt_tokens",
     "completion_tokens",
     "audio_ms",
+    "error_code",
+    "ttft_ms",
     "cost_nano_usd",
     "cost_known",
     "duration_ms",
@@ -209,6 +211,10 @@ def _prepare_event(gateway_id: str, zone: str, event: usage_pb2.UsageEvent) -> _
     completion_tokens = _bounded_int(event.completion_tokens, "completion_tokens")
     cost = _bounded_int(event.cost_nano_usd, "cost_nano_usd")
     audio_ms = _bounded_int(event.audio_ms, "audio_ms")
+    error_code = event.error_code
+    if len(error_code) > 64 or "\x00" in error_code:
+        raise InvalidUsageBatch("invalid error_code")
+    ttft_ms = _bounded_int(event.ttft_ms, "ttft_ms", maximum=2**31 - 1)
     if not llm and (prompt_tokens or completion_tokens or audio_ms or cost or event.cost_known):
         raise InvalidUsageBatch("an MCP or A2A event carries no tokens or cost")
     if event.cost_known and usage_state is not UsageState.REPORTED:
@@ -242,6 +248,8 @@ def _prepare_event(gateway_id: str, zone: str, event: usage_pb2.UsageEvent) -> _
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "audio_ms": audio_ms,
+        "error_code": error_code or None,
+        "ttft_ms": ttft_ms or None,
         "cost_nano_usd": cost,
         "cost_known": event.cost_known,
         "duration_ms": event.duration_ms,

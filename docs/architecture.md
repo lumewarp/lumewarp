@@ -238,7 +238,10 @@ gateway 原生輸出 Prometheus `/metrics` 與（選用）OTLP traces；control 
 
 | 指標 | 標籤 | 用途 |
 | --- | --- | --- |
-| `lumewarp_requests_total` | requested, endpoint, model, team, status | 流量與錯誤率 |
+| `lumewarp_requests_total` | requested, endpoint, model, team, status, error_source, code | 流量與錯誤率；`error_source` 是 none／client／policy／upstream／gateway，`code` 是 `error::CODES` 的錯誤碼、`upstream_<status>`（上游原樣回傳）或 `client_cancelled`（499），成功為空；錯誤狀態的 series 不再預先註冊為 0，第一次發生才出現 |
+| `lumewarp_gateway_info` | zone, gateway_id, version | 值恆為 1；規則以 `group_left(zone)` 替只有 namespace／instance 的 gateway 序列補上 zone（每次 `Welcome` 換掉舊序列） |
+| `lumewarp_rate_limited_total` | scope（key／team／member／org／service_account／other） | gateway 自己因限流回的 429（LLM 與 MCP `tools/call`）；上游的 429 不計入 |
+| `lumewarp_request_attempts` | requested | 每個走到上游嘗試迴圈的請求的嘗試次數直方圖（桶 1、2、3、4、5、8） |
 | `lumewarp_playground_requests_total` | result（ok／rejected） | Playground token 認證結果，不含 key 標籤 |
 | `lumewarp_request_duration_seconds` | requested, endpoint, model | 端到端延遲 |
 | `lumewarp_gateway_overhead_seconds` | endpoint | gateway 自身額外延遲 |
@@ -292,7 +295,20 @@ gateway 原生輸出 Prometheus `/metrics` 與（選用）OTLP traces；control 
 
 `endpoint` metric label 的有界值為 `chat_completions`、`completions`、`responses`、`embeddings`、`audio_transcriptions`、`audio_translations`、`decisions`、`systemone`，以及本地的 `models`、`healthz`、`metrics`、`other`；proxy dispatch、預先建立的上游 URI、usage 與 metrics 共用同一份 endpoint table。每個 model 只預建自身型別端點的 metric handles，不為其他型別擴增 series。
 
-LLM upstream auth 另輸出 `upstream_auth` span（upstream、plugin、method、result、cached）；`lumewarp_upstream_auth_total` 的 `cached` 代表 cache hit，`ok` 代表 WASM 回答。API key 級細節不進 metrics（避免標籤爆炸）。Alert：Helm chart 可選 ServiceMonitor（gateway admin port 與 control plane metrics port）；Prometheus 告警規則（`deploy/prometheus/rules.yaml`，26 條 alert、4 條 recording rule，附 promtool 測試）與五張 Grafana dashboard（`deploy/grafana/dashboards/`，Helm 可選安裝）；每個請求一條 OTel trace，接續 W3C `traceparent`。log 預設不記 prompt/response。
+LLM upstream auth 另輸出 `upstream_auth` span（upstream、plugin、method、result、cached）；`lumewarp_upstream_auth_total` 的 `cached` 代表 cache hit，`ok` 代表 WASM 回答。API key 級細節不進 metrics（避免標籤爆炸）。Alert：Helm chart 可選 ServiceMonitor（gateway admin port 與 control plane metrics port）；Prometheus 告警規則（`deploy/prometheus/rules.yaml`，27 條 alert、4 條 recording rule，附 promtool 測試）與五張 Grafana dashboard（`deploy/grafana/dashboards/`，Helm 可選安裝）；每個請求一條 OTel trace，接續 W3C `traceparent`。log 預設不記 prompt/response。錯誤的 `type` 欄位：401 `authentication_error`、403 `permission_error`、429 依碼分 `insufficient_quota`／`rate_limit_error`、502／504 `upstream_error`，408 與其他 5xx 為 `api_error`，其餘 4xx 為 `invalid_request_error`。
+
+### Alertmanager、狀態橫幅與 incident（已實作）
+
+Lumewarp 自己不判斷「壅塞」或「掛了」；那是 Prometheus 規則的工作，control plane 只接收 Alertmanager 的結果，並只呈現自己的資料（收到的 alert 與 request log）。
+
+- **接收端：** `POST /api/v1/alerts/alertmanager` 接 webhook v4。認證是 `LUMEWARP_ALERTMANAGER_TOKEN`（至少 32 字元）的 bearer，常數時間比較，不走 session／CSRF；未設定時回 404；先驗 token 再讀 body（未設定 404、錯誤 401，與 body 內容無關），body 以分塊讀取、超過 1 MiB 回 413，`version` 必須是 `4`，每次最多 1000 個 alert；不逐筆稽核，也沒有請求速率限制（token 加上 body／alert 上限就是邊界）。每個 alert 以 `(fingerprint, startsAt)` upsert 進 `alerts`：重送冪等，`resolved` 寫入 `endsAt`（持續時間即 MTTR），已 resolved 的列不會被遲到的 firing 重送重新打開；列永不刪除。
+- **目標解析：** label `requested`／`model` 對應目錄名字（model、alias、router 同一個全域命名空間），`upstream` 對應 upstream（有 `zone` 只找該 zone，否則每個有該名稱的 zone），結果寫入 `alert_targets`，每次收到都重寫；找不到的名字不是錯誤，alert 照存，只有管理員看得到。`zone` label 限定範圍，缺少或空字串＝所有 zone（獨立 gateway 與 `LumewarpGatewayDown` 沒有 zone）。
+- **顯示契約：** label `lumewarp_status`（`down`、`degraded`、`congested` 或自訂文字）讓 alert 對使用者可見，annotation `lumewarp_summary` 是給使用者看的文字，`summary`／`description` 只給管理員。出貨的規則有七條帶 `lumewarp_status` 並以 `lumewarp_gateway_info` join 出 `zone`。
+- **`GET /status`：** 任何登入者可讀。回傳 firing 且有 `lumewarp_status` 的 alert 中，與「呼叫者在某 zone 可呼叫的名字」相交者（有效 model 的算法同 `/users/me`；upstream 目標展開成該 zone 部署在其上的 model）：`name`、`zone`、`state`、`summary`、`since`；同一 zone 與名字只回一筆（狀態優先序 `down` > `congested` > `degraded` > 其他，`since` 取該狀態最早的 alert）；model 目標（或 upstream 展開的 model）也會對指向它的 alias 與 router（成員、split、fallback，及其 alias）呼叫者顯示，名字是呼叫者可呼叫的那個；可呼叫性比照 compiler（只有 fallback 部署的 router、有 split 未部署的 router、權重全為 0 的 router 都不算）。不回 upstream 名稱、label 或其他租戶；安裝管理員另有 `alert_id` 供連結。
+- **Incident 分組：** incident 是同一次事故的一組 alert。alert 第一次收到時，若與某個既有 incident 有相同 `alertname`、相同 zone（沒有 zone 只與沒有 zone 的相符）、相同的已解析目標（以 kind 與 id 比對；沒有目標的 alert 改比對 label，忽略 `instance`、`gateway_id`、`pod`、`job`、`endpoint`、`service`），且時間區間重疊（在 incident 結束前開始，或 incident 仍在 firing），就加入該 incident，否則開新的 incident。incident 的視窗是成員的聯集：最早的開始、任一成員 firing 即 firing、最後一個成員結束時結束；嚴重度與使用者可見狀態取最嚴重的成員。歸屬只在第一次收到時決定，之後不會移動（目標重寫不重新分組）。因此出貨的逐 gateway 規則在一次事故中只產生一個 incident，顯示「由 N 個 gateway 回報」（成員中不同 `instance` 的數量，沒有 `instance` 時用 `gateway_id`）；規則不需改成聚合。`/status` 與橫幅仍讀 firing 的 alert 本身，不受分組影響。
+- **Incident（安裝管理員）：** `GET /incidents`（keyset 分頁，可依 zone、status、影響範圍（使用者可見／僅管理員）、時間過濾，另有一個搜尋框比對 alert 名稱、summary 與目標名字）、`GET /incidents/{id}`（成員 alert、受影響的可呼叫名字、前後一小時內共用目標的相關 incident；`usage_events` 在 [start − 10 分鐘, end 或現在] 內、限於受影響名字與 zone 的流量：每分鐘請求數（成功、經 fallback、失敗）、失敗數、錯誤碼與狀態類別、fallback 比例與救回數（經 fallback 且未失敗、沒有錯誤碼，與每分鐘的 fallback 同一判準）、嘗試次數分佈、前 10 名 team 與 key（含失敗數）、最近 50 筆失敗請求的中繼資料（狀態 ≥ 400、有錯誤碼，或 200 之後串流中斷的 `upstream_error`）；視窗最多 24 小時，超過會裁切並標示）。`usage_events` 新增 `error_code` 與 `ttft_ms`，Requests 也顯示並可依 `error_code` 過濾。
+- **不查 Prometheus：** control plane 不對 Prometheus 發出查詢，incident 只連回觸發的運算式（alert 的 `generatorURL`）；pod、CPU、記憶體、GPU 等圖表留在 Prometheus／Grafana。
+- **不做：** 轉發 alert 到 Slack 等其他 receiver（Lumewarp 只接收）；查詢 Prometheus 畫圖；Langfuse 整合。使用手冊見 [Alerts and incidents](./operations/alerts-and-incidents.md)。
 
 ## Control plane 與 gateway
 
@@ -375,7 +391,7 @@ LLM upstream auth 另輸出 `upstream_auth` span（upstream、plugin、method、
 **可觀測性**
 
 - gateway 新指標見上表；control plane 在獨立 listener 輸出 `lumewarp_cp_*`。
-- 26 條告警規則（另有 4 條 recording rule）與 promtool 測試、五張 dashboard、Helm 可選 PrometheusRule／dashboard ConfigMap／兩個 ServiceMonitor。
+- 27 條告警規則（另有 4 條 recording rule）與 promtool 測試、五張 dashboard、Helm 可選 PrometheusRule／dashboard ConfigMap／兩個 ServiceMonitor。
 
 **驗收**
 
@@ -469,6 +485,7 @@ MCP 與 A2A 代理、工具級 grant、定義審核（TOFU／manual／off）、A
 - A2A gRPC／REST binding、push notification、Agent Card 簽章、上游使用者 token 代管；非 `passthrough` agent 的 `ListTasks`。
 - plugin 熱載入、plugin 簽章／來源驗證、跨 gateway 的 plugin 一致性檢查；plugin 沒有延遲預算，只有設定的 timeout。
 - MCP／A2A 的限流與預算（只有 `tools/call` 計入 key 的 RPM）。
+- 把 alert 轉發給 Slack 等其他 receiver（Lumewarp 只接收 Alertmanager 的 webhook）；Langfuse 整合。
 
 其他尚未實作的項目：
 

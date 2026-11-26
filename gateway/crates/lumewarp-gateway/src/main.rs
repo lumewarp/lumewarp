@@ -207,6 +207,8 @@ fn standalone(
         .metrics
         .set_yaml_hash(&hex::encode(Sha256::digest(yaml.as_bytes()))[..12]);
     runtime.metrics.config_applied(routing_table.version);
+    // Standalone has no zone and no control-plane assigned id.
+    runtime.metrics.set_gateway_info("", "");
     runtime
         .observed
         .retain_servers(routing_table.targets.servers().map(|s| s.name.as_ref()));
@@ -284,6 +286,8 @@ async fn main() -> anyhow::Result<()> {
                 metrics.clone(),
             );
             reporter = Some(handle);
+            // Zone known now; the id arrives in the stream's Welcome.
+            metrics.set_gateway_info(&zone, "");
             let runtime = runtime::Runtime::with_usage_and_env(
                 metrics,
                 sink,

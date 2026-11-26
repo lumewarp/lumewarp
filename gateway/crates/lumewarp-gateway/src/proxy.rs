@@ -270,6 +270,7 @@ fn report_rejection(
     endpoint: usize,
     stream: bool,
     status: StatusCode,
+    code: &'static str,
 ) {
     if matches!(caller, Caller::Key(_)) && routing_table.runtime.usage.enabled() {
         let called = routing_table.lookup(requested);
@@ -288,6 +289,8 @@ fn report_rejection(
             endpoint,
             stream,
             status: status.as_u16(),
+            error_code: code,
+            ttft_ms: 0,
         }
         .finalize(RequestOutcome::Rejected, UsageState::Missing, None);
     }
@@ -429,6 +432,7 @@ pub async fn forward(
             endpoint,
             stream,
             err.status(),
+            err.code(),
         );
         return err.into();
     }
@@ -444,6 +448,7 @@ pub async fn forward(
             endpoint,
             stream,
             StatusCode::NOT_FOUND,
+            "model_not_found",
         );
         return error::json(StatusCode::NOT_FOUND, "model_not_found", "Model not found");
     };
@@ -464,6 +469,7 @@ pub async fn forward(
             endpoint,
             stream,
             StatusCode::BAD_REQUEST,
+            "model_type_mismatch",
         );
         return error::json(
             StatusCode::BAD_REQUEST,
@@ -497,7 +503,9 @@ pub async fn forward(
                 endpoint,
                 stream,
                 StatusCode::TOO_MANY_REQUESTS,
+                "rate_limit_exceeded",
             );
+            routing_table.runtime.metrics.rate_limited(limited.scope);
             return error::rate_limited(limited.retry_after_secs);
         }
     };
@@ -529,6 +537,7 @@ pub async fn forward(
             endpoint,
             stream,
             StatusCode::SERVICE_UNAVAILABLE,
+            "upstream_unavailable",
         );
         return error::json(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -588,6 +597,8 @@ pub async fn forward(
         endpoint,
         stream,
         status: 499,
+        error_code: "",
+        ttft_ms: 0,
     });
     let mut tried = [0; 5];
     // The latest upstream response kept while a later attempt runs, with the
@@ -904,6 +915,14 @@ pub async fn forward(
             None => {
                 let mut capture = pending.take();
                 capture.status = error_status.as_u16();
+                capture.error_code = if auth_failed {
+                    "upstream_auth_failed"
+                } else if error_status == StatusCode::GATEWAY_TIMEOUT {
+                    "upstream_timeout"
+                } else {
+                    "upstream_error"
+                };
+                guard.metrics.observe_attempts(attempt);
                 capture.finalize(RequestOutcome::UpstreamError, UsageState::Missing, None);
                 return if auth_failed {
                     error::json(
@@ -923,6 +942,7 @@ pub async fn forward(
             }
         }
     };
+    guard.metrics.observe_attempts(attempt);
     observation.headers_received = Some(Instant::now());
     observation.served(&guard.model, attempt, fallback_response);
     let (mut parts, body) = response.into_parts();
@@ -967,6 +987,7 @@ pub async fn forward(
         capture: Some(capture),
         end: None,
         held: None,
+        first_frame: None,
     };
     let body = match rewriter {
         Some(rewriter) => RewriteBody::new(body, rewriter).boxed_unsync(),
@@ -1257,6 +1278,9 @@ struct MeteredBody {
     end: Option<RequestOutcome>,
     /// A trailers frame waiting behind flushed SSE bytes.
     held: Option<Frame<Bytes>>,
+    /// When the first non-empty data frame of a successful stream was
+    /// forwarded: the usage event's `ttft_ms`.
+    first_frame: Option<Instant>,
 }
 
 impl MeteredBody {
@@ -1295,6 +1319,14 @@ impl MeteredBody {
             (self.body.is_end_stream() && !self.meter.holds_bytes())
                 .then_some(RequestOutcome::Completed)
         });
+        let mut capture = capture;
+        if let Some(at) = self.first_frame {
+            capture.ttft_ms = u32::try_from(
+                at.saturating_duration_since(capture.request.started)
+                    .as_millis(),
+            )
+            .unwrap_or(u32::MAX);
+        }
         let completed = end == Some(RequestOutcome::Completed);
         let outcome = match end {
             Some(RequestOutcome::Completed) if capture.status >= 500 => {
@@ -1381,6 +1413,15 @@ impl Body for MeteredBody {
                         } else if data.is_empty() {
                             // Held back or dropped: nothing to forward yet.
                             continue;
+                        }
+                        if this.first_frame.is_none()
+                            && !data.is_empty()
+                            && this
+                                .capture
+                                .as_ref()
+                                .is_some_and(|capture| capture.stream && capture.status < 300)
+                        {
+                            this.first_frame = Some(Instant::now());
                         }
                         return Poll::Ready(Some(Ok(Frame::data(data))));
                     }
