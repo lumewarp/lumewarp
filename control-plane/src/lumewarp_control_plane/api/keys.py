@@ -598,6 +598,11 @@ async def _apply_key_models(
     """
     if not body.model_fields_set & _KEY_MODEL_FIELDS:
         return None
+    if not create:
+        # The grant lists are SQL-expression columns, expired by any flush of the row earlier
+        # in the request (a rename or new limits); reload them here, as a lazy load cannot
+        # run under asyncio.
+        await session.refresh(key, ["allowed_models", "allowed_groups", "granted_models"])
     base = None if create else _key_policy(key)
     proposed = _proposed_key_policy(body, base)
     owner = await _owner_effective(session, team, key)

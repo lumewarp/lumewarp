@@ -310,3 +310,39 @@ async def test_old_name_alias_keeps_group_membership(client, committed) -> None:
     assert renamed.status_code == 200, renamed.text
     group = client.get(f"/api/v1/model-groups/{created.json()['id']}", headers=ADMIN_AUTH)
     assert sorted(m["name"] for m in group.json()["members"]) == sorted([old, new])
+
+
+async def test_edit_dialog_patch_with_name_and_limits_changes_models(client, committed) -> None:
+    """The edit dialog sends the name and limits with the model list. The rename flushes the
+    row first, which expires its grant columns; reading them must not lazy-load (was 500).
+    """
+    a, b = await _models(committed, 2)
+    team = await make_team(committed)
+    user, token = await user_with_token(committed)
+    await make_member(committed, team, user)
+    account = await make_service_account(committed, team)
+    await committed.commit()
+    group = client.post(
+        "/api/v1/model-groups", json={"name": f"kg-{suffix()}", "members": [b]}, headers=ADMIN_AUTH
+    ).json()
+    owners = (({}, auth(token)), ({"service_account_id": str(account.id)}, ADMIN_AUTH))
+    for owner, headers in owners:
+        created = client.post(
+            f"/api/v1/teams/{team.id}/keys",
+            json={"name": "k", "rpm_limit": 5, **owner},
+            headers=headers,
+        )
+        assert created.status_code == 201, created.text
+        key_id = created.json()["key"]["id"]
+        for models in (
+            {"model_access": "list", "allowed_models": [a], "allowed_groups": [group["name"]]},
+            {"model_access": "inherit"},
+        ):
+            response = client.patch(
+                f"/api/v1/keys/{key_id}",
+                json={"name": f"k-{suffix()}", "rpm_limit": 3, "tpm_limit": None, **models},
+                headers=headers,
+            )
+            assert response.status_code == 200, response.text
+            assert response.json()["model_access"] == models["model_access"]
+        assert response.json()["rpm_limit"] == 3
