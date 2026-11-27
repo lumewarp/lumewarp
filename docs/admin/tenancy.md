@@ -30,14 +30,17 @@ accounts) and keys. This page describes tenancy; zone-specific limits and budget
   database for usage, the request log and audit (`GET /usage?team_id=`,
   `GET /requests?team_id=`, `GET /audit?team_id=`, the org usage summary) but every
   write path and every team-scoped read answers 404.
-- **Model grants are global; availability is per zone.** The model access picker of a team
+- **Model grants are global; availability is per zone.** Only an org's `all` means every
+  name; a team's `all` (shown as Inherit) is whatever its org allows, including names the org
+  adds later, so it can be saved under a restricted org. The same holds for `mcp_access` and
+  `a2a_access`. The model access picker of a team
   lists only its org's `effective_models`; the picker of a member or service account lists
   only the team's `effective_models`. A granted model may still be unavailable in a zone
   without a deployment. Names granted earlier that fell outside the parent policy stay
   visible under "Not offered" so they can be unticked. [Model groups](./catalog.md#model-groups) are
   granted alongside names (`allowed_groups`) and show their members as "via `group`"; a
-  group with any member outside the parent policy is disabled, because it could not be granted
-  whole.
+  group with any member outside the parent policy is not offered, because it could not be
+  granted whole.
 - **Team member**: a user in a team with role `admin` or `member`. The member's own
   exception policy and grants live in `member_policies`, keyed by `(team_id, user_id)` and
   deliberately independent of `team_members`: an external authorization backend has no

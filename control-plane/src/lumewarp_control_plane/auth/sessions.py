@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from lumewarp_control_plane.auth import break_glass
 from lumewarp_control_plane.db import SessionFactory
 from lumewarp_control_plane.errors import ApiError
+from lumewarp_control_plane.models import AuditVia as Via
 from lumewarp_control_plane.models import User, UserSession
 from lumewarp_control_plane.security import (
     LAST_USED_GRANULARITY,
@@ -82,6 +83,7 @@ async def authenticate_session(
             kind=PrincipalKind(credential.kind),
             user_id=user.id if user else None,
             token_id=credential.id,
+            via=Via.SESSION,
         )
         # Preserve the validated actor for auditing even when the CSRF check fails.
         request.state.principal = principal

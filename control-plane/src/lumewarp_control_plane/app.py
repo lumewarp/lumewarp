@@ -16,7 +16,7 @@ import logging
 import os
 import signal
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 
 import httpx
@@ -29,6 +29,7 @@ from lumewarp_control_plane import grpc as grpc_services
 from lumewarp_control_plane.api import openapi
 from lumewarp_control_plane.api import router as api_router
 from lumewarp_control_plane.api.openapi import Readiness
+from lumewarp_control_plane.api_mcp import ApiMcp
 from lumewarp_control_plane.auth.break_glass import LoginLimiter, enabled, validate_credentials
 from lumewarp_control_plane.authz import load_authorizer
 from lumewarp_control_plane.db import create_engine, create_session_factory
@@ -180,10 +181,17 @@ async def stop_background(runtime: Runtime, grace: float = SHUTDOWN_GRACE_SECOND
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: Settings = app.state.settings
-    async with httpx.AsyncClient(
-        timeout=httpx.Timeout(300, connect=5), follow_redirects=False
-    ) as playground_client:
+    async with (
+        httpx.AsyncClient(
+            timeout=httpx.Timeout(300, connect=5), follow_redirects=False
+        ) as playground_client,
+        AsyncExitStack() as stack,
+    ):
         app.state.playground_client = playground_client
+        # The MCP endpoint (a plain route, see api_mcp/) runs its requests in the session
+        # manager's task group, which lives as long as the app.
+        if (api_mcp := getattr(app.state, "api_mcp", None)) is not None:
+            await stack.enter_async_context(api_mcp.run())
         app.state.playground_warned_misconfigured = False
         # An optional backend hook: a misconfigured backend aborts startup here.
         if (start := getattr(app.state.authorizer.backend, "start", None)) is not None:
@@ -257,6 +265,11 @@ def create_app(
     app.state.fatal_handler = fatal_handler or _terminate_process
     install_handlers(app)
     app.include_router(api_router)
+    # The user-facing MCP server (`/mcp`, api_mcp/), outside the REST OpenAPI document.
+    app.state.api_mcp = None
+    if settings.api_mcp_enabled:
+        app.state.api_mcp = ApiMcp(app)
+        app.router.routes.extend(app.state.api_mcp.routes())
 
     @app.middleware("http")
     async def audit_emergency_action(request: Request, call_next):

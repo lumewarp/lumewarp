@@ -28,6 +28,7 @@ const sidebar = [
     items: [
       { text: "Your keys", link: "/self-service/" },
       { text: "Playground", link: "/self-service/playground" },
+      { text: "MCP client", link: "/self-service/mcp-client" },
     ],
   },
   {

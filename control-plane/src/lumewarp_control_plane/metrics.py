@@ -145,6 +145,21 @@ class Metrics:
             ["result"],
             registry=r,
         )
+        # The user-facing MCP server (`/mcp`, api_mcp/). `method` is a bounded JSON-RPC method
+        # set (API_MCP_METHODS), toolset and kind come from the fixed tool table: never a tool
+        # name, user or token.
+        self.api_mcp_requests = Counter(
+            "lumewarp_cp_api_mcp_requests",
+            "HTTP requests to the control plane's MCP endpoint, by JSON-RPC method and outcome.",
+            ["method", "outcome"],
+            registry=r,
+        )
+        self.api_mcp_tool_calls = Counter(
+            "lumewarp_cp_api_mcp_tool_calls",
+            "MCP tool calls, by toolset, read/write kind and outcome.",
+            ["toolset", "kind", "outcome"],
+            registry=r,
+        )
         self.usage_ingested = Counter(
             "lumewarp_cp_usage_events_ingested",
             "Usage events accepted (committed) from gateway reports.",

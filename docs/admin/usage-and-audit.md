@@ -193,6 +193,13 @@ member has no audit view (`403`). Audit is not filtered by the header zone: some
 change global identity, grants or catalog definitions, and zone-specific events name their
 zone in the event details.
 
+Every row also records `via`, how the caller authenticated: `session` for a browser session
+(break-glass included), `pat` for a personal access token and `mcp` for a tool call through
+the control plane's [MCP server](../self-service/mcp-client.md). It is null for gateway and
+system events and for rows written before the field existed. `GET /api/v1/audit` takes an
+optional `via=` filter with those three values; the Audit page shows it as a badge in the
+**Via** column and filters on it.
+
 `details` is an allowlist per action (`DETAIL_ALLOWLIST` in `audit.py`): only fields
 classified for that action are stored, and anything else is dropped rather than redacted.
 Nested objects such as `changes`, `settings` and `traffic_split` have their own field lists,

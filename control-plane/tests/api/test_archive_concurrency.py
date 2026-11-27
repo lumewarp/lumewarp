@@ -12,6 +12,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from fastapi import Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -88,6 +89,7 @@ async def test_archive_leaves_no_live_key_after_an_in_flight_write(
                 key_session,
                 api_settings,
                 client.app.state.metrics,
+                Response(),
             )
         else:
             assert key is not None
@@ -98,6 +100,7 @@ async def test_archive_leaves_no_live_key_after_an_in_flight_write(
                 key_session,
                 api_settings,
                 client.app.state.metrics,
+                Response(),
                 KeyRotate(grace_seconds=3600),
             )
         async with asyncio.timeout(15), asyncio.TaskGroup() as tasks:

@@ -131,10 +131,10 @@ test("a team is granted MCP servers with chosen tools and A2A agents, and reads 
   await page.getByRole("button", { name: "Edit team" }).click();
   const form = dialog(page);
 
-  // The model picker keeps its All | Selected; the MCP and A2A groups name their own options so that three
+  // The model picker keeps its Inherit | Selected; the MCP and A2A groups name their own options so that three
   // groups in one dialog are still distinct to a reader.
   const mcp = form.getByTestId("mcp-grants");
-  await expect(mcp.getByRole("radio", { name: "Every server" })).toBeChecked();
+  await expect(mcp.getByRole("radio", { name: "Same as the org" })).toBeChecked();
   await mcp.getByRole("radio", { name: "Chosen servers" }).click();
   const server = mcp.getByRole("group", { name: target.server });
   await server.getByRole("checkbox", { name: target.server }).check();

@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from lumewarp_control_plane import audit
 from lumewarp_control_plane.errors import unauthorized
 from lumewarp_control_plane.models import (
+    AuditVia,
     InstallationAdmin,
     InstallationRole,
     PersonalAccessToken,
@@ -229,7 +230,8 @@ async def bootstrap_initial_admin(
     else:
         return False
     await session.flush()
-    principal = Principal(kind=PrincipalKind.USER, user_id=persisted.id)
+    # The bootstrap runs inside the OIDC callback: a browser session.
+    principal = Principal(kind=PrincipalKind.USER, user_id=persisted.id, via=AuditVia.SESSION)
     # A token another admin issued before this login must not inherit the new role.
     await revoke_user_pats(session, persisted.id, principal=principal)
     audit.record(

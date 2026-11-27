@@ -58,7 +58,7 @@ function OrgEditor({ org, onClose }: { org: Org | "new"; onClose: () => void }) 
         error={form.errors.name}
         autoFocus
       />
-      <PolicyFields values={form.values} errors={form.errors} set={form.set} isTeam />
+      <PolicyFields values={form.values} errors={form.errors} set={form.set} isTeam isOrg />
 
     </FormDialog>
   );
@@ -185,7 +185,7 @@ export function Orgs() {
             ),
           },
           { key: "teams", header: "Teams", align: "right", cell: (org) => liveTeams(org.id).toLocaleString() },
-          { key: "policy", header: "Policy", cell: (org) => <PolicySummary p={org} /> },
+          { key: "policy", header: "Policy", cell: (org) => <PolicySummary p={org} isOrg /> },
           { key: "budget", header: "Budget", cell: (org) => <Budget p={org} /> },
           {
             key: "actions",
@@ -303,7 +303,7 @@ export function OrgDetail() {
             <Badge tone={data.deleted_at ? "danger" : "ok"}>{data.deleted_at ? "Archived" : "Active"}</Badge>
           </DescriptionDetails>
           <DescriptionTerm>Policy</DescriptionTerm>
-          <DescriptionDetails><PolicySummary p={data} /></DescriptionDetails>
+          <DescriptionDetails><PolicySummary p={data} isOrg /></DescriptionDetails>
           <DescriptionTerm>Budget</DescriptionTerm>
           <DescriptionDetails><Budget p={data} /></DescriptionDetails>
           <DescriptionTerm>Created</DescriptionTerm>

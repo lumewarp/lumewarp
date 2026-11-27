@@ -160,6 +160,13 @@ API key 建立時綁定一個 zone，rotate 不會更換 zone；compiler 只把�
 - 授權後端不可用時顯示「暫時無法確認、這不是拒絕」的狀態（`authz_unavailable`），管理 API 回 503；My keys 不會把它當成「沒有 team」。
 - 一次性 secret：建立或輪替 key、建立 PAT 的 secret 由 root 的同一個對話框顯示，只有「I've saved it」能關（Esc、點擊外部、標頭的 X 都無效）。它在換頁、背景檢查失敗與 session 過期（401 轉到登入頁）後仍顯示，因為對話框在 router 與 guard 之上；登出會清掉，重新載入頁面則消失。secret 不進 query cache；mutation 快取裡只有不含 secret 的結果。Gateway token 由部署環境設定，不在 UI 顯示。
 
+### Control plane MCP server（使用者入口）
+
+- **端點與認證：** control plane 的 `POST /mcp`，與 Admin UI、REST 同一個 listener；這不是 gateway 的 `/mcp`（上面「MCP gateway」的 upstream 代理，用 `lw-` key），這一個用 PAT（`Authorization: Bearer lwp-…`），讓 MCP client 讀 catalog、limits、budget、usage、requests 與 incident status，並管理自己的 key。官方 `mcp` SDK 1.x，stateless Streamable HTTP + JSON 回應，不發 `Mcp-Session-Id`，不需要 session affinity。`LUMEWARP_API_MCP_ENABLED=false` 時路徑與 metadata 都是 404。session cookie 與 `lw-` gateway key 一律 401，回應帶 `WWW-Authenticate: Bearer resource_metadata="<base>/.well-known/oauth-protected-resource/mcp"`；metadata 文件回 `resource`、`bearer_methods_supported` 與 `resource_name`，沒有 `authorization_servers`（OAuth 延後，client 自行帶 header）。瀏覽器來源由 `LUMEWARP_API_MCP_ALLOWED_ORIGINS` 管制：空字串＝只用 `LUMEWARP_PUBLIC_URL` 的 origin，未設 `LUMEWARP_PUBLIC_URL` 時拒絕所有帶 `Origin` 的請求；沒有 `Origin` header 的請求一律接受。
+- **工具：** 固定 catalog，27 個工具、5 個 toolset（`me`、`keys`、`usage`、`incidents`、`tenancy`）。`tools/list` 依 `getCurrentUser` 判定的最高角色列出：member 15、team admin 19、org admin 22、installation admin 27。管理員工具全部唯讀（tenancy 與 incident 歷史），沒有任何管理寫入；唯一的寫入是 caller 自己的 key（`create_my_key`、`update_my_key`、`revoke_my_key`、`rotate_my_key`）。`update_my_key`／`revoke_my_key`／`rotate_my_key` 先 `getKey` 確認 `owner_kind=user` 且 owner 是本人，service account 或別人的 key 一律拒絕（即使 REST 允許 team admin 改）；`revoke_my_key`／`rotate_my_key` 需 `confirm: true`，新 secret 預設遮罩，`reveal_secret: true` 才回明文。`?toolsets=` 或 `X-Lumewarp-MCP-Toolsets` 可再縮小清單；角色過濾只影響 listing，呼叫未列出的管理工具仍由 REST 回 403（轉成 tool error），toolset 過濾則同時套用到 listing 與呼叫。
+- **執行與稽核：** 每個 tool call 是同一 FastAPI app 的 in-process `httpx.ASGITransport` 請求，帶原 `Authorization`、不帶 cookie，因此 authz、驗證、限流、錯誤格式與 audit 與 REST 完全相同；PAT 由同一個 resource 簽發，不是 token passthrough。請求帶 ASGI scope extension `extensions["lumewarp.via"]="mcp"`（網路 client 設不了），`current_principal` 把它變成 `Principal.via=mcp`。`audit_log.via` 記 `session`／`pat`／`mcp`（gateway 與系統事件為 NULL），`GET /audit` 回傳並可 `?via=` 篩選。
+- **指標：** `lumewarp_cp_api_mcp_requests_total{method,outcome}` 與 `lumewarp_cp_api_mcp_tool_calls_total{toolset,kind,outcome}`；method、toolset、kind、outcome 都是有界集合，沒有 tool name、user 或 token label。
+
 ### Router
 
 - 用戶端呼叫的是全域「名字」，一個名字是 model（有全域價格與型別、可在每個 zone 綁不同 upstream deployment）、alias（model 或 router 的另一個名字，只有一層）或 router（把請求分給後面的 models）。三種共用名字空間，都可以改名，內部參照都用 id。權限依呼叫的名字檢查；可用性依 zone 的 deployment 編譯。完整規則見下方「模型目錄已實作」。
@@ -479,7 +486,7 @@ Lumewarp 自己不判斷「壅塞」或「掛了」；那是 Prometheus 規則�
 
 ## Roadmap
 
-MCP 與 A2A 代理、工具級 grant、定義審核（TOFU／manual／off）、Agent Card 改寫、A2A middleware 與三種 WASM plugin 已實作。刻意延後、這一期不做的：
+MCP 與 A2A 代理、工具級 grant、定義審核（TOFU／manual／off）、Agent Card 改寫、A2A middleware、三種 WASM plugin 與 control plane 的使用者 MCP server（見「Control plane MCP server」）已實作。刻意延後、這一期不做的：
 
 - MCP resources、subscriptions 與 `completion`；聚合端點的 `GET` 串流（回 405）與跨 gateway 的取消／進度路由；人工核准高風險 tool；stdio sidecar（由部署方自行包裝）；MCP OAuth resource server 與代管上游使用者 token。
 - A2A gRPC／REST binding、push notification、Agent Card 簽章、上游使用者 token 代管；非 `passthrough` agent 的 `ListTasks`。

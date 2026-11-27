@@ -7,6 +7,8 @@ from tests.factories import (
     catalog_name,
     make_key,
     make_member,
+    make_model,
+    make_org,
     make_service_account,
     make_team,
     make_user,
@@ -21,10 +23,7 @@ async def grant_names(session) -> None:
 @pytest.mark.parametrize("owner", ["member", "service_account"])
 @pytest.mark.parametrize(
     "policy, field",
-    [
-        ({"model_access": "list", "allowed_models": ["c"]}, "allowed_models"),
-        ({"model_access": "all"}, "model_access"),
-    ],
+    [({"model_access": "list", "allowed_models": ["c"]}, "allowed_models")],
 )
 async def test_owner_cannot_widen_team(client, committed, owner, policy, field) -> None:
     team = await make_team(
@@ -267,3 +266,56 @@ async def test_team_locks_scope_before_validation(client, committed, monkeypatch
     )
     assert response.status_code == 200, response.text
     assert calls == ["locked", "validate"]
+
+
+async def test_all_below_the_root_is_everything_the_parent_allows(
+    client, committed, api_engine
+) -> None:
+    """A team (or an owner) at `all` under a restricted parent is accepted and resolves to the
+    parent's set: switching a listed team back to `all` after its org was restricted saves.
+    """
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from lumewarp_control_plane.compiler import compile_zone
+
+    a = (await make_model(committed, f"all-{suffix()}")).name
+    b = (await make_model(committed, f"all-{suffix()}")).name
+    org = await make_org(committed)
+    team = await make_team(committed, org=org, model_access="list", allowed_models=[a])
+    user = await make_user(committed)
+    await make_member(committed, team, user)
+    key = await make_key(committed, team, user)
+    await committed.commit()
+    group = client.post(
+        "/api/v1/model-groups", json={"name": f"g-{suffix()}", "members": [a]}, headers=ADMIN_AUTH
+    ).json()
+    restricted = client.patch(
+        f"/api/v1/orgs/{org.id}",
+        json={"model_access": "list", "allowed_groups": [group["name"]]},
+        headers=ADMIN_AUTH,
+    )
+    assert restricted.status_code == 200, restricted.text
+
+    for body in (
+        {"model_access": "all", "allowed_models": [], "allowed_groups": []},
+        {"mcp_access": "all", "a2a_access": "all"},
+    ):
+        saved = client.patch(f"/api/v1/teams/{team.id}", json=body, headers=ADMIN_AUTH)
+        assert saved.status_code == 200, saved.text
+    team_out = client.get(f"/api/v1/teams/{team.id}", headers=ADMIN_AUTH).json()
+    assert team_out["model_access"] == "all"
+    assert team_out["effective_models"] == [a]
+    async with AsyncSession(api_engine, expire_on_commit=False) as session:
+        compiled = await compile_zone(session, "api-test", require_local_membership=True)
+    published = next(k for k in compiled.snapshot.api_keys if k.key_id == str(key.id))
+    assert (published.policy.allow_all_models, list(published.policy.allowed_models)) == (
+        False,
+        [a],
+    )
+    # Listing a name outside the org is still refused.
+    outside = client.patch(
+        f"/api/v1/teams/{team.id}",
+        json={"model_access": "list", "allowed_models": [b]},
+        headers=ADMIN_AUTH,
+    )
+    assert outside.status_code == 422, outside.text

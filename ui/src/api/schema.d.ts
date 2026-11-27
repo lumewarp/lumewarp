@@ -2208,6 +2208,11 @@ export interface components {
             actor_type: string;
             /** Actor Id */
             actor_id: string | null;
+            /**
+             * Via
+             * @description How the caller authenticated: a browser session, a personal access token, or a token through the control plane's MCP server. Null for gateway and system events and for events recorded before this field existed.
+             */
+            via?: ("session" | "pat" | "mcp") | null;
             /** Action */
             action: string;
             /** Resource Type */
@@ -2225,6 +2230,14 @@ export interface components {
                 [key: string]: unknown;
             };
         };
+        /**
+         * AuditVia
+         * @description How an API caller reached the handler: a browser session (OIDC or break-glass), a
+         *     personal access token, or a PAT through the control plane's MCP server. NULL on rows
+         *     written by gateways and system jobs, and on rows written before the column existed.
+         * @enum {string}
+         */
+        AuditVia: "session" | "pat" | "mcp";
         /** BreakGlassLogin */
         BreakGlassLogin: {
             /**
@@ -14077,6 +14090,7 @@ export interface operations {
                 team_id?: string | null;
                 org_id?: string | null;
                 actor_id?: string | null;
+                via?: components["schemas"]["AuditVia"] | null;
                 action?: string | null;
                 resource_type?: string | null;
                 resource_id?: string | null;

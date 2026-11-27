@@ -18,7 +18,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from lumewarp_control_plane.models import ActorType, AuditLog, Team
+from lumewarp_control_plane.models import ActorType, AuditLog, AuditVia, Team
 from lumewarp_control_plane.security import Principal
 
 log = logging.getLogger(__name__)
@@ -456,6 +456,13 @@ def actor_of(principal: Principal) -> tuple[ActorType, str | None]:
     return ActorType.USER, str(principal.user_id)
 
 
+def via_of(principal: Principal) -> AuditVia | None:
+    """How the principal authenticated; break-glass is only ever a cookie session."""
+    if principal.via is None and principal.is_break_glass:
+        return AuditVia.SESSION
+    return principal.via
+
+
 def record(
     session: AsyncSession,
     *,
@@ -468,23 +475,30 @@ def record(
     team_id: uuid.UUID | None = None,
     org_id: uuid.UUID | None = None,
     details: Mapping[str, Any] | None = None,
+    via: AuditVia | None = None,
 ) -> AuditLog:
     """Add an audit row to the caller's transaction (commit together with the change).
 
     Pass `principal` for API callers, or `actor_type`/`actor_id` for gateways and system
-    jobs (e.g. ActorType.SYSTEM, "budget"). A team-scoped row gets the team's current org,
+    jobs (e.g. ActorType.SYSTEM, "budget"). `via` comes from the principal (session, PAT or
+    MCP); gateway and system rows leave it NULL, and a break-glass actor is a session. A
+    team-scoped row gets the team's current org,
     read in the same INSERT so no call site can forget it; a caller that deletes the team
     in the same transaction passes `org_id` explicitly.
     """
     if principal is not None:
         actor_type, actor_id = actor_of(principal)
+        via = via_of(principal)
     if actor_type is None:
         raise ValueError("audit.record needs a principal or an actor_type")
+    if via is None and actor_type is ActorType.BREAK_GLASS:
+        via = AuditVia.SESSION
     if team_id is not None and org_id is None:
         org_id = select(Team.org_id).where(Team.id == team_id).scalar_subquery()
     row = AuditLog(
         actor_type=actor_type,
         actor_id=actor_id,
+        via=via,
         action=action,
         resource_type=resource_type,
         resource_id=str(resource_id) if resource_id is not None else None,

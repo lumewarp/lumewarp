@@ -10,8 +10,8 @@ import { RadioGroup, RadioGroupItem } from "./ui/radio-group";
 
 
 /**
- * The picker's groups and "via <group>" map for one level. A group with any member outside `scope` is
- * disabled (it could not be granted whole); one already chosen stays enabled so it can be unchecked.
+ * The picker's groups and "via <group>" map for one level. A group with any member outside `scope` is not
+ * offered (it could not be granted whole); one already chosen stays so it can be unchecked.
  */
 export function useGroupChoices(scope: string[] | null, chosen: string[], enabled = true) {
   const groups = useModelGroups(enabled);
@@ -20,15 +20,10 @@ export function useGroupChoices(scope: string[] | null, chosen: string[], enable
     const catalogNames = new Set((catalog.data ?? []).map((entry) => entry.name));
     const allowed = scope ? new Set(scope) : null;
     const list: ModelGroup[] = groups.data ?? [];
-    const picker: PickerGroup[] = list.map((group) => {
-      const outside = allowed ? group.members.filter((member) => !allowed.has(member.name)).map((member) => member.name) : [];
-      const blocked = outside.length > 0 && !chosen.includes(group.name);
-      return {
-        name: group.name,
-        disabled: blocked,
-        reason: blocked ? `Not offered: ${outside.join(", ")} ${outside.length === 1 ? "is" : "are"} outside what the level above allows.` : undefined,
-      };
-    });
+    // Only groups the level above allows whole are offered; one already chosen stays so it can be unticked.
+    const picker: PickerGroup[] = list
+      .filter((group) => !allowed || chosen.includes(group.name) || group.members.every((member) => allowed.has(member.name)))
+      .map((group) => ({ name: group.name }));
     const covered: Record<string, string> = {};
     for (const group of list) {
       if (!chosen.includes(group.name)) continue;
@@ -54,6 +49,8 @@ function useGrantList(grant: ModelGrant, onChange: (grant: ModelGrant) => void, 
 
 interface Props {
   isTeam?: boolean;
+  /** The org's own policy: `all` is every name rather than the level above's. */
+  isOrg?: boolean;
   access: ModelAccess;
   onAccess: (a: ModelAccess) => void;
   selected: string[];
@@ -69,11 +66,14 @@ interface Props {
 }
 
 /**
- * Who may call what, by name: team = All | Selected, member / service account = Inherit | Selected.
+ * Who may call what, by name: org = All | Selected, team / member / service account = Inherit | Selected.
  * Selected shows every model, alias, router and model group the level above allows (CatalogMultiSelect).
  */
-export function PermissionPicker({ isTeam, access, onAccess, selected, onSelected, selectedGroups, onSelectedGroups, scope, parentName = isTeam ? "the org" : "the team", error }: Props) {
-  const first = isTeam ? ({ value: "all", label: "All", hint: "Every name, including ones added later." } as const) : ({ value: "inherit", label: "Inherit", hint: `Whatever ${parentName} allows.` } as const);
+export function PermissionPicker({ isTeam, isOrg, access, onAccess, selected, onSelected, selectedGroups, onSelectedGroups, scope, parentName = isTeam ? "the org" : "the team", error }: Props) {
+  // A team stores `all` (it has no `inherit`), which keeps whatever its org allows: only the org's `all` is every name.
+  const first = isOrg
+    ? ({ value: "all", label: "All", hint: "Every name, including ones added later." } as const)
+    : ({ value: isTeam ? "all" : "inherit", label: "Inherit", hint: `Whatever ${parentName} allows, including names it adds later.` } as const);
   const { choices, selected: list, change } = useGrantList({ names: selected, groups: selectedGroups }, (grant) => {
     onSelected(grant.names);
     onSelectedGroups(grant.groups);
@@ -83,7 +83,7 @@ export function PermissionPicker({ isTeam, access, onAccess, selected, onSelecte
       <legend className="mb-1 text-sm font-semibold">
         <span className="flex items-center gap-1">
           Model access
-          <HelpTip label="Model access" text={access === "list" ? `Only the names and groups ticked below, within what ${parentName} allows; none ticked denies everything.` : first.hint} />
+          <HelpTip label="Model access" text={access === "list" ? `Only the names and groups ticked below${isOrg ? "" : `, within what ${parentName} allows`}; none ticked denies everything.` : first.hint} />
         </span>
       </legend>
       <RadioGroup value={access === "list" ? "list" : first.value} onValueChange={(v) => onAccess(v as ModelAccess)} aria-label="Model access" className="flex flex-wrap gap-x-5 gap-y-2" aria-invalid={!!error}>
@@ -107,7 +107,7 @@ export function PermissionPicker({ isTeam, access, onAccess, selected, onSelecte
             groups={choices.picker}
             covered={choices.covered}
             outsideText={`(outside ${parentName}'s scope)`}
-            emptyText={`No models, aliases or routers ${isTeam ? "exist yet" : "are available here"}.`}
+            emptyText={`No models, aliases or routers ${isOrg ? "exist yet" : "are available here"}.`}
           />
         </div>
       )}

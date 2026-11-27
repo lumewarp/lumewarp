@@ -28,7 +28,8 @@ replaced by `_`, and the value must be at least 32 characters.
 The bearer scheme accepts PATs only. Nothing else authenticates to the admin API. No
 credential is stored in plaintext: the OIDC nonce and PKCE verifier live only in the
 encrypted login cookie, and an upstream stores only its `api_key_ref` name, a sealed key,
-or a WASM auth plugin's non-secret settings.
+or a WASM auth plugin's non-secret settings. Every response that carries a one-time secret,
+such as a new or rotated key or a new PAT, is sent with `Cache-Control: no-store`.
 
 Installation admins live in Postgres (`installation_admins`). The first login whose email
 matches `LUMEWARP_INITIAL_ADMIN_EMAIL` becomes the `proxy_admin`; the email must also pass the
