@@ -29,8 +29,8 @@ function Label({ row, by }: { row: LeaderboardRow; by: By }) {
     <span
       className={
         anonymous
-          ? "text-muted-foreground"
-          : "font-medium [overflow-wrap:anywhere]"
+          ? "text-sm text-muted-foreground"
+          : "text-sm font-medium [overflow-wrap:anywhere]"
       }
     >
       {row.label}
@@ -81,7 +81,7 @@ function Board({ by, zone, lens, routing, query }: { lens: UsageLens; by: By; zo
       <ol className="m-0 grid list-none gap-3 p-0">
         {rows.map((row, at) => (
           <li key={`${row.zone}|${row.rank}|${row.label}`} className={grid} data-testid="leaderboard-row">
-            <span className="text-muted-foreground tabular-nums">{at + 1}</span>
+            <span className="text-xs leading-5 text-muted-foreground tabular-nums">{at + 1}</span>
             <div className="min-w-0">
               <span className="flex min-w-0 flex-wrap items-center gap-1.5">
                 <Label row={row} by={by} />
@@ -89,13 +89,13 @@ function Board({ by, zone, lens, routing, query }: { lens: UsageLens; by: By; zo
                 {routing && by === "called" && row.called_kind && KIND_LABEL[row.called_kind] && <Badge>{KIND_LABEL[row.called_kind]}</Badge>}
                 {!zone && row.zone && <Badge tone="info">{row.zone}</Badge>}
               </span>
-              <span className="mt-1 block h-1.5 w-full max-w-[18rem] overflow-hidden rounded-full bg-muted" aria-hidden="true">
+              <span className="mt-1 block h-1.5 w-full overflow-hidden rounded-full bg-muted" aria-hidden="true">
                 <span className="block h-full bg-primary" style={{ width: `${(value(row) / peak) * 100}%` }} />
               </span>
             </div>
             <div className="col-start-2 flex gap-3 text-sm text-muted-foreground sm:contents">
               {columns.map((c) => (
-                <span key={c} data-column={c} className={cn("tabular-nums sm:text-right sm:text-sm", c === strong ? "font-semibold text-foreground" : "sm:text-foreground")}>
+                <span key={c} data-column={c} className={cn("text-sm tabular-nums sm:text-right", c === strong ? "font-semibold text-foreground" : "sm:text-foreground")}>
                   <Cell row={row} column={c} />
                 </span>
               ))}

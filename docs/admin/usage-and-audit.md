@@ -107,9 +107,10 @@ their own; otherwise they would repeat the total under an anonymous label.
 **Group by** (`group_by=day,<dimension>` or `hour,<dimension>` with the page's filters;
 **Day** is a single series). Click a legend entry to hide or show its series; **Show all**
 brings every series back. The top eight series by the chosen metric keep a palette colour and the rest fold
-into **Other**, whose names the tooltip and legend list. Except when grouped by **Day**, the chart type switches between
-stacked bars over local days or hours, a share donut and ranked bars, and, on the Usage view, the
-metric between tokens, requests and errors (kept per browser). A model with no price is named and left out of
+into **Other**, whose names the tooltip and legend list. The chart is stacked bars over local days or hours.
+On the Usage view the metric switches between tokens, requests and errors (kept per browser); with
+**Errors** the bars split each slot into successful and failed requests in two colours instead of one
+series per name. A model with no price is named and left out of
 cost instead of being drawn as zero; **Show data table** lists the same numbers as text.
 
 On the Usage view the table adds the error share and p95 latency per row (p95 is empty where the answer came

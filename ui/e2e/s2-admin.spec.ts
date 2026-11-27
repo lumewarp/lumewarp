@@ -50,12 +50,17 @@ test("audit: the Team filter is a combobox that sends team_id, and the log narro
   await pick(page, "Team", "All teams");
   const all = page.getByRole("combobox", { name: "Team" });
   await expect(all).toContainText("All teams");
-  await expect(cell("s2-audit-other")).toBeVisible();
-  // Both teams stay selectable after clearing.
+  // Unfiltered, the page shows rows of other teams or none. Not a particular team's row: the page's own
+  // audited requests (break-glass sessions) can fill the first page and push it to a later one.
+  // nth(1): the header row has no team cell either.
+  await expect(page.getByRole("row").filter({ hasNot: cell("s2-audit-team") }).nth(1)).toBeVisible();
+  // Both teams stay selectable after clearing, and the other team's filter shows only its rows.
   await pick(page, "Team", "s2-audit-team");
   await expect(all).toContainText("s2-audit-team");
   await pick(page, "Team", "s2-audit-other");
   await expect(all).toContainText("s2-audit-other");
+  await expect(cell("s2-audit-other")).toBeVisible();
+  await expect(cell("s2-audit-team")).toHaveCount(0);
 });
 
 test("account menu roles, the old settings URL, and users: buttons and pager render and work", async ({ page }) => {
