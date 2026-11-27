@@ -207,7 +207,7 @@ export function DataTable<T>({ columns, rows, rowKey, loading, error, onRetry, e
                 return (
                   <TableHead key={c.key} scope="col" className={cn(c.align === "right" && "text-right", c.hideBelow && HIDE[c.hideBelow])} style={c.width ? { width: c.width } : undefined} aria-sort={active ? (sort.dir === 1 ? "ascending" : "descending") : undefined}>
                     {c.sort ? (
-                      <Button type="button" variant="ghost" size="sm" className="-mx-2 h-7 gap-1 px-2 text-left font-[inherit] uppercase tracking-[0.04em] text-[inherit] hover:text-foreground" onClick={() => toggle(c.key)}>
+                      <Button type="button" variant="ghost" size="sm" className="-mx-2 h-7 gap-1 px-2 text-left font-[inherit] text-[length:inherit] uppercase tracking-[0.04em] text-[inherit] hover:text-foreground" onClick={() => toggle(c.key)}>
                         {c.header}
                         {active && (sort.dir === 1 ? <ArrowUp className="size-3" aria-hidden="true" /> : <ArrowDown className="size-3" aria-hidden="true" />)}
                       </Button>

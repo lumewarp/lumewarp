@@ -126,7 +126,7 @@ type Row = UsageRow;
 export function Stat({ label, value, title }: { label: string; value: string; title?: string }) {
   return (
     <Card className="gap-0 p-3.5">
-      <div className="text-muted-foreground">{label}</div>
+      <div className="text-xs text-muted-foreground">{label}</div>
       <div className="text-2xl font-bold tabular-nums" title={title}>
         {value}
       </div>
@@ -586,14 +586,12 @@ function LlmUsage({ range, lens }: { range: RangeProps; lens: UsageLens }) {
         <SelectField label="Group by" value={groupBy} onChange={setGroupBy} options={groupOptions} />
       </FilterBar>
       <Insights filters={{ ...filters, group_by: undefined }} admin={routing} ranged={ranged} lens={lens} bucket={bucket} slots={slots} singleZone={!range.zone.all} />
-      {!costLens && total.audio > 0 && <p className="text-muted-foreground">Audio transcribed: {fmtSeconds(total.audio)} s.</p>}
       {costLens && total.unpriced > 0 && <p className="text-muted-foreground">{n(total.unpriced)} request(s) had no price configured and are counted at $0.</p>}
       <div className="my-4">
         <UsageChart
           rows={ranged ? chart.data : []}
           labelOf={seriesLabel}
           dimLabel={dimLabel}
-          singleSeries={chartDim === "day"}
           slots={slots}
           bucket={bucket}
           rangeLabel={rangeText(range)}

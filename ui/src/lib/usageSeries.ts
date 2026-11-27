@@ -68,6 +68,8 @@ export interface Series {
   total: number;
   /** The names folded into Other. */
   members: string[];
+  /** A fixed colour (the outcome series); otherwise the palette slot paints it. */
+  color?: string;
 }
 
 export interface Built {
@@ -131,6 +133,31 @@ export function buildSeries(rows: UsageRow[] | undefined, days: string[], metric
     unknown: metric === "cost" ? drawn.reduce((sum, name) => sum + byName.get(name)!.unknown, 0) : 0,
     requests,
   };
+}
+
+/**
+ * The Errors metric's chart: two series per slot over every row whatever its name, `Success` (requests without an
+ * error) and `Error` (`error_count`), in fixed success and destructive colours.
+ */
+export function buildOutcomeSeries(rows: UsageRow[] | undefined, days: string[], bucket: Bucket = "day"): Built {
+  const index = new Map(days.map((day, at) => [day, at]));
+  const ok = days.map(() => 0);
+  const failed = days.map(() => 0);
+  let requests = 0;
+  for (const row of rows ?? []) {
+    const at = index.get(bucketKey(row, bucket));
+    if (at === undefined) continue;
+    // error_count never exceeds requests (both come from the same events); the clamp only keeps a bar from going negative.
+    ok[at] += Math.max(0, row.requests - row.error_count);
+    failed[at] += row.error_count;
+    requests += row.requests;
+  }
+  const sum = (cells: number[]) => cells.reduce((total, value) => total + value, 0);
+  const series: Series[] = [
+    { name: "Success", slot: 0, cells: ok, total: sum(ok), members: [], color: "var(--success)" },
+    { name: "Error", slot: 1, cells: failed, total: sum(failed), members: [], color: "var(--destructive)" },
+  ];
+  return { days, series, dayTotals: days.map((_, at) => ok[at] + failed[at]), unpriced: [], unknown: 0, requests };
 }
 
 /** A series colour: the palette tokens have light and dark values of their own. */
