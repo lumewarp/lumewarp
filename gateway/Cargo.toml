@@ -4,7 +4,7 @@ members = ["crates/*", "crates/lumewarp-plugin-sdk/schema"]
 exclude = ["plugins/router/cheapest-first", "plugins/router/priority-failover"]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.89"
 license = "Apache-2.0"

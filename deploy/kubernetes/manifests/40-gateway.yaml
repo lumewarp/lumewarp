@@ -6,7 +6,7 @@ metadata:
   labels:
     app.kubernetes.io/name: lumewarp
     app.kubernetes.io/instance: lumewarp
-    app.kubernetes.io/version: "0.4.0"
+    app.kubernetes.io/version: "0.5.0"
     app.kubernetes.io/component: gateway
 data:
   # Control-plane mode only reads the `server:` block from --local-config; upstreams,
@@ -27,7 +27,7 @@ metadata:
   labels:
     app.kubernetes.io/name: lumewarp
     app.kubernetes.io/instance: lumewarp
-    app.kubernetes.io/version: "0.4.0"
+    app.kubernetes.io/version: "0.5.0"
     app.kubernetes.io/component: gateway
 spec:
   type: ClusterIP
@@ -55,7 +55,7 @@ metadata:
   labels:
     app.kubernetes.io/name: lumewarp
     app.kubernetes.io/instance: lumewarp
-    app.kubernetes.io/version: "0.4.0"
+    app.kubernetes.io/version: "0.5.0"
     app.kubernetes.io/component: gateway
 spec:
   replicas: 1
@@ -71,7 +71,7 @@ spec:
         app.kubernetes.io/instance: lumewarp
         app.kubernetes.io/component: gateway
       annotations:
-        checksum/config: 1d18e525c9fc190b74aa03e39775a137812f562d7a49708f4a72dcde39f4d18b
+        checksum/config: 576aef657448d1ba9ad01ad9225b64623cad7b5e911d99502db33bb729c66ac5
     spec:
       automountServiceAccountToken: false
       securityContext:
@@ -83,7 +83,7 @@ spec:
       terminationGracePeriodSeconds: 35
       containers:
         - name: gateway
-          image: "ghcr.io/lumewarp/lumewarp-gateway:0.4.0"
+          image: "ghcr.io/lumewarp/lumewarp-gateway:0.5.0"
           imagePullPolicy: IfNotPresent
           # The image must put the gateway binary on PATH.
           command:
