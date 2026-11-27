@@ -137,8 +137,8 @@ ModelSet = frozenset[str] | None
 
 
 def narrow(parent: ModelSet, mode: ModelAccess, allowed: Sequence[str]) -> ModelSet:
-    """One level of allowlist inheritance. INHERIT and ALL keep the parent's set (ALL on
-    a team is the universal set); LIST intersects. An empty LIST is deny-all.
+    """One level of allowlist inheritance. INHERIT and ALL keep the parent's set (only
+    ALL on the root, an org, is the universal set); LIST intersects. An empty LIST is deny-all.
     """
     if mode is not ModelAccess.LIST:
         return parent

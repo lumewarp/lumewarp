@@ -32,13 +32,14 @@ function Legend({ title, hint }: { title: string; hint: string }) {
 }
 
 /**
- * The level choice: every target, or the ones ticked. A member or service account that names none of its own
- * says "Same as the team" instead of the model picker's "Inherit", so each group's options read on their own
- * (three groups named "All"/"Selected" in one dialog would be ambiguous to a reader and to a screen reader).
+ * The level choice: every target, or the ones ticked. A level below the org that names none of its own says
+ * "Same as the team"/"Same as the org" instead of the model picker's "Inherit", so each group's options read on
+ * their own (three groups named "All"/"Selected" in one dialog would be ambiguous to a reader and to a screen
+ * reader). A team stores `all`, which keeps whatever its org allows; only the org's `all` is every target.
  */
-function AccessChoice({ legend, what, isTeam, access, onAccess, error }: { legend: string; what: string; isTeam?: boolean; access: ModelAccess; onAccess: (a: ModelAccess) => void; error?: string }) {
+function AccessChoice({ legend, what, isTeam, isOrg, access, onAccess, error }: { legend: string; what: string; isTeam?: boolean; isOrg?: boolean; access: ModelAccess; onAccess: (a: ModelAccess) => void; error?: string }) {
   const options = [
-    isTeam ? { value: "all", label: `Every ${what}` } : { value: "inherit", label: "Same as the team" },
+    isOrg ? { value: "all", label: `Every ${what}` } : isTeam ? { value: "all", label: "Same as the org" } : { value: "inherit", label: "Same as the team" },
     { value: "list", label: `Chosen ${what}s` },
   ] as const;
   return (
@@ -183,6 +184,7 @@ function ServerGrant({
 
 interface McpProps {
   isTeam?: boolean;
+  isOrg?: boolean;
   access: ModelAccess;
   onAccess: (access: ModelAccess) => void;
   selected: McpGrant[];
@@ -197,7 +199,7 @@ interface McpProps {
  * definitions (`kind: tool`, any state) — a grant may only name tools the control plane has seen — and the
  * catalog is read only while a list is chosen and the caller may read the routing catalog at all.
  */
-export function McpGrants({ isTeam, access, onAccess, selected, onSelected, scope, error }: McpProps) {
+export function McpGrants({ isTeam, isOrg, access, onAccess, selected, onSelected, scope, error }: McpProps) {
   const perms = useCan();
   // Servers, definitions and agents are the installation-admin routing catalog; a narrower caller works from
   // the parent level's own grants, which are exactly what it may hand down.
@@ -230,15 +232,15 @@ export function McpGrants({ isTeam, access, onAccess, selected, onSelected, scop
         title="MCP access"
         hint={
           access === "list"
-            ? isTeam
+            ? isOrg
               ? "Only the servers and tools ticked below."
-              : "Only the servers and tools ticked below, within what the team allows; nothing ticked denies every server."
-            : isTeam
+              : `Only the servers and tools ticked below, within what the ${isTeam ? "org" : "team"} allows; nothing ticked denies every server.`
+            : isOrg
               ? "Every server, including ones added later."
-              : "Whatever the team allows."
+              : `Whatever the ${isTeam ? "org" : "team"} allows.`
         }
       />
-      <AccessChoice legend="MCP access" what="server" isTeam={isTeam} access={access} onAccess={onAccess} error={error} />
+      <AccessChoice legend="MCP access" what="server" isTeam={isTeam} isOrg={isOrg} access={access} onAccess={onAccess} error={error} />
       {access === "list" && (
         <div className="flex max-h-80 flex-col gap-3 overflow-y-auto rounded-md border p-3" data-testid="mcp-grant-options">
           {catalog.isPending && canReadCatalog && <Skeleton className="h-4 w-full" />}
@@ -286,6 +288,7 @@ export function McpGrants({ isTeam, access, onAccess, selected, onSelected, scop
 
 interface AgentProps {
   isTeam?: boolean;
+  isOrg?: boolean;
   access: ModelAccess;
   onAccess: (access: ModelAccess) => void;
   selected: string[];
@@ -296,7 +299,7 @@ interface AgentProps {
 }
 
 /** Which A2A agents a level may call; an agent is granted whole, so a name is the whole choice. */
-export function AgentGrants({ isTeam, access, onAccess, selected, onSelected, scope, error }: AgentProps) {
+export function AgentGrants({ isTeam, isOrg, access, onAccess, selected, onSelected, scope, error }: AgentProps) {
   const perms = useCan();
   const catalog = useA2aAgents(access === "list" && perms.canReadRouting);
   const offered = useMemo(
@@ -312,15 +315,15 @@ export function AgentGrants({ isTeam, access, onAccess, selected, onSelected, sc
         title="A2A access"
         hint={
           access === "list"
-            ? isTeam
+            ? isOrg
               ? "Only the agents ticked below."
-              : "Only the agents ticked below, within what the team allows; nothing ticked denies every agent."
-            : isTeam
+              : `Only the agents ticked below, within what the ${isTeam ? "org" : "team"} allows; nothing ticked denies every agent.`
+            : isOrg
               ? "Every agent, including ones added later."
-              : "Whatever the team allows."
+              : `Whatever the ${isTeam ? "org" : "team"} allows.`
         }
       />
-      <AccessChoice legend="A2A access" what="agent" isTeam={isTeam} access={access} onAccess={onAccess} error={error} />
+      <AccessChoice legend="A2A access" what="agent" isTeam={isTeam} isOrg={isOrg} access={access} onAccess={onAccess} error={error} />
       {access === "list" && (
         <div className="flex max-h-72 flex-col gap-3 overflow-y-auto rounded-md border p-3" data-testid="agent-grant-options">
           {catalog.isPending && perms.canReadRouting && <Skeleton className="h-4 w-full" />}

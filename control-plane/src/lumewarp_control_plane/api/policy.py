@@ -448,6 +448,10 @@ def check_narrowing(
 ) -> None:
     """Raise 422 if a changed value widens a limit or (with `check_models`) a model list.
 
+    ALL below the root is never a widening: like INHERIT it resolves to the parent's set
+    (`quota.effective`, the compiler's `narrow()`), so a team at ALL under a restricted
+    org is simply "everything the org allows".
+
     `base` is the stored policy of the same level: fields it leaves unchanged are never
     rechecked, so a parent that shrank below them is legitimate. On create (`base is
     None`) every supplied value counts as changed.
@@ -459,9 +463,6 @@ def check_narrowing(
             return True
         return getattr(base, name) != getattr(policy, name)
 
-    if check_models and changed("model_access") and policy.model_access is ModelAccess.ALL:
-        if parent.models is not None:
-            raise violation(field("model_access"), "cannot widen to all under a restricted parent")
     if check_models and (
         changed("allowed_models") or changed("allowed_groups") or changed("model_access")
     ):
@@ -475,9 +476,6 @@ def check_narrowing(
                     field("allowed_models"),
                     f"models not allowed by parent: {', '.join(extra)}",
                 )
-    if changed("mcp_access") and policy.mcp_access is ModelAccess.ALL:
-        if parent.mcp is not None:
-            raise violation(field("mcp_access"), "cannot widen to all under a restricted parent")
     if changed("mcp_access") or changed("mcp_grants"):
         if policy.mcp_access is ModelAccess.LIST and parent.mcp is not None:
             for grant in policy.mcp_grants:
@@ -500,9 +498,6 @@ def check_narrowing(
                         field("mcp_servers"),
                         f"tools of {grant.server!r} not allowed by parent: {', '.join(extra)}",
                     )
-    if changed("a2a_access") and policy.a2a_access is ModelAccess.ALL:
-        if parent.agents is not None:
-            raise violation(field("a2a_access"), "cannot widen to all under a restricted parent")
     if changed("a2a_access") or changed("a2a_agents"):
         if policy.a2a_access is ModelAccess.LIST and parent.agents is not None:
             own = set(policy.a2a_agents)

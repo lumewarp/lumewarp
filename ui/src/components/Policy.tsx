@@ -98,8 +98,10 @@ interface Props {
   values: PolicyValues;
   errors: Partial<Record<keyof PolicyValues, string>>;
   set<K extends keyof PolicyValues>(k: K, v: PolicyValues[K]): void;
-  /** Teams have no parent to inherit from. */
+  /** A team or an org: its first choice is `all` rather than `inherit`. */
   isTeam?: boolean;
+  /** The org's own policy, the root: only there does `all` mean every name. */
+  isOrg?: boolean;
   /** The team a member or service account belongs to: its names bound what can be picked. */
   team?: Team;
   /** The level above a team: the org whose policy bounds it. Unset on an org's own policy. */
@@ -115,7 +117,7 @@ function targetScope(p: PolicyOut | undefined) {
   };
 }
 
-export function PolicyFields({ values, errors, set, isTeam, team, parent }: Props) {
+export function PolicyFields({ values, errors, set, isTeam, isOrg, team, parent }: Props) {
   // Names a level may hand down: a team's list is bounded by its org's effective models, a member's by the team's.
   const scope = (isTeam ? parent?.effective_models : team?.effective_models) ?? null;
   // A member or service account narrows its team; a team narrows its org.
@@ -123,9 +125,9 @@ export function PolicyFields({ values, errors, set, isTeam, team, parent }: Prop
   const zone = useZone();
   return (
     <>
-      <PermissionPicker isTeam={isTeam} access={values.model_access} onAccess={(a) => set("model_access", a)} selected={values.allowed_models} onSelected={(names) => set("allowed_models", names)} selectedGroups={values.allowed_groups} onSelectedGroups={(groups) => set("allowed_groups", groups)} scope={scope} parentName={isTeam ? "the org" : "the team"} error={errors.model_access ?? errors.allowed_models} />
-      <McpGrants isTeam={isTeam} access={values.mcp_access} onAccess={(a) => set("mcp_access", a)} selected={values.mcp_servers} onSelected={(grants) => set("mcp_servers", grants)} scope={targets.mcp} error={errors.mcp_access ?? errors.mcp_servers} />
-      <AgentGrants isTeam={isTeam} access={values.a2a_access} onAccess={(a) => set("a2a_access", a)} selected={values.a2a_agents} onSelected={(names) => set("a2a_agents", names)} scope={targets.agents} error={errors.a2a_access ?? errors.a2a_agents} />
+      <PermissionPicker isTeam={isTeam} isOrg={isOrg} access={values.model_access} onAccess={(a) => set("model_access", a)} selected={values.allowed_models} onSelected={(names) => set("allowed_models", names)} selectedGroups={values.allowed_groups} onSelectedGroups={(groups) => set("allowed_groups", groups)} scope={scope} parentName={isTeam ? "the org" : "the team"} error={errors.model_access ?? errors.allowed_models} />
+      <McpGrants isTeam={isTeam} isOrg={isOrg} access={values.mcp_access} onAccess={(a) => set("mcp_access", a)} selected={values.mcp_servers} onSelected={(grants) => set("mcp_servers", grants)} scope={targets.mcp} error={errors.mcp_access ?? errors.mcp_servers} />
+      <AgentGrants isTeam={isTeam} isOrg={isOrg} access={values.a2a_access} onAccess={(a) => set("a2a_access", a)} selected={values.a2a_agents} onSelected={(names) => set("a2a_agents", names)} scope={targets.agents} error={errors.a2a_access ?? errors.a2a_agents} />
       <div className="flex items-center gap-1 border-t pt-3 text-sm font-semibold" data-testid="limits-heading">
         Limits in {zone.zone?.name || zone.id}
         <HelpTip text="Limits and budget apply to this zone only; switch zones in the header to set another." label="Limits" />
@@ -138,10 +140,10 @@ export function PolicyFields({ values, errors, set, isTeam, team, parent }: Prop
   );
 }
 
-/** How one level's target grants read in a table: every name, none, or how many. */
-function targets(access: ModelAccess, count: number, what: string) {
+/** How one level's target grants read in a table: every name (only an org), inherited, or how many. */
+function targets(access: ModelAccess, count: number, what: string, isOrg: boolean) {
   if (access === "list") return `${count} ${what}${count === 1 ? "" : "s"}`;
-  return access === "all" ? `all ${what}s` : `inherits ${what}s`;
+  return access === "all" && isOrg ? `all ${what}s` : `inherits ${what}s`;
 }
 
 /** "2 models", "1 model + 1 group": what a level's own list holds. */
@@ -152,14 +154,17 @@ function models(p: PolicyOut) {
   return groups ? `${text} + ${groups} group${groups === 1 ? "" : "s"}` : text;
 }
 
-/** One-line summary of a level's policy for tables; limits are the header zone's. */
-export function PolicySummary({ p }: { p: PolicyOut & { limits_by_zone?: Record<string, ZoneLimitsOut> } }) {
+/**
+ * One-line summary of a level's policy for tables; limits are the header zone's. Below the org, `all` keeps
+ * whatever the level above allows, so it reads as inherited.
+ */
+export function PolicySummary({ p, isOrg = false }: { p: PolicyOut & { limits_by_zone?: Record<string, ZoneLimitsOut> }; isOrg?: boolean }) {
   const zone = useZone().id;
   const limits = zoneLimits(p, zone);
   const parts = [
-    p.model_access === "list" ? models(p) : p.model_access === "all" ? "all models" : "inherits models",
-    targets(p.mcp_access ?? "inherit", p.mcp_servers?.length ?? 0, "MCP server"),
-    targets(p.a2a_access ?? "inherit", p.a2a_agents?.length ?? 0, "agent"),
+    p.model_access === "list" ? models(p) : p.model_access === "all" && isOrg ? "all models" : "inherits models",
+    targets(p.mcp_access ?? "inherit", p.mcp_servers?.length ?? 0, "MCP server", isOrg),
+    targets(p.a2a_access ?? "inherit", p.a2a_agents?.length ?? 0, "agent", isOrg),
     limits.rpm_limit != null && `${limits.rpm_limit} rpm`,
     limits.tpm_limit != null && `${limits.tpm_limit} tpm`,
     limits.max_parallel != null && `${limits.max_parallel} parallel`,

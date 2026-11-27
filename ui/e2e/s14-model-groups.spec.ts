@@ -53,7 +53,7 @@ test("a model group is granted down the hierarchy and a key narrows to one model
   await expect(rowOf(page, "s14-pair")).toContainText("2");
   const groups = await admin.get<{ items: { name: string; members: { name: string }[] }[] }>("/model-groups?limit=200");
   expect(groups.items.find((group) => group.name === "s14-pair")?.members.map((member) => member.name).sort()).toEqual(["s14/a", "s14/b"]);
-  // A second group reaches outside the org's list below, so the team picker shows it disabled.
+  // A second group reaches outside the org's list below, so the team picker does not offer it.
   await admin.post("/model-groups", { name: "s14-wide", description: "", members: ["s14/a", "s14/c"] });
 
   // 2. Restrict an org to a list: the picker of a new team offers only that list.
@@ -67,7 +67,7 @@ test("a model group is granted down the hierarchy and a key narrows to one model
   await expect(create.getByRole("checkbox", { name: "s14/b" })).toBeVisible();
   await expect(create.getByRole("checkbox", { name: "s14/c" })).toHaveCount(0);
   await expect(create.getByRole("checkbox", { name: "s14-pair" })).toBeEnabled();
-  await expect(create.getByRole("checkbox", { name: "s14-wide" })).toBeDisabled();
+  await expect(create.getByRole("checkbox", { name: "s14-wide" })).toHaveCount(0);
   // Grant the group, not its members.
   await create.getByRole("checkbox", { name: "s14-pair" }).check();
   await create.getByRole("button", { name: "Create" }).click();

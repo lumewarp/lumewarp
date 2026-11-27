@@ -489,12 +489,12 @@ test("permission picker: team All or Selected, member Inherit or Selected within
   await post(request, "/aliases", { name: "perm-alias", target: r.id });
   await signIn(page, request, "/teams");
 
-  // Team: All | Selected, grouped by Models, Aliases, Routers.
+  // Team: Inherit (its org's names) | Selected, grouped by Models, Aliases, Routers.
   await page.getByRole("button", { name: "New team" }).click();
   let d = dialog(page);
   await d.getByLabel("Name").fill("Perm team");
-  await expect(d.getByRole("radio", { name: "All" })).toBeChecked();
-  await expect(d.getByRole("radio", { name: "Inherit" })).toHaveCount(0);
+  await expect(d.getByRole("radio", { name: "Inherit" })).toBeChecked();
+  await expect(d.getByRole("radio", { name: "All" })).toHaveCount(0);
   await expect(d.getByTestId("permission-options")).toHaveCount(0);
   await d.getByRole("radio", { name: "Selected" }).click();
   const options = d.getByTestId("permission-options");
