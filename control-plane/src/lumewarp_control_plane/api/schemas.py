@@ -2141,6 +2141,14 @@ class AuditOut(ReadModel):
     ts: datetime
     actor_type: str
     actor_id: str | None
+    via: Literal["session", "pat", "mcp"] | None = Field(
+        default=None,
+        description=(
+            "How the caller authenticated: a browser session, a personal access token, or a"
+            " token through the control plane's MCP server. Null for gateway and system"
+            " events and for events recorded before this field existed."
+        ),
+    )
     action: str
     resource_type: str
     resource_id: str | None

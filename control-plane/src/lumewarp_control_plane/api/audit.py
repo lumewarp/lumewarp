@@ -30,7 +30,7 @@ from lumewarp_control_plane.api.key_refs import key_refs
 from lumewarp_control_plane.api.schemas import AuditOut, Page
 from lumewarp_control_plane.authz import Action, Authz
 from lumewarp_control_plane.errors import forbidden, not_found
-from lumewarp_control_plane.models import AuditLog, Org, Team
+from lumewarp_control_plane.models import AuditLog, AuditVia, Org, Team
 
 FromQuery = Annotated[datetime | None, Query(alias="from")]
 ToQuery = Annotated[datetime | None, Query(alias="to")]
@@ -45,6 +45,7 @@ async def list_audit(
     team_id: uuid.UUID | None = None,
     org_id: uuid.UUID | None = None,
     actor_id: str | None = None,
+    via: AuditVia | None = None,
     action: str | None = None,
     resource_type: str | None = None,
     resource_id: str | None = None,
@@ -99,6 +100,8 @@ async def list_audit(
         stmt = stmt.where(AuditLog.org_id == org_id)
     if actor_id is not None:
         stmt = stmt.where(AuditLog.actor_id == actor_id)
+    if via is not None:
+        stmt = stmt.where(AuditLog.via == via)
     if action is not None:
         stmt = stmt.where(AuditLog.action == action)
     if resource_type is not None:

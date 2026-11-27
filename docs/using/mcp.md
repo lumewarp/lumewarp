@@ -4,6 +4,11 @@ The gateway proxies the MCP servers an administrator registered in the key's zon
 cannot reach a server registered only in another zone. It speaks MCP revision 2025-11-25
 over Streamable HTTP, and passes through an upstream that negotiates 2025-06-18.
 
+This page is about the gateway's proxy of upstream MCP servers. To manage Lumewarp itself
+from an MCP client (your keys, usage, requests and incidents), see [Use Lumewarp from an MCP
+client](../self-service/mcp-client.md); that endpoint is on the control plane and takes a
+personal access token, not an `lw-` key.
+
 ## Two endpoints
 
 | Endpoint | What it is |

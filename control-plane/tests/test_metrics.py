@@ -39,6 +39,8 @@ CONTRACT = {
     "lumewarp_cp_a2a_agent_cards": ("counter", {"result"}),
     "lumewarp_cp_mcp_definition_reviews": ("counter", {"action"}),
     "lumewarp_cp_mcp_discover_requests": ("counter", {"result"}),
+    "lumewarp_cp_api_mcp_requests": ("counter", {"method", "outcome"}),
+    "lumewarp_cp_api_mcp_tool_calls": ("counter", {"toolset", "kind", "outcome"}),
 }
 
 

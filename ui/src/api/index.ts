@@ -291,7 +291,7 @@ export const api = {
   status: () => unwrap(client.GET("/api/v1/status")).then((body) => body.items),
   incidents: (query: IncidentsQuery) => unwrap(client.GET("/api/v1/incidents", { params: { query: { limit: 50, ...query } } })),
   incident: (id: string) => unwrap(client.GET("/api/v1/incidents/{incident_id}", { params: { path: { incident_id: id } } })),
-  audit: (query: { team_id?: string; org_id?: string; actor_id?: string; action?: string; resource_type?: string; resource_id?: string; from?: string; to?: string } = {}) =>
+  audit: (query: { team_id?: string; org_id?: string; actor_id?: string; via?: Schemas["AuditVia"]; action?: string; resource_type?: string; resource_id?: string; from?: string; to?: string } = {}) =>
     listAll((c) => unwrap(client.GET("/api/v1/audit", { params: { query: { ...query, ...q(c) } } }))),
 
   gateways: (zone?: string) => listAll((c) => unwrap(client.GET("/api/v1/gateways", { params: { query: { ...q(c), zone } } }))),

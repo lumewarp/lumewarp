@@ -143,6 +143,13 @@ class Settings(BaseSettings):
     # Externally visible base URL of the control plane, used to build the OIDC redirect
     # URI (<public_url>/api/v1/session/oidc/callback). Unset = derived from the request.
     public_url: str | None = None
+    # The user-facing MCP server at `/mcp` (api_mcp/): reads plus the caller's own keys,
+    # authenticated by a personal access token. Off = `/mcp` is a 404.
+    api_mcp_enabled: bool = True
+    # Browser origins allowed to call `/mcp` (comma-separated, e.g. `https://a.example`).
+    # Empty = only the origin of `public_url` (none when that is unset). A request without
+    # an `Origin` header (every non-browser MCP client) is always accepted.
+    api_mcp_allowed_origins: Annotated[list[str], NoDecode] = Field(default_factory=list)
     # Create a user with no grants on first SSO login. Off = only pre-created users
     # (matched by email on first login) may sign in.
     oidc_jit_users: bool = True
@@ -188,6 +195,13 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             value = [item.strip() for item in value.split(",") if item.strip()]
         return [ip_network(item) for item in value]
+
+    @field_validator("api_mcp_allowed_origins", mode="before")
+    @classmethod
+    def _origins(cls, value):
+        if isinstance(value, str):
+            value = [item.strip() for item in value.split(",") if item.strip()]
+        return [item.rstrip("/") for item in value]
 
     @field_validator("alertmanager_token")
     @classmethod

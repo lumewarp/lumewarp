@@ -7,8 +7,9 @@
   new build is picked up immediately;
 - any other GET/HEAD path that looks like a client-side route (no file extension) gets
   `index.html`, so deep links and refreshes work;
-- `/api/*`, `/healthz`, `/readyz` are never answered with the SPA: `/api/*` stays a JSON 404
-  (see `create_app`) and the health routes are registered first.
+- `/api/*`, `/healthz`, `/readyz`, `/mcp` and `/.well-known/*` are never answered with the
+  SPA: `/api/*` stays a JSON 404 (see `create_app`) and the health and MCP routes are
+  registered first.
 """
 
 import logging
@@ -26,7 +27,9 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 IMMUTABLE = "public, max-age=31536000, immutable"
 REVALIDATE = "no-cache"
 # Prefixes (first path segment) that belong to the backend, never to the SPA.
-RESERVED = frozenset({"api", "healthz", "readyz", "docs", "redoc", "openapi.json"})
+RESERVED = frozenset(
+    {"api", "healthz", "readyz", "docs", "redoc", "openapi.json", "mcp", ".well-known"}
+)
 
 
 def _resolve(root: Path, rel: str) -> Path | None:

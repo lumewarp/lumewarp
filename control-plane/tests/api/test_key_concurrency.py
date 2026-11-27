@@ -4,6 +4,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from fastapi import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from lumewarp_control_plane.api import keys, members
@@ -73,6 +74,7 @@ async def test_key_mutation_and_member_removal_do_not_deadlock(
                 key_session,
                 api_settings,
                 client.app.state.metrics,
+                Response(),
             )
         else:
             mutation = keys.revoke_key(key.id, authz, key_session, api_settings)

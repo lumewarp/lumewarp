@@ -16,7 +16,7 @@ from datetime import UTC, datetime, timedelta
 from math import ceil
 from typing import Annotated
 
-from fastapi import APIRouter, Query, Request, status
+from fastapi import APIRouter, Query, Request, Response, status
 from pydantic import Field
 from sqlalchemy import Select, and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -888,6 +888,7 @@ async def create_key(
     session: SessionDep,
     settings: SettingsDep,
     metrics: MetricsDep,
+    response: Response,
 ) -> KeyCreated:
     """Create a virtual API key (`lw-…`). The secret is in this response only. Without
     `service_account_id` the key belongs to the caller, who must belong to or administer the
@@ -898,6 +899,7 @@ async def create_key(
     Limited to 30 attempts per 60 seconds per caller (429).
     """
     await _rate_limit(request, authz, "create", KEY_CREATE_LIMIT, metrics)
+    response.headers["Cache-Control"] = "no-store"
     async with mutation(session):
         await lock_hierarchy(session)
         team = await get_team_or_404(session, authz, team_id)
@@ -1174,6 +1176,7 @@ async def rotate_key(
     session: SessionDep,
     settings: SettingsDep,
     metrics: MetricsDep,
+    response: Response,
     body: KeyRotate | None = None,
 ) -> KeyCreated:
     """Replace the secret in place: same key_id, so usage history continues.
@@ -1183,6 +1186,7 @@ async def rotate_key(
     """
     grace = (body or KeyRotate()).grace_seconds
     await _rate_limit(request, authz, "rotate", KEY_ROTATE_LIMIT, metrics)
+    response.headers["Cache-Control"] = "no-store"
     async with mutation(session):
         await lock_hierarchy(session)
         row = await _get_key(session, authz, key_id)

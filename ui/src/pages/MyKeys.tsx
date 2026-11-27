@@ -5,6 +5,7 @@ import { lazy, Suspense, useState, type ComponentProps, type ReactNode } from "r
 import { api, type Key, type Me } from "../api";
 import { Badge, fmtDate, fmtUsd, InheritedBadge, KeyBadge, ModelPill, PageHeader, SuspendedReason } from "../components/Bits";
 import { ConfirmDialog } from "../components/Confirm";
+import { Dialog } from "../components/Dialog";
 import { CreateButton, IconAction } from "../components/RowActions";
 import { FormDialog, required, SelectField, TextField, useForm } from "../components/Form";
 import { blankKeyLimits, KeyLimitFields, keyLimitsBody, keyCreationBlock, keyRuleNotes, type KeyLimitValues } from "../components/KeyLimits";
@@ -14,6 +15,7 @@ import { DataTable } from "../components/Table";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Badge as UiBadge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
+import { CodeBlock } from "../components/ui/code-block";
 import { Card } from "../components/ui/card";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../components/ui/tooltip";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
@@ -961,31 +963,47 @@ function MyUsage({ teams, userId }: { teams: Team[]; userId: string }) {
   );
 }
 
+/** When a personal access token minted here stops authenticating; the API has no maximum. */
+const TOKEN_EXPIRY = [
+  { value: "none", label: "No expiry" },
+  { value: "30", label: "30 days" },
+  { value: "90", label: "90 days" },
+];
+
+const tokenExpiry = (choice: string) =>
+  choice === "none" ? null : new Date(Date.now() + Number(choice) * 86_400_000).toISOString();
+
 function PersonalAccessTokens() {
   const me = useMe();
   const list = useQuery({ queryKey: ["tokens"], queryFn: () => api.tokens(), enabled: me.data?.kind !== "break_glass" && !!me.data?.user_id });
   const showSecret = useShowSecret();
   const [creating, setCreating] = useState(false);
+  const [connecting, setConnecting] = useState(false);
   const [revoking, setRevoking] = useState<string | null>(null);
-  const form = useForm({ name: "" }, { name: required("Name") });
-  const create = useMut((name: string) =>
-    runTokenSecretMutation(() => api.createToken({ name }), (value) => showSecret({ value, title: "Token created" })),
+  const form = useForm({ name: "", expiry: "90" }, { name: required("Name") });
+  const create = useMut((body: { name: string; expires_at: string | null }) =>
+    runTokenSecretMutation(() => api.createToken(body), (value) => showSecret({ value, title: "Token created" })),
   );
   const revoke = useMut((id: string) => api.revokeToken(id), "Token revoked");
 
   if (me.data && !me.data.user_id) return <><h2 className="mt-6">Personal access tokens</h2><p className="text-muted-foreground">The break-glass session is not tied to a user, so it has no personal access tokens.</p></>;
   return (
     <>
-      <h2 className="mt-6">Personal access tokens</h2>
-      <div className="mb-3 flex flex-wrap items-center justify-end gap-2">
-        <CreateButton
-          onClick={() => {
-            form.reset();
-            setCreating(true);
-          }}
-        >
-          New token
-        </CreateButton>
+      <div className="mt-6 mb-3 flex flex-wrap items-center justify-between gap-2">
+        <h2 className="m-0">Personal access tokens</h2>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button variant="outline" onClick={() => setConnecting(true)}>
+            Connect an MCP client
+          </Button>
+          <CreateButton
+            onClick={() => {
+              form.reset();
+              setCreating(true);
+            }}
+          >
+            New token
+          </CreateButton>
+        </div>
       </div>
       <DataTable
         rows={list.data}
@@ -1002,10 +1020,61 @@ function PersonalAccessTokens() {
           { key: "actions", header: "", cell: (r) => (r.revoked_at ? <Badge>Revoked</Badge> : <div className="flex justify-end gap-1.5 whitespace-nowrap"><Button variant="ghost" size="sm" className="text-destructive hover:bg-destructive/10 hover:text-destructive" onClick={() => setRevoking(r.id)}>Revoke</Button></div>) },
         ]}
       />
-      <FormDialog open={creating} title="New personal access token" submitLabel="Create token" onClose={() => setCreating(false)} onSubmit={() => (form.validate() ? form.run(() => create.mutateAsync(form.values.name)) : false)}>
+      <FormDialog
+        open={creating}
+        title="New personal access token"
+        submitLabel="Create token"
+        onClose={() => setCreating(false)}
+        onSubmit={() =>
+          form.validate()
+            ? form.run(() => create.mutateAsync({ name: form.values.name, expires_at: tokenExpiry(form.values.expiry) }))
+            : false
+        }
+      >
         <TextField label="Name" value={form.values.name} onChange={(v) => form.set("name", v)} error={form.errors.name} autoFocus placeholder="laptop" />
+        <SelectField label="Expiry" value={form.values.expiry} onChange={(value) => form.set("expiry", value)} options={TOKEN_EXPIRY} />
       </FormDialog>
+      <McpConnectDialog open={connecting} onClose={() => setConnecting(false)} />
       <ConfirmDialog open={!!revoking} title="Revoke token" confirmLabel="Revoke" message="Anything using this token stops working immediately." onConfirm={() => revoke.mutateAsync(revoking!)} onClose={() => setRevoking(null)} />
     </>
+  );
+}
+
+/** The control plane serves the MCP server next to the UI, so the snippet follows the page's origin. */
+function McpConnectDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const endpoint = `${window.location.origin}/mcp`;
+  const claudeCode = `claude mcp add --transport http lumewarp ${endpoint} --header "Authorization: Bearer <TOKEN>"`;
+  const mcpJson = JSON.stringify(
+    { mcpServers: { lumewarp: { type: "http", url: endpoint, headers: { Authorization: "Bearer <TOKEN>" } } } },
+    null,
+    2,
+  );
+  return (
+    <Dialog open={open} onClose={onClose} title="Connect an MCP client">
+      <div className="flex flex-col gap-4 text-sm">
+        <p className="m-0 text-muted-foreground">
+          Use a personal access token from above: it carries your full permissions, so give it an expiry.
+        </p>
+        <section className="flex min-w-0 flex-col gap-1.5">
+          <h3 className="m-0 font-semibold">Endpoint</h3>
+          <CodeBlock code={endpoint} label="endpoint URL" />
+        </section>
+        <section className="flex min-w-0 flex-col gap-1.5">
+          <h3 className="m-0 font-semibold">Claude Code</h3>
+          <CodeBlock code={claudeCode} label="Claude Code command" />
+        </section>
+        <section className="flex min-w-0 flex-col gap-1.5">
+          <h3 className="m-0 font-semibold">Cursor / VS Code</h3>
+          <CodeBlock code={mcpJson} label="Cursor and VS Code mcp.json" />
+        </section>
+        <section className="flex min-w-0 flex-col gap-1.5">
+          <h3 className="m-0 font-semibold">claude.ai connector</h3>
+          <p className="m-0 text-muted-foreground">
+            Add a custom connector with the endpoint URL above and set its Request headers to{" "}
+            <code className="font-mono text-xs">Authorization: Bearer &lt;TOKEN&gt;</code>.
+          </p>
+        </section>
+      </div>
+    </Dialog>
   );
 }

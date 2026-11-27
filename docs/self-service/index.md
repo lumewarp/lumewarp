@@ -70,7 +70,9 @@ Rotating again during the grace ends the older secret immediately.
 ## Personal access tokens
 
 To script the management API, create a personal access token (`lwp-…`) under **Personal access tokens** at the bottom of **My keys**.
-It acts as you, with your roles. It does not call models; that is what API keys are for.
+It acts as you, with your roles, and expires after 90 days unless you pick another expiry (30 days, or none) when you create it. It does not call models; that is what API keys are for.
+The same token connects an MCP client to the control plane; see [Use Lumewarp from an MCP
+client](./mcp-client.md).
 
 ## Limits on these actions
 

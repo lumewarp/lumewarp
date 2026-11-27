@@ -249,6 +249,17 @@ class ActorType(enum.StrEnum):
     SYSTEM = "system"
 
 
+class AuditVia(enum.StrEnum):
+    """How an API caller reached the handler: a browser session (OIDC or break-glass), a
+    personal access token, or a PAT through the control plane's MCP server. NULL on rows
+    written by gateways and system jobs, and on rows written before the column existed.
+    """
+
+    SESSION = "session"
+    PAT = "pat"
+    MCP = "mcp"
+
+
 class PluginKind(enum.StrEnum):
     """What a gateway plugin changes (proto PluginKind). The value is the manifest's `kind`,
     and the capability it advertises is `<prefix>:<name>` (see compiler/plugins.py).
@@ -2605,6 +2616,8 @@ class AuditLog(Base):
     actor_type: Mapped[ActorType] = mapped_column(_enum(ActorType, "actor_type"), nullable=False)
     # User id, gateway id, or a fixed name for system jobs.
     actor_id: Mapped[str | None] = mapped_column(String(200))
+    # How an API caller authenticated (NULL for gateways, system jobs and older rows).
+    via: Mapped[AuditVia | None] = mapped_column(_enum(AuditVia, "audit_via"))
     action: Mapped[str] = mapped_column(String(100), nullable=False)
     resource_type: Mapped[str] = mapped_column(String(64), nullable=False)
     resource_id: Mapped[str | None] = mapped_column(String(200))

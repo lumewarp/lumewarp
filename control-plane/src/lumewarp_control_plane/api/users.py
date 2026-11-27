@@ -650,12 +650,14 @@ async def create_own_token(
     body: TokenCreate,
     authz: Authz,
     session: SessionDep,
+    response: Response,
 ) -> TokenCreated:
     """Create a personal access token (`lwp-…`) for the caller. The secret is in this response
     only. A break-glass session cannot own tokens (400).
     """
     if authz.user_id is None:
         raise ApiError(400, "bad_request", "break-glass sessions cannot own personal tokens")
+    response.headers["Cache-Control"] = "no-store"
     return await _issue_token(body, authz.principal, session, authz.user_id, authz=authz)
 
 

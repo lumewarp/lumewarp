@@ -20,7 +20,7 @@ Authentication only establishes who the caller is; what they may do is `authz`'s
 import hashlib
 import secrets
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Annotated
@@ -31,6 +31,7 @@ from sqlalchemy import select, update
 
 from lumewarp_control_plane.db import SessionFactory
 from lumewarp_control_plane.errors import unauthorized
+from lumewarp_control_plane.models import AuditVia as Via
 from lumewarp_control_plane.models import PersonalAccessToken, User
 from lumewarp_control_plane.settings import Settings
 
@@ -65,6 +66,9 @@ SESSION_SCHEME = APIKeyCookie(
     ),
     auto_error=False,
 )
+# ASGI scope extension the control plane's MCP server sets on its in-process requests. A
+# network client cannot set ASGI extensions, so the marker cannot be forged over HTTP.
+VIA_SCOPE_EXTENSION = "lumewarp.via"
 DISPLAY_CHARS = 6
 # PAT last_used_at is refreshed at most this often, so reads don't write on every call.
 LAST_USED_GRANULARITY = timedelta(minutes=1)
@@ -123,6 +127,9 @@ class Principal:
     # Emergency sessions are not users.
     user_id: uuid.UUID | None = None
     token_id: uuid.UUID | None = None
+    # How the caller reached the handler, recorded on audit rows. None only for principals
+    # built in process outside a request (e.g. the bootstrap at first login).
+    via: Via | None = None
 
     @property
     def is_break_glass(self) -> bool:
@@ -162,7 +169,7 @@ async def authenticate(
                 .where(PersonalAccessToken.id == pat.id)
                 .values(last_used_at=now)
             )
-    return Principal(kind=PrincipalKind.USER, user_id=user.id, token_id=pat.id)
+    return Principal(kind=PrincipalKind.USER, user_id=user.id, token_id=pat.id, via=Via.PAT)
 
 
 async def current_principal(
@@ -188,10 +195,18 @@ async def current_principal(
         principal = await authenticate(
             request.app.state.session_factory, token, request.app.state.settings
         )
+        if principal is not None and _via_mcp(request):
+            principal = replace(principal, via=Via.MCP)
     if principal is None:
         raise unauthorized()
     request.state.principal = principal
     return principal
+
+
+def _via_mcp(request: Request) -> bool:
+    """Whether this request is the MCP server's in-process call (an ASGI scope extension)."""
+    extensions = request.scope.get("extensions") or {}
+    return extensions.get(VIA_SCOPE_EXTENSION) == Via.MCP.value
 
 
 CurrentPrincipal = Annotated[Principal, Depends(current_principal)]
